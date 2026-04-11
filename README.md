@@ -34,12 +34,14 @@ Open the app without parameters. A settings form will appear to enter MAC addres
 | `index.html` | App (HTML + CSS + JS, single file) |
 | `manifest.json` | PWA manifest (no `start_url`, preserves URL params) |
 | `sw.js` | Service worker (cache with `ignoreSearch`, auto-update) |
-| `icon.svg` | App icon |
+| `icon-192.png` | App icon 192x192 (Android + iOS home screen) |
+| `icon-512.png` | App icon 512x512 (Android splash screen) |
+| `icon.svg` | Source icon (SVG) |
 
 ## Deployment
 
 1. Create a public GitHub repository
-2. Upload the 4 files
+2. Upload all files (`index.html`, `manifest.json`, `sw.js`, `icon-192.png`, `icon-512.png`, `icon.svg`, `README.md`)
 3. Enable GitHub Pages (Settings > Pages > Deploy from branch `main`)
 4. Share the URL with parameters to your users
 

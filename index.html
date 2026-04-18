@@ -61,6 +61,9 @@
   .power-section{display:flex;flex-direction:column;align-items:center;gap:12px;padding:8px 0}
   .power-ring{position:relative;width:130px;height:130px;display:flex;align-items:center;justify-content:center}
   .power-ring::before{content:'';position:absolute;inset:0;border-radius:50%;border:1px solid var(--border);transition:border-color .4s,opacity .4s;opacity:.5;pointer-events:none}
+  .power-ring::after{content:'';position:absolute;inset:-4px;border-radius:50%;border:2px solid transparent;border-top-color:var(--green);opacity:0;pointer-events:none;transition:opacity .3s}
+  .power-ring:has(.power-btn.sent)::after{opacity:1;animation:spin 1.2s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
   .power-btn{width:106px;height:106px;border-radius:50%;border:3px solid var(--border);background:var(--surface);color:var(--text-dim);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .3s}
   .power-btn:active:not(.online){transform:scale(.93)}
   .power-btn.sent{border-color:var(--green);color:var(--green);box-shadow:0 0 40px var(--green-glow)}
@@ -167,7 +170,7 @@
   </div>
 
   <div class="install-hint" id="installHint"><strong>Astuce :</strong> menu ⋮ → « Ajouter à l'écran d'accueil »</div>
-  <div class="footer">v2.5</div>
+  <div class="footer">v2.6</div>
 </div>
 
 <div class="toast" id="toast"></div>

@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#0c0e14">
+<meta name="mobile-web-app-capable" content="yes">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon-192.png" type="image/png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<title>Plex jqh omv</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:#0c0e14; --surface:#161a25; --surface-hover:#1c2130;
+    --border:#252a3a; --text:#e4e6ef; --text-dim:#6b7194;
+    --accent:#7c6aef; --accent-glow:rgba(124,106,239,.25);
+    --green:#34d399; --green-glow:rgba(52,211,153,.25);
+    --red:#f87171; --red-glow:rgba(248,113,113,.2); --orange:#fbbf24;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html{height:100%}
+  body{
+    font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);
+    min-height:100%;min-height:100dvh;display:flex;flex-direction:column;
+    align-items:center;justify-content:center;padding:24px;
+    padding-top:max(24px,env(safe-area-inset-top));
+    padding-bottom:max(24px,env(safe-area-inset-bottom));
+    -webkit-tap-highlight-color:transparent;-webkit-user-select:none;
+    user-select:none;overflow-y:auto;
+  }
+  body::before{
+    content:'';position:fixed;inset:0;pointer-events:none;z-index:0;
+    background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E");
+  }
+  .screen{position:relative;z-index:1;width:100%;max-width:380px;display:flex;flex-direction:column;align-items:center;gap:24px}
+  .header{text-align:center}
+  .header h1{font-size:22px;font-weight:700;letter-spacing:-.5px;margin-bottom:4px}
+  .header p{font-size:13px;color:var(--text-dim);font-family:'JetBrains Mono',monospace}
+
+  .status-card{width:100%;background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:16px 20px;display:flex;align-items:center;justify-content:space-between;transition:border-color .5s,box-shadow .5s}
+  .status-card.online{border-color:var(--green);box-shadow:0 0 24px var(--green-glow)}
+  .status-card.offline{border-color:var(--red);box-shadow:0 0 24px var(--red-glow)}
+  .status-left{display:flex;align-items:center;gap:14px}
+  .status-dot{width:12px;height:12px;border-radius:50%;background:var(--text-dim);transition:background .4s,box-shadow .4s;flex-shrink:0}
+  .status-dot.online{background:var(--green);box-shadow:0 0 8px var(--green)}
+  .status-dot.offline{background:var(--red);box-shadow:0 0 8px var(--red)}
+  .status-dot.checking{background:var(--orange);animation:pulse 1.2s infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+  .status-label{font-size:15px;font-weight:500}
+  .status-sub{font-size:12px;color:var(--text-dim);font-family:'JetBrains Mono',monospace;margin-top:1px}
+
+  .refresh-btn{background:none;border:1px solid var(--border);color:var(--text-dim);border-radius:10px;width:40px;height:40px;min-width:40px;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:all .2s}
+  .refresh-btn:active{background:var(--surface-hover)}
+  .refresh-btn.spinning svg{animation:spin .8s linear}
+  @keyframes spin{from{transform:rotate(0)}to{transform:rotate(360deg)}}
+
+  .power-section{display:flex;flex-direction:column;align-items:center;gap:12px;padding:8px 0}
+  .power-ring{position:relative;width:130px;height:130px;display:flex;align-items:center;justify-content:center}
+  .power-ring::before{content:'';position:absolute;inset:0;border-radius:50%;border:1px solid var(--border);transition:border-color .4s,opacity .4s;opacity:.5;pointer-events:none}
+  .power-ring::after{content:'';position:absolute;inset:-4px;border-radius:50%;border:2px solid transparent;border-top-color:var(--green);opacity:0;pointer-events:none;transition:opacity .3s}
+  .power-ring:has(.power-btn.sent)::after{opacity:1;animation:spin 1.2s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .power-btn{width:106px;height:106px;border-radius:50%;border:3px solid var(--border);background:var(--surface);color:var(--text-dim);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .3s}
+  .power-btn:active:not(.online){transform:scale(.93)}
+  .power-btn.sent{border-color:var(--green);color:var(--green);box-shadow:0 0 40px var(--green-glow);pointer-events:none}
+  .power-btn.online{border-color:var(--green);color:var(--green);opacity:.35;cursor:default;pointer-events:none}
+  .power-ring:has(.power-btn.sent)::before{border-color:var(--green);opacity:.3}
+  .power-ring:has(.power-btn.online)::before{border-color:var(--green);opacity:.2}
+  .power-btn svg{width:42px;height:42px}
+  .power-label{font-size:13px;color:var(--text-dim);text-align:center;min-height:18px;transition:color .3s}
+  .power-label.sent{color:var(--green)}
+
+  .links{width:100%;display:flex;flex-direction:column;gap:8px}
+  .link-btn{width:100%;padding:14px 18px;background:var(--surface);border:1px solid var(--border);border-radius:14px;color:var(--text);font-family:'DM Sans',sans-serif;font-size:14px;font-weight:500;text-decoration:none;display:flex;align-items:center;gap:12px;transition:all .15s;cursor:pointer;-webkit-tap-highlight-color:transparent}
+  .link-btn:active{background:var(--surface-hover);transform:scale(.98)}
+  .link-icon{width:36px;height:36px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0}
+  .link-icon.seerr{background:rgba(124,106,239,.15);color:var(--accent)}
+  .link-icon.plex{background:rgba(229,167,58,.15);color:#e5a73a}
+  .link-icon.cfg{background:rgba(107,113,148,.15);color:var(--text-dim)}
+  .link-text{line-height:1.3}
+  .link-sub{font-size:11px;color:var(--text-dim);font-family:'JetBrains Mono',monospace}
+
+  .toast{position:fixed;bottom:max(24px,env(safe-area-inset-bottom,24px));left:50%;transform:translateX(-50%) translateY(80px);background:var(--surface);border:1px solid var(--green);border-radius:12px;padding:12px 20px;font-size:13px;color:var(--green);box-shadow:0 8px 32px rgba(0,0,0,.5);opacity:0;transition:all .4s cubic-bezier(.16,1,.3,1);z-index:10;pointer-events:none;white-space:nowrap}
+  .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+  .toast.warn{border-color:var(--orange);color:var(--orange)}
+  .footer{font-size:10px;color:var(--text-dim);font-family:'JetBrains Mono',monospace;opacity:.3}
+  .install-hint{width:100%;background:var(--surface);border:1px solid var(--accent);border-radius:12px;padding:12px 16px;font-size:12px;color:var(--text-dim);text-align:center;display:none}
+  .install-hint strong{color:var(--text)}
+
+  .field{display:flex;flex-direction:column;gap:6px;width:100%}
+  .field label{font-size:13px;font-weight:500;color:var(--text-dim)}
+  .field input{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px 16px;color:var(--text);font-family:'JetBrains Mono',monospace;font-size:14px;outline:none;transition:border-color .2s;-webkit-user-select:text;user-select:text;width:100%}
+  .field input:focus{border-color:var(--accent)}
+  .field input::placeholder{color:var(--text-dim);opacity:.5}
+  .field .hint{font-size:11px;color:var(--text-dim);opacity:.6}
+  .save-btn{width:100%;padding:14px;background:var(--accent);border:none;border-radius:12px;color:white;font-family:'DM Sans',sans-serif;font-size:15px;font-weight:600;cursor:pointer;transition:opacity .2s;margin-top:8px}
+  .save-btn:active{opacity:.8}
+
+</style>
+</head>
+<body>
+
+<!-- Settings screen -->
+<div class="screen" id="settingsScreen" style="display:none;">
+  <div class="header">
+    <h2 style="font-size:20px;font-weight:700">Configuration</h2>
+    <p>Paramètres de connexion</p>
+  </div>
+  <div class="field">
+    <label>Adresse MAC</label>
+    <input type="text" id="cfgMac" placeholder="AABBCCDDEEFF" autocomplete="off" autocapitalize="off">
+  </div>
+  <div class="field">
+    <label>Domaine</label>
+    <input type="text" id="cfgHost" placeholder="monserveur.exemple.com" autocomplete="off" autocapitalize="off">
+  </div>
+  <div class="field">
+    <label>Port WoL</label>
+    <input type="number" id="cfgPort" placeholder="9" autocomplete="off">
+  </div>
+  <button class="save-btn" onclick="saveConfig()">Enregistrer</button>
+</div>
+
+<!-- Main screen -->
+<div class="screen" id="mainScreen" style="display:none;">
+  <div class="header">
+    <h1>Plex jqh omv</h1>
+    <p id="headerSub">Serveur multimédia</p>
+  </div>
+
+  <div class="status-card" id="statusCard">
+    <div class="status-left">
+      <div class="status-dot checking" id="statusDot"></div>
+      <div>
+        <div class="status-label" id="statusLabel">Vérification...</div>
+        <div class="status-sub" id="statusSub">ping en cours</div>
+      </div>
+    </div>
+    <button class="refresh-btn" id="refreshBtn" onclick="checkStatus()">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+    </button>
+  </div>
+
+  <div class="power-section">
+    <div class="power-ring">
+      <button class="power-btn" id="powerBtn" onclick="sendWol()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/></svg>
+      </button>
+    </div>
+    <div class="power-label" id="powerLabel">Allumer le serveur</div>
+  </div>
+
+  <div class="links">
+    <a id="linkSeerr" href="#" target="_blank" rel="noopener" class="link-btn">
+      <div class="link-icon seerr">🎬</div>
+      <div class="link-text">Demander un film / une série<div class="link-sub" id="linkSeerrSub"></div></div>
+    </a>
+    <a href="https://app.plex.tv" target="_blank" rel="noopener" class="link-btn">
+      <div class="link-icon plex">▶</div>
+      <div class="link-text">Regarder sur Plex<div class="link-sub">app.plex.tv</div></div>
+    </a>
+    <div class="link-btn" onclick="showSettings()">
+      <div class="link-icon cfg">⚙</div>
+      <div class="link-text">Paramètres<div class="link-sub">modifier la configuration</div></div>
+    </div>
+  </div>
+
+  <div class="install-hint" id="installHint"><strong>Astuce :</strong> menu ⋮ → « Ajouter à l'écran d'accueil »</div>
+  <div class="footer">v2.9</div>
+</div>
+
+<div class="toast" id="toast"></div>
+<iframe id="wolFrame" style="display:none;"></iframe>
+
+<script>
+var config=null,isOnline=false,wolSent=false,checking=false,checkInterval=null;
+
+function loadConfig(){try{var r=localStorage.getItem('plex-jqh-omv-cfg');if(r)return JSON.parse(r)}catch(e){}return null}
+function storeConfig(c){try{localStorage.setItem('plex-jqh-omv-cfg',JSON.stringify(c))}catch(e){}}
+function cleanMac(m){return m.replace(/[:\-\s]/g,'').toLowerCase()}
+function validMac(m){return /^[0-9a-f]{12}$/.test(m)}
+function showToast(msg,warn){var t=document.getElementById('toast');t.textContent=msg;t.className=warn?'toast warn show':'toast show';setTimeout(function(){t.className='toast'},3000)}
+
+// Read URL params and store config
+function readUrlParams(){
+  var p=new URLSearchParams(window.location.search);
+  var mac=p.get('mac'),host=p.get('host'),port=p.get('port')||'9';
+  if(mac&&host){
+    var cleaned=cleanMac(mac);
+    if(!validMac(cleaned))return false;
+    config={mac:cleaned,host:host,port:port};
+    storeConfig(config);
+    return true;
+  }
+  return false;
+}
+
+function showSettings(){
+  document.getElementById('mainScreen').style.display='none';
+  document.getElementById('settingsScreen').style.display='flex';
+  if(config){
+    document.getElementById('cfgMac').value=config.mac||'';
+    document.getElementById('cfgHost').value=config.host||'';
+    document.getElementById('cfgPort').value=config.port||'9';
+  }
+  if(checkInterval)clearInterval(checkInterval);
+}
+
+function saveConfig(){
+  var mac=document.getElementById('cfgMac').value.trim();
+  var host=document.getElementById('cfgHost').value.trim();
+  var port=document.getElementById('cfgPort').value.trim()||'9';
+  if(!mac||!host){showToast('⚠ MAC et domaine requis',true);return}
+  var cleaned=cleanMac(mac);
+  if(!validMac(cleaned)){showToast('⚠ MAC invalide (12 caractères hex)',true);return}
+  config={mac:cleaned,host:host,port:port};
+  storeConfig(config);
+  startApp();
+}
+
+function startApp(){
+  document.getElementById('settingsScreen').style.display='none';
+  document.getElementById('mainScreen').style.display='flex';
+  document.getElementById('linkSeerr').href='https://'+config.host;
+  document.getElementById('linkSeerrSub').textContent=config.host;
+  document.getElementById('headerSub').textContent=config.host;
+  isOnline=false;wolSent=false;checking=false;
+  checkStatus();
+  if(checkInterval)clearInterval(checkInterval);
+  checkInterval=setInterval(checkStatus,30000);
+  if(!window.matchMedia('(display-mode:standalone)').matches)setTimeout(function(){document.getElementById('installHint').style.display='block'},3000);
+}
+
+function checkStatus(){
+  if(checking||!config)return;checking=true;
+  var dot=document.getElementById('statusDot'),label=document.getElementById('statusLabel'),sub=document.getElementById('statusSub'),card=document.getElementById('statusCard'),btn=document.getElementById('refreshBtn');
+  btn.classList.add('spinning');setTimeout(function(){btn.classList.remove('spinning')},800);
+  dot.className='status-dot checking';card.className='status-card';label.textContent='Vérification...';sub.textContent='ping en cours';
+  var ctrl=new AbortController(),timer=setTimeout(function(){ctrl.abort()},8000);
+  fetch('https://'+config.host,{mode:'no-cors',cache:'no-store',signal:ctrl.signal}).then(function(){clearTimeout(timer);checking=false;setOnline()}).catch(function(){clearTimeout(timer);checking=false;setOffline()});
+}
+
+function setOnline(){
+  isOnline=true;
+  document.getElementById('statusDot').className='status-dot online';
+  document.getElementById('statusCard').className='status-card online';
+  document.getElementById('statusLabel').textContent='En ligne';
+  document.getElementById('statusSub').textContent='serveur accessible';
+  document.getElementById('powerBtn').className='power-btn online';
+  document.getElementById('powerLabel').textContent='Serveur allumé';
+  document.getElementById('powerLabel').className='power-label sent';
+  if(wolSent){showToast('✓ Serveur démarré avec succès');wolSent=false}
+}
+
+function setOffline(){
+  isOnline=false;
+  document.getElementById('statusDot').className='status-dot offline';
+  document.getElementById('statusCard').className='status-card offline';
+  document.getElementById('statusLabel').textContent='Hors ligne';
+  document.getElementById('statusSub').textContent='serveur éteint';
+  if(!wolSent){document.getElementById('powerBtn').className='power-btn';document.getElementById('powerLabel').textContent='Allumer le serveur';document.getElementById('powerLabel').className='power-label'}
+}
+
+function sendWol(){
+  if(isOnline||wolSent||!config)return;
+  var url='https://www.depicus.com/wake-on-lan/woli?m='+config.mac+'&i='+config.host+'&s=255.255.255.255&p='+config.port;
+  document.getElementById('wolFrame').src=url;
+  wolSent=true;
+  document.getElementById('powerBtn').className='power-btn sent';
+  document.getElementById('powerLabel').textContent='Signal envoyé — patientez 2-3 min';
+  document.getElementById('powerLabel').className='power-label sent';
+  showToast('⚡ Magic packet envoyé');
+  setTimeout(checkStatus,60000);setTimeout(checkStatus,120000);setTimeout(checkStatus,180000);
+  setTimeout(function(){if(!isOnline){wolSent=false;document.getElementById('powerBtn').className='power-btn';document.getElementById('powerLabel').textContent='Réessayer';document.getElementById('powerLabel').className='power-label'}},240000);
+}
+
+if('serviceWorker' in navigator){
+  navigator.serviceWorker.register('sw.js').catch(function(){});
+  // Auto-reload when a new SW takes control (cache updated)
+  var refreshing=false;
+  navigator.serviceWorker.addEventListener('controllerchange',function(){
+    if(!refreshing){refreshing=true;window.location.reload();}
+  });
+}
+
+// Init: URL params > localStorage > no config screen
+if(!readUrlParams())config=loadConfig();
+if(config&&config.mac&&config.host)startApp();
+else showSettings();
+</script>
+</body>
+</html>

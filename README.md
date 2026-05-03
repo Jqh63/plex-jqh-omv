@@ -6,7 +6,7 @@ A lightweight PWA to wake and monitor a Plex media server via Wake-on-LAN.
 
 - **Server status** — checks every 30s via HTTPS fetch
 - **Wake-on-LAN** — sends magic packet through [depicus.com](https://www.depicus.com) (hidden iframe)
-- **Auto-retry** — rechecks at 1, 2, 3 min after WoL. Retry available after 4 min
+- **Auto-retry** — rechecks at 1, 2, and 3 min after WoL; manual retry available after 4 min
 - **Quick links** — dynamic Seerr and Plex links based on configured host
 - **Installable PWA** — works on PC, Android (Chrome) and iOS (Safari)
 - **Auto-update** — new service worker triggers automatic page reload

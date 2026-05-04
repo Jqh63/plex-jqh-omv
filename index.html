@@ -176,12 +176,13 @@
 <iframe id="wolFrame" style="display:none;"></iframe>
 
 <script>
-var config=null,isOnline=false,wolSent=false,checking=false,checkInterval=null;
+var config=null,isOnline=false,wolSent=false,checking=false,checkInterval=null,wolTimers=[];
 
 function loadConfig(){try{var r=localStorage.getItem('plex-jqh-omv-cfg');if(r)return JSON.parse(r)}catch(e){}return null}
 function storeConfig(c){try{localStorage.setItem('plex-jqh-omv-cfg',JSON.stringify(c))}catch(e){}}
 function cleanMac(m){return m.replace(/[:\-\s]/g,'').toLowerCase()}
 function validMac(m){return /^[0-9a-f]{12}$/.test(m)}
+function validHost(h){return h.length>0&&h.length<255&&/^[a-zA-Z0-9][a-zA-Z0-9\-\.]*[a-zA-Z0-9]$/.test(h)}
 function showToast(msg,warn){var t=document.getElementById('toast');t.textContent=msg;t.className=warn?'toast warn show':'toast show';setTimeout(function(){t.className='toast'},3000)}
 
 // jqh.duckdns.org n'a pas de cert SSL valide sur le domaine racine (wildcard *.jqh.duckdns.org
@@ -199,7 +200,10 @@ function readUrlParams(){
   if(mac&&host){
     var cleaned=cleanMac(mac);
     if(!validMac(cleaned))return false;
-    config={mac:cleaned,host:host,port:port};
+    if(!validHost(host))return false;
+    var portNum=parseInt(port,10);
+    if(isNaN(portNum)||portNum<1||portNum>65535)portNum=9;
+    config={mac:cleaned,host:host,port:String(portNum)};
     storeConfig(config);
     return true;
   }
@@ -224,7 +228,10 @@ function saveConfig(){
   if(!mac||!host){showToast('⚠ MAC et domaine requis',true);return}
   var cleaned=cleanMac(mac);
   if(!validMac(cleaned)){showToast('⚠ MAC invalide (12 caractères hex)',true);return}
-  config={mac:cleaned,host:host,port:port};
+  if(!validHost(host)){showToast('⚠ Domaine invalide',true);return}
+  var portNum=parseInt(port,10);
+  if(isNaN(portNum)||portNum<1||portNum>65535){showToast('⚠ Port invalide (1-65535)',true);return}
+  config={mac:cleaned,host:host,port:String(portNum)};
   storeConfig(config);
   startApp();
 }
@@ -236,6 +243,7 @@ function startApp(){
   document.getElementById('linkSeerr').href='https://'+sHost;
   document.getElementById('linkSeerrSub').textContent=sHost;
   document.getElementById('headerSub').textContent=config.host;
+  wolTimers.forEach(function(t){clearTimeout(t)});wolTimers=[];
   isOnline=false;wolSent=false;checking=false;
   checkStatus();
   if(checkInterval)clearInterval(checkInterval);
@@ -275,15 +283,17 @@ function setOffline(){
 
 function sendWol(){
   if(isOnline||wolSent||!config)return;
-  var url='https://www.depicus.com/wake-on-lan/woli?m='+config.mac+'&i='+config.host+'&s=255.255.255.255&p='+config.port;
+  var url='https://www.depicus.com/wake-on-lan/woli?m='+encodeURIComponent(config.mac)+'&i='+encodeURIComponent(config.host)+'&s=255.255.255.255&p='+encodeURIComponent(config.port);
   document.getElementById('wolFrame').src=url;
   wolSent=true;
   document.getElementById('powerBtn').className='power-btn sent';
   document.getElementById('powerLabel').textContent='Signal envoyé — patientez 2-3 min';
   document.getElementById('powerLabel').className='power-label sent';
   showToast('⚡ Magic packet envoyé');
-  setTimeout(checkStatus,60000);setTimeout(checkStatus,120000);setTimeout(checkStatus,180000);
-  setTimeout(function(){if(!isOnline){wolSent=false;document.getElementById('powerBtn').className='power-btn';document.getElementById('powerLabel').textContent='Réessayer';document.getElementById('powerLabel').className='power-label'}},240000);
+  wolTimers.push(setTimeout(checkStatus,60000));
+  wolTimers.push(setTimeout(checkStatus,120000));
+  wolTimers.push(setTimeout(checkStatus,180000));
+  wolTimers.push(setTimeout(function(){if(!isOnline){wolSent=false;document.getElementById('powerBtn').className='power-btn';document.getElementById('powerLabel').textContent='Réessayer';document.getElementById('powerLabel').className='power-label'}},240000));
 }
 
 if('serviceWorker' in navigator){

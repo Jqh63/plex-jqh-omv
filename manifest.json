@@ -2,6 +2,8 @@
   "name": "Plex jqh omv",
   "short_name": "Plex jqh omv",
   "description": "Démarrer le serveur Plex jqh omv",
+  "id": "/plex-jqh-omv/",
+  "scope": "/plex-jqh-omv/",
   "display": "standalone",
   "background_color": "#0c0e14",
   "theme_color": "#0c0e14",

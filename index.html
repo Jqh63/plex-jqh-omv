@@ -2,7 +2,6 @@
 <html lang="fr">
 <head>
 <meta charset="UTF-8">
-<<<<<<< HEAD
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -62,20 +61,12 @@
   .power-section{display:flex;flex-direction:column;align-items:center;gap:12px;padding:8px 0}
   .power-ring{position:relative;width:130px;height:130px;display:flex;align-items:center;justify-content:center}
   .power-ring::before{content:'';position:absolute;inset:0;border-radius:50%;border:1px solid var(--border);transition:border-color .4s,opacity .4s;opacity:.5;pointer-events:none}
-<<<<<<< HEAD
-  .power-btn{width:106px;height:106px;border-radius:50%;border:3px solid var(--border);background:var(--surface);color:var(--text-dim);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .3s}
-  .power-btn:active:not(.online){transform:scale(.93)}
-  .power-btn.sent{border-color:var(--green);color:var(--green);box-shadow:0 0 40px var(--green-glow)}
-  .power-btn.online{border-color:var(--green);color:var(--green);opacity:.35;cursor:default}
-=======
   .power-ring::after{content:'';position:absolute;inset:-4px;border-radius:50%;border:2px solid transparent;border-top-color:var(--green);opacity:0;pointer-events:none;transition:opacity .3s}
   .power-ring:has(.power-btn.sent)::after{opacity:1;animation:spin 1.2s linear infinite}
-  @keyframes spin{to{transform:rotate(360deg)}}
   .power-btn{width:106px;height:106px;border-radius:50%;border:3px solid var(--border);background:var(--surface);color:var(--text-dim);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .3s}
   .power-btn:active:not(.online){transform:scale(.93)}
   .power-btn.sent{border-color:var(--green);color:var(--green);box-shadow:0 0 40px var(--green-glow);pointer-events:none}
   .power-btn.online{border-color:var(--green);color:var(--green);opacity:.35;cursor:default;pointer-events:none}
->>>>>>> 561e44382643b38c02b6def756aa92d87f89bd33
   .power-ring:has(.power-btn.sent)::before{border-color:var(--green);opacity:.3}
   .power-ring:has(.power-btn.online)::before{border-color:var(--green);opacity:.2}
   .power-btn svg{width:42px;height:42px}
@@ -178,11 +169,7 @@
   </div>
 
   <div class="install-hint" id="installHint"><strong>Astuce :</strong> menu ⋮ → « Ajouter à l'écran d'accueil »</div>
-<<<<<<< HEAD
-  <div class="footer">v2.5</div>
-=======
-  <div class="footer">v2.9</div>
->>>>>>> 561e44382643b38c02b6def756aa92d87f89bd33
+  <div class="footer">v2.10</div>
 </div>
 
 <div class="toast" id="toast"></div>
@@ -194,24 +181,25 @@ var config=null,isOnline=false,wolSent=false,checking=false,checkInterval=null;
 function loadConfig(){try{var r=localStorage.getItem('plex-jqh-omv-cfg');if(r)return JSON.parse(r)}catch(e){}return null}
 function storeConfig(c){try{localStorage.setItem('plex-jqh-omv-cfg',JSON.stringify(c))}catch(e){}}
 function cleanMac(m){return m.replace(/[:\-\s]/g,'').toLowerCase()}
-<<<<<<< HEAD
-=======
 function validMac(m){return /^[0-9a-f]{12}$/.test(m)}
->>>>>>> 561e44382643b38c02b6def756aa92d87f89bd33
 function showToast(msg,warn){var t=document.getElementById('toast');t.textContent=msg;t.className=warn?'toast warn show':'toast show';setTimeout(function(){t.className='toast'},3000)}
+
+// jqh.duckdns.org n'a pas de cert SSL valide sur le domaine racine (wildcard *.jqh.duckdns.org
+// ne couvre pas jqh.duckdns.org lui-même, limitation DuckDNS). Seerr est exposé sur
+// seerr.jqh.duckdns.org qui bénéficie du wildcard. Le WoL via depicus n'est pas concerné
+// par SSL et continue d'utiliser config.host tel quel.
+function statusHost(){
+  return config.host==='jqh.duckdns.org'?'seerr.jqh.duckdns.org':config.host;
+}
 
 // Read URL params and store config
 function readUrlParams(){
   var p=new URLSearchParams(window.location.search);
   var mac=p.get('mac'),host=p.get('host'),port=p.get('port')||'9';
   if(mac&&host){
-<<<<<<< HEAD
-    config={mac:cleanMac(mac),host:host,port:port};
-=======
     var cleaned=cleanMac(mac);
     if(!validMac(cleaned))return false;
     config={mac:cleaned,host:host,port:port};
->>>>>>> 561e44382643b38c02b6def756aa92d87f89bd33
     storeConfig(config);
     return true;
   }
@@ -234,13 +222,9 @@ function saveConfig(){
   var host=document.getElementById('cfgHost').value.trim();
   var port=document.getElementById('cfgPort').value.trim()||'9';
   if(!mac||!host){showToast('⚠ MAC et domaine requis',true);return}
-<<<<<<< HEAD
-  config={mac:cleanMac(mac),host:host,port:port};
-=======
   var cleaned=cleanMac(mac);
   if(!validMac(cleaned)){showToast('⚠ MAC invalide (12 caractères hex)',true);return}
   config={mac:cleaned,host:host,port:port};
->>>>>>> 561e44382643b38c02b6def756aa92d87f89bd33
   storeConfig(config);
   startApp();
 }
@@ -248,8 +232,9 @@ function saveConfig(){
 function startApp(){
   document.getElementById('settingsScreen').style.display='none';
   document.getElementById('mainScreen').style.display='flex';
-  document.getElementById('linkSeerr').href='https://'+config.host;
-  document.getElementById('linkSeerrSub').textContent=config.host;
+  var sHost=statusHost();
+  document.getElementById('linkSeerr').href='https://'+sHost;
+  document.getElementById('linkSeerrSub').textContent=sHost;
   document.getElementById('headerSub').textContent=config.host;
   isOnline=false;wolSent=false;checking=false;
   checkStatus();
@@ -263,12 +248,8 @@ function checkStatus(){
   var dot=document.getElementById('statusDot'),label=document.getElementById('statusLabel'),sub=document.getElementById('statusSub'),card=document.getElementById('statusCard'),btn=document.getElementById('refreshBtn');
   btn.classList.add('spinning');setTimeout(function(){btn.classList.remove('spinning')},800);
   dot.className='status-dot checking';card.className='status-card';label.textContent='Vérification...';sub.textContent='ping en cours';
-<<<<<<< HEAD
-  setTimeout(function(){checking=false},10000);
-=======
->>>>>>> 561e44382643b38c02b6def756aa92d87f89bd33
-  var ctrl=new AbortController(),timer=setTimeout(function(){ctrl.abort()},8000);
-  fetch('https://'+config.host,{mode:'no-cors',cache:'no-store',signal:ctrl.signal}).then(function(){clearTimeout(timer);checking=false;setOnline()}).catch(function(){clearTimeout(timer);checking=false;setOffline()});
+  var ctrl=new AbortController(),timer=setTimeout(function(){ctrl.abort()},5000);
+  fetch('https://'+statusHost(),{mode:'no-cors',cache:'no-store',signal:ctrl.signal}).then(function(){clearTimeout(timer);checking=false;setOnline()}).catch(function(){clearTimeout(timer);checking=false;setOffline()});
 }
 
 function setOnline(){
@@ -293,11 +274,7 @@ function setOffline(){
 }
 
 function sendWol(){
-<<<<<<< HEAD
-  if(isOnline||!config)return;
-=======
   if(isOnline||wolSent||!config)return;
->>>>>>> 561e44382643b38c02b6def756aa92d87f89bd33
   var url='https://www.depicus.com/wake-on-lan/woli?m='+config.mac+'&i='+config.host+'&s=255.255.255.255&p='+config.port;
   document.getElementById('wolFrame').src=url;
   wolSent=true;

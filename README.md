@@ -51,15 +51,14 @@ Unknown keys create a generic link to `{key}.{host}`.
 
 #### Examples
 
-Existing setup (unchanged — no URL update needed for current users):
+Plex + Seerr setup (WoL + Seerr link + Plex link):
 ```
-?mac=7085c2fb2992&host=jqh.duckdns.org&port=9
+?mac=AABBCCDDEEFF&host=myserver.example.com&port=9
 ```
-→ title "Plex jqh omv", Seerr + Plex buttons, status on `seerr.jqh.duckdns.org`
 
-Add LibreChat to existing setup:
+Add a chat app to the same setup:
 ```
-?mac=7085c2fb2992&host=jqh.duckdns.org&port=9&apps=seerr,chat,plexweb
+?mac=AABBCCDDEEFF&host=myserver.example.com&port=9&apps=seerr,chat,plexweb
 ```
 
 Another user with Jellyfin, no WoL:
@@ -77,7 +76,7 @@ The app pings `https://{statusHost}` with `mode: 'no-cors'`. Any HTTP response =
 
 `statusHost` resolves as: explicit `?status=` param → first subdomain app from the apps list → base `host`.
 
-Example: `host=jqh.duckdns.org` + `apps=seerr,plexweb` → pings `seerr.jqh.duckdns.org` (DuckDNS wildcard cert covers subdomains but not the root domain).
+Example: `host=myserver.example.com` + `apps=seerr,plexweb` → pings `seerr.myserver.example.com`. Useful when the root domain lacks a valid SSL cert (e.g. DuckDNS wildcard certs cover `*.domain` but not the bare root).
 
 ## Files
 

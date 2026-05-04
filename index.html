@@ -79,6 +79,7 @@
   .link-icon{width:36px;height:36px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0}
   .link-icon.seerr{background:rgba(124,106,239,.15);color:var(--accent)}
   .link-icon.plex{background:rgba(229,167,58,.15);color:#e5a73a}
+  .link-icon.chat{background:rgba(52,211,153,.12);color:var(--green)}
   .link-icon.cfg{background:rgba(107,113,148,.15);color:var(--text-dim)}
   .link-text{line-height:1.3}
   .link-sub{font-size:11px;color:var(--text-dim);font-family:'JetBrains Mono',monospace}
@@ -109,20 +110,25 @@
     <p>Paramètres de connexion</p>
   </div>
   <div class="field">
-    <label>Adresse MAC</label>
-    <input type="text" id="cfgMac" placeholder="AABBCCDDEEFF" autocomplete="off" autocapitalize="off">
+    <label>Titre <span style="font-size:11px;font-weight:400;opacity:.6">(optionnel)</span></label>
+    <input type="text" id="cfgTitle" placeholder="Plex jqh omv" autocomplete="off">
   </div>
   <div class="field">
-    <label>Domaine WoL</label>
+    <label>Domaine</label>
     <input type="text" id="cfgHost" placeholder="monserveur.exemple.com" autocomplete="off" autocapitalize="off">
   </div>
   <div class="field">
-    <label>Domaine statut <span style="font-size:11px;font-weight:400;opacity:.6">(optionnel — si différent du domaine WoL)</span></label>
-    <input type="text" id="cfgStatusHost" placeholder="seerr.monserveur.exemple.com" autocomplete="off" autocapitalize="off">
+    <label>Adresse MAC <span style="font-size:11px;font-weight:400;opacity:.6">(optionnel — WoL)</span></label>
+    <input type="text" id="cfgMac" placeholder="AABBCCDDEEFF" autocomplete="off" autocapitalize="off">
   </div>
   <div class="field">
     <label>Port WoL</label>
     <input type="number" id="cfgPort" placeholder="9" autocomplete="off">
+  </div>
+  <div class="field">
+    <label>Applications <span style="font-size:11px;font-weight:400;opacity:.6">(optionnel)</span></label>
+    <input type="text" id="cfgApps" placeholder="seerr,plexweb" autocomplete="off" autocapitalize="off">
+    <span class="hint">Mots-clés séparés par virgule : seerr, overseerr, jellyseerr, chat, librechat, jellyfin, plexweb</span>
   </div>
   <button class="save-btn" onclick="saveConfig()">Enregistrer</button>
 </div>
@@ -130,7 +136,7 @@
 <!-- Main screen -->
 <div class="screen" id="mainScreen" style="display:none;">
   <div class="header">
-    <h1>Plex jqh omv</h1>
+    <h1 id="appTitle">Plex jqh omv</h1>
     <p id="headerSub">Serveur multimédia</p>
   </div>
 
@@ -147,7 +153,7 @@
     </button>
   </div>
 
-  <div class="power-section">
+  <div class="power-section" id="powerSection">
     <div class="power-ring">
       <button class="power-btn" id="powerBtn" onclick="sendWol()" aria-label="Allumer le serveur">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/></svg>
@@ -156,23 +162,10 @@
     <div class="power-label" id="powerLabel">Allumer le serveur</div>
   </div>
 
-  <div class="links">
-    <a id="linkSeerr" href="#" target="_blank" rel="noopener" class="link-btn">
-      <div class="link-icon seerr">🎬</div>
-      <div class="link-text">Demander un film / une série<div class="link-sub" id="linkSeerrSub"></div></div>
-    </a>
-    <a href="https://app.plex.tv" target="_blank" rel="noopener" class="link-btn">
-      <div class="link-icon plex">▶</div>
-      <div class="link-text">Regarder sur Plex<div class="link-sub">app.plex.tv</div></div>
-    </a>
-    <div class="link-btn" onclick="showSettings()">
-      <div class="link-icon cfg">⚙</div>
-      <div class="link-text">Paramètres<div class="link-sub">modifier la configuration</div></div>
-    </div>
-  </div>
+  <div class="links" id="linksContainer"></div>
 
   <div class="install-hint" id="installHint"><strong>Astuce :</strong> menu ⋮ → « Ajouter à l'écran d'accueil »</div>
-  <div class="footer">v2.11</div>
+  <div class="footer">v2.12</div>
 </div>
 
 <div class="toast" id="toast"></div>
@@ -181,79 +174,140 @@
 <script>
 var config=null,isOnline=false,wolSent=false,checking=false,checkInterval=null,wolTimers=[];
 
+var APP_CATALOG={
+  seerr:      {sub:'seerr',      label:'Demander un film / une série', icon:'🎬', cls:'seerr'},
+  overseerr:  {sub:'overseerr',  label:'Demander un film / une série', icon:'🎬', cls:'seerr'},
+  jellyseerr: {sub:'jellyseerr', label:'Demander un film / une série', icon:'🎬', cls:'seerr'},
+  chat:       {sub:'chat',       label:'Assistant IA',                 icon:'💬', cls:'chat'},
+  librechat:  {sub:'librechat',  label:'Assistant IA',                 icon:'💬', cls:'chat'},
+  jellyfin:   {sub:'jellyfin',   label:'Regarder sur Jellyfin',        icon:'▶',  cls:'plex'},
+  plexweb:    {url:'https://app.plex.tv', label:'Regarder sur Plex',  subText:'app.plex.tv', icon:'▶', cls:'plex'}
+};
+
 function loadConfig(){try{var r=localStorage.getItem('plex-jqh-omv-cfg');if(r)return JSON.parse(r)}catch(e){}return null}
 function storeConfig(c){try{localStorage.setItem('plex-jqh-omv-cfg',JSON.stringify(c))}catch(e){}}
 function cleanMac(m){return m.replace(/[:\-\s]/g,'').toLowerCase()}
 function validMac(m){return /^[0-9a-f]{12}$/.test(m)}
-function validHost(h){return h.length>0&&h.length<255&&!h.includes('..')&&/^[a-zA-Z0-9][a-zA-Z0-9\-\.]*[a-zA-Z0-9]$/.test(h)}
+function validHost(h){return h.length>0&&h.length<255&&/\./.test(h)&&!h.includes('..')&&/^[a-zA-Z0-9][a-zA-Z0-9\-\.]*[a-zA-Z0-9]$/.test(h)}
 function showToast(msg,warn){var t=document.getElementById('toast');t.textContent=msg;t.className=warn?'toast warn show':'toast show';setTimeout(function(){t.className='toast'},3000)}
 
-// statushost découple le domaine de vérification de statut du domaine WoL.
-// Utile quand le domaine racine n'a pas de cert SSL valide (wildcard DuckDNS ≠ racine).
-// Fallback de migration pour anciens localStorage sans statushost.
-// Note: mode:'no-cors' retourne une opaque response pour tout code HTTP (200 ou 502) —
-// on ne peut pas distinguer un serveur up d'une page d'erreur CDN. Limitation sans backend.
+function parseApps(str){
+  var keys=(str||'').split(',').map(function(s){return s.trim()}).filter(Boolean);
+  return keys.map(function(k){return APP_CATALOG[k]||{sub:k,label:k,icon:'🔗',cls:'cfg'}});
+}
+
+function firstSubOf(apps){
+  for(var i=0;i<apps.length;i++){if(apps[i].sub)return apps[i].sub;}
+  return null;
+}
+
+// status target: explicit override > first app subdomain > base host
 function statusHost(){
-  if(config.statushost) return config.statushost;
-  if(config.host==='jqh.duckdns.org') return 'seerr.jqh.duckdns.org'; // migration legacy
-  return config.host;
+  if(config.status)return config.status;
+  var apps=parseApps(config.apps||'seerr,plexweb');
+  var sub=firstSubOf(apps);
+  return sub?sub+'.'+config.host:config.host;
 }
 
 function readUrlParams(){
   var p=new URLSearchParams(window.location.search);
-  var mac=p.get('mac'),host=p.get('host'),port=p.get('port')||'9';
-  if(mac&&host){
-    var cleaned=cleanMac(mac);
-    if(!validMac(cleaned))return false;
-    if(!validHost(host))return false;
-    var portNum=parseInt(port,10);
-    if(isNaN(portNum)||portNum<1||portNum>65535)portNum=9;
-    config={mac:cleaned,host:host,port:String(portNum)};
-    var sh=p.get('statushost');
-    if(sh&&validHost(sh))config.statushost=sh;
-    storeConfig(config);
-    return true;
-  }
-  return false;
+  var host=p.get('host');
+  if(!host)return false;
+  if(!validHost(host))return false;
+  var mac=p.get('mac'),cleaned='';
+  if(mac){cleaned=cleanMac(mac);if(!validMac(cleaned))return false;}
+  var portNum=parseInt(p.get('port')||'9',10);
+  if(isNaN(portNum)||portNum<1||portNum>65535)portNum=9;
+  config={host:host,port:String(portNum)};
+  if(cleaned)config.mac=cleaned;
+  var title=p.get('title');if(title)config.title=title;
+  var apps=p.get('apps');if(apps)config.apps=apps;
+  var status=p.get('status');if(status&&validHost(status))config.status=status;
+  storeConfig(config);
+  return true;
 }
 
 function showSettings(){
   document.getElementById('mainScreen').style.display='none';
   document.getElementById('settingsScreen').style.display='flex';
   if(config){
+    document.getElementById('cfgTitle').value=config.title||'';
     document.getElementById('cfgMac').value=config.mac||'';
     document.getElementById('cfgHost').value=config.host||'';
-    document.getElementById('cfgStatusHost').value=config.statushost||'';
     document.getElementById('cfgPort').value=config.port||'9';
+    document.getElementById('cfgApps').value=config.apps||'';
   }
   if(checkInterval)clearInterval(checkInterval);
 }
 
 function saveConfig(){
+  var title=document.getElementById('cfgTitle').value.trim();
   var mac=document.getElementById('cfgMac').value.trim();
   var host=document.getElementById('cfgHost').value.trim();
-  var statushost=document.getElementById('cfgStatusHost').value.trim();
   var port=document.getElementById('cfgPort').value.trim()||'9';
-  if(!mac||!host){showToast('⚠ MAC et domaine requis',true);return}
-  var cleaned=cleanMac(mac);
-  if(!validMac(cleaned)){showToast('⚠ MAC invalide (12 caractères hex)',true);return}
+  var apps=document.getElementById('cfgApps').value.trim();
+  if(!host){showToast('⚠ Domaine requis',true);return}
   if(!validHost(host)){showToast('⚠ Domaine invalide',true);return}
-  if(statushost&&!validHost(statushost)){showToast('⚠ Domaine statut invalide',true);return}
+  var cleaned='';
+  if(mac){cleaned=cleanMac(mac);if(!validMac(cleaned)){showToast('⚠ MAC invalide (12 caractères hex)',true);return}}
   var portNum=parseInt(port,10);
   if(isNaN(portNum)||portNum<1||portNum>65535){showToast('⚠ Port invalide (1-65535)',true);return}
-  config={mac:cleaned,host:host,port:String(portNum)};
-  if(statushost)config.statushost=statushost;
+  config={host:host,port:String(portNum)};
+  if(cleaned)config.mac=cleaned;
+  if(title)config.title=title;
+  if(apps)config.apps=apps;
   storeConfig(config);
   startApp();
+}
+
+function buildLinks(){
+  var container=document.getElementById('linksContainer');
+  while(container.firstChild)container.removeChild(container.firstChild);
+  parseApps(config.apps||'seerr,plexweb').forEach(function(app){
+    var a=document.createElement('a');
+    a.className='link-btn';
+    a.target='_blank';
+    a.rel='noopener';
+    a.href=app.url||('https://'+(app.sub?app.sub+'.'+config.host:config.host));
+    var icon=document.createElement('div');
+    icon.className='link-icon '+app.cls;
+    icon.textContent=app.icon;
+    var text=document.createElement('div');
+    text.className='link-text';
+    text.textContent=app.label;
+    var sub=document.createElement('div');
+    sub.className='link-sub';
+    sub.textContent=app.subText||(app.sub?app.sub+'.'+config.host:config.host);
+    text.appendChild(sub);
+    a.appendChild(icon);
+    a.appendChild(text);
+    container.appendChild(a);
+  });
+  var cfg=document.createElement('div');
+  cfg.className='link-btn';
+  cfg.addEventListener('click',showSettings);
+  var cfgIcon=document.createElement('div');
+  cfgIcon.className='link-icon cfg';
+  cfgIcon.textContent='⚙';
+  var cfgText=document.createElement('div');
+  cfgText.className='link-text';
+  cfgText.textContent='Paramètres';
+  var cfgSub=document.createElement('div');
+  cfgSub.className='link-sub';
+  cfgSub.textContent='modifier la configuration';
+  cfgText.appendChild(cfgSub);
+  cfg.appendChild(cfgIcon);
+  cfg.appendChild(cfgText);
+  container.appendChild(cfg);
 }
 
 function startApp(){
   document.getElementById('settingsScreen').style.display='none';
   document.getElementById('mainScreen').style.display='flex';
-  var sHost=statusHost();
-  document.getElementById('linkSeerr').href='https://'+sHost;
-  document.getElementById('linkSeerrSub').textContent=sHost;
+  document.getElementById('appTitle').textContent=config.title||'Plex jqh omv';
   document.getElementById('headerSub').textContent=config.host;
+  document.getElementById('powerSection').style.display=config.mac?'flex':'none';
+  buildLinks();
   wolTimers.forEach(function(t){clearTimeout(t)});wolTimers=[];
   isOnline=false;wolSent=false;checking=false;
   checkStatus();
@@ -279,9 +333,11 @@ function setOnline(){
   document.getElementById('statusCard').className='status-card online';
   document.getElementById('statusLabel').textContent='En ligne';
   document.getElementById('statusSub').textContent='serveur accessible';
-  document.getElementById('powerBtn').className='power-btn online';
-  document.getElementById('powerLabel').textContent='Serveur allumé';
-  document.getElementById('powerLabel').className='power-label sent';
+  if(config.mac){
+    document.getElementById('powerBtn').className='power-btn online';
+    document.getElementById('powerLabel').textContent='Serveur allumé';
+    document.getElementById('powerLabel').className='power-label sent';
+  }
   if(wolSent){showToast('✓ Serveur démarré avec succès');wolSent=false}
 }
 
@@ -291,11 +347,11 @@ function setOffline(){
   document.getElementById('statusCard').className='status-card offline';
   document.getElementById('statusLabel').textContent='Hors ligne';
   document.getElementById('statusSub').textContent=navigator.onLine?'serveur éteint':'pas de réseau';
-  if(!wolSent){document.getElementById('powerBtn').className='power-btn';document.getElementById('powerLabel').textContent='Allumer le serveur';document.getElementById('powerLabel').className='power-label'}
+  if(config.mac&&!wolSent){document.getElementById('powerBtn').className='power-btn';document.getElementById('powerLabel').textContent='Allumer le serveur';document.getElementById('powerLabel').className='power-label'}
 }
 
 function sendWol(){
-  if(isOnline||wolSent||!config)return;
+  if(isOnline||wolSent||!config||!config.mac)return;
   var url='https://www.depicus.com/wake-on-lan/woli?m='+encodeURIComponent(config.mac)+'&i='+encodeURIComponent(config.host)+'&s=255.255.255.255&p='+encodeURIComponent(config.port);
   document.getElementById('wolFrame').src=url;
   wolSent=true;
@@ -312,7 +368,6 @@ function sendWol(){
 if('serviceWorker' in navigator){
   navigator.serviceWorker.register('sw.js').catch(function(){});
   var refreshing=false;
-  // Toast non-intrusif au lieu d'un reload automatique — évite d'interrompre une action en cours
   navigator.serviceWorker.addEventListener('controllerchange',function(){
     if(!refreshing){refreshing=true;showToast('Nouvelle version — actualisez la page',true);}
   });
@@ -320,7 +375,7 @@ if('serviceWorker' in navigator){
 
 // Init: URL params > localStorage > settings screen
 if(!readUrlParams())config=loadConfig();
-if(config&&config.mac&&config.host)startApp();
+if(config&&config.host)startApp();
 else showSettings();
 </script>
 </body>

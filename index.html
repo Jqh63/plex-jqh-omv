@@ -98,7 +98,6 @@
   .field .hint{font-size:11px;color:var(--text-dim);opacity:.6}
   .save-btn{width:100%;padding:14px;background:var(--accent);border:none;border-radius:12px;color:white;font-family:'DM Sans',sans-serif;font-size:15px;font-weight:600;cursor:pointer;transition:opacity .2s;margin-top:8px}
   .save-btn:active{opacity:.8}
-
 </style>
 </head>
 <body>
@@ -114,8 +113,12 @@
     <input type="text" id="cfgMac" placeholder="AABBCCDDEEFF" autocomplete="off" autocapitalize="off">
   </div>
   <div class="field">
-    <label>Domaine</label>
+    <label>Domaine WoL</label>
     <input type="text" id="cfgHost" placeholder="monserveur.exemple.com" autocomplete="off" autocapitalize="off">
+  </div>
+  <div class="field">
+    <label>Domaine statut <span style="font-size:11px;font-weight:400;opacity:.6">(optionnel — si différent du domaine WoL)</span></label>
+    <input type="text" id="cfgStatusHost" placeholder="seerr.monserveur.exemple.com" autocomplete="off" autocapitalize="off">
   </div>
   <div class="field">
     <label>Port WoL</label>
@@ -131,7 +134,7 @@
     <p id="headerSub">Serveur multimédia</p>
   </div>
 
-  <div class="status-card" id="statusCard">
+  <div class="status-card" id="statusCard" role="status" aria-live="polite">
     <div class="status-left">
       <div class="status-dot checking" id="statusDot"></div>
       <div>
@@ -139,15 +142,15 @@
         <div class="status-sub" id="statusSub">ping en cours</div>
       </div>
     </div>
-    <button class="refresh-btn" id="refreshBtn" onclick="checkStatus()">
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+    <button class="refresh-btn" id="refreshBtn" onclick="checkStatus()" aria-label="Vérifier le statut">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
     </button>
   </div>
 
   <div class="power-section">
     <div class="power-ring">
-      <button class="power-btn" id="powerBtn" onclick="sendWol()">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/></svg>
+      <button class="power-btn" id="powerBtn" onclick="sendWol()" aria-label="Allumer le serveur">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/></svg>
       </button>
     </div>
     <div class="power-label" id="powerLabel">Allumer le serveur</div>
@@ -169,11 +172,11 @@
   </div>
 
   <div class="install-hint" id="installHint"><strong>Astuce :</strong> menu ⋮ → « Ajouter à l'écran d'accueil »</div>
-  <div class="footer">v2.10</div>
+  <div class="footer">v2.11</div>
 </div>
 
 <div class="toast" id="toast"></div>
-<iframe id="wolFrame" style="display:none;"></iframe>
+<iframe id="wolFrame" style="display:none;" aria-hidden="true"></iframe>
 
 <script>
 var config=null,isOnline=false,wolSent=false,checking=false,checkInterval=null,wolTimers=[];
@@ -182,18 +185,20 @@ function loadConfig(){try{var r=localStorage.getItem('plex-jqh-omv-cfg');if(r)re
 function storeConfig(c){try{localStorage.setItem('plex-jqh-omv-cfg',JSON.stringify(c))}catch(e){}}
 function cleanMac(m){return m.replace(/[:\-\s]/g,'').toLowerCase()}
 function validMac(m){return /^[0-9a-f]{12}$/.test(m)}
-function validHost(h){return h.length>0&&h.length<255&&/^[a-zA-Z0-9][a-zA-Z0-9\-\.]*[a-zA-Z0-9]$/.test(h)}
+function validHost(h){return h.length>0&&h.length<255&&!h.includes('..')&&/^[a-zA-Z0-9][a-zA-Z0-9\-\.]*[a-zA-Z0-9]$/.test(h)}
 function showToast(msg,warn){var t=document.getElementById('toast');t.textContent=msg;t.className=warn?'toast warn show':'toast show';setTimeout(function(){t.className='toast'},3000)}
 
-// jqh.duckdns.org n'a pas de cert SSL valide sur le domaine racine (wildcard *.jqh.duckdns.org
-// ne couvre pas jqh.duckdns.org lui-même, limitation DuckDNS). Seerr est exposé sur
-// seerr.jqh.duckdns.org qui bénéficie du wildcard. Le WoL via depicus n'est pas concerné
-// par SSL et continue d'utiliser config.host tel quel.
+// statushost découple le domaine de vérification de statut du domaine WoL.
+// Utile quand le domaine racine n'a pas de cert SSL valide (wildcard DuckDNS ≠ racine).
+// Fallback de migration pour anciens localStorage sans statushost.
+// Note: mode:'no-cors' retourne une opaque response pour tout code HTTP (200 ou 502) —
+// on ne peut pas distinguer un serveur up d'une page d'erreur CDN. Limitation sans backend.
 function statusHost(){
-  return config.host==='jqh.duckdns.org'?'seerr.jqh.duckdns.org':config.host;
+  if(config.statushost) return config.statushost;
+  if(config.host==='jqh.duckdns.org') return 'seerr.jqh.duckdns.org'; // migration legacy
+  return config.host;
 }
 
-// Read URL params and store config
 function readUrlParams(){
   var p=new URLSearchParams(window.location.search);
   var mac=p.get('mac'),host=p.get('host'),port=p.get('port')||'9';
@@ -204,6 +209,8 @@ function readUrlParams(){
     var portNum=parseInt(port,10);
     if(isNaN(portNum)||portNum<1||portNum>65535)portNum=9;
     config={mac:cleaned,host:host,port:String(portNum)};
+    var sh=p.get('statushost');
+    if(sh&&validHost(sh))config.statushost=sh;
     storeConfig(config);
     return true;
   }
@@ -216,6 +223,7 @@ function showSettings(){
   if(config){
     document.getElementById('cfgMac').value=config.mac||'';
     document.getElementById('cfgHost').value=config.host||'';
+    document.getElementById('cfgStatusHost').value=config.statushost||'';
     document.getElementById('cfgPort').value=config.port||'9';
   }
   if(checkInterval)clearInterval(checkInterval);
@@ -224,14 +232,17 @@ function showSettings(){
 function saveConfig(){
   var mac=document.getElementById('cfgMac').value.trim();
   var host=document.getElementById('cfgHost').value.trim();
+  var statushost=document.getElementById('cfgStatusHost').value.trim();
   var port=document.getElementById('cfgPort').value.trim()||'9';
   if(!mac||!host){showToast('⚠ MAC et domaine requis',true);return}
   var cleaned=cleanMac(mac);
   if(!validMac(cleaned)){showToast('⚠ MAC invalide (12 caractères hex)',true);return}
   if(!validHost(host)){showToast('⚠ Domaine invalide',true);return}
+  if(statushost&&!validHost(statushost)){showToast('⚠ Domaine statut invalide',true);return}
   var portNum=parseInt(port,10);
   if(isNaN(portNum)||portNum<1||portNum>65535){showToast('⚠ Port invalide (1-65535)',true);return}
   config={mac:cleaned,host:host,port:String(portNum)};
+  if(statushost)config.statushost=statushost;
   storeConfig(config);
   startApp();
 }
@@ -254,10 +265,12 @@ function startApp(){
 function checkStatus(){
   if(checking||!config)return;checking=true;
   var dot=document.getElementById('statusDot'),label=document.getElementById('statusLabel'),sub=document.getElementById('statusSub'),card=document.getElementById('statusCard'),btn=document.getElementById('refreshBtn');
-  btn.classList.add('spinning');setTimeout(function(){btn.classList.remove('spinning')},800);
+  btn.classList.add('spinning');
   dot.className='status-dot checking';card.className='status-card';label.textContent='Vérification...';sub.textContent='ping en cours';
   var ctrl=new AbortController(),timer=setTimeout(function(){ctrl.abort()},5000);
-  fetch('https://'+statusHost(),{mode:'no-cors',cache:'no-store',signal:ctrl.signal}).then(function(){clearTimeout(timer);checking=false;setOnline()}).catch(function(){clearTimeout(timer);checking=false;setOffline()});
+  fetch('https://'+statusHost(),{mode:'no-cors',cache:'no-store',signal:ctrl.signal})
+    .then(function(){clearTimeout(timer);btn.classList.remove('spinning');checking=false;setOnline()})
+    .catch(function(){clearTimeout(timer);btn.classList.remove('spinning');checking=false;setOffline()});
 }
 
 function setOnline(){
@@ -277,7 +290,7 @@ function setOffline(){
   document.getElementById('statusDot').className='status-dot offline';
   document.getElementById('statusCard').className='status-card offline';
   document.getElementById('statusLabel').textContent='Hors ligne';
-  document.getElementById('statusSub').textContent='serveur éteint';
+  document.getElementById('statusSub').textContent=navigator.onLine?'serveur éteint':'pas de réseau';
   if(!wolSent){document.getElementById('powerBtn').className='power-btn';document.getElementById('powerLabel').textContent='Allumer le serveur';document.getElementById('powerLabel').className='power-label'}
 }
 
@@ -298,14 +311,14 @@ function sendWol(){
 
 if('serviceWorker' in navigator){
   navigator.serviceWorker.register('sw.js').catch(function(){});
-  // Auto-reload when a new SW takes control (cache updated)
   var refreshing=false;
+  // Toast non-intrusif au lieu d'un reload automatique — évite d'interrompre une action en cours
   navigator.serviceWorker.addEventListener('controllerchange',function(){
-    if(!refreshing){refreshing=true;window.location.reload();}
+    if(!refreshing){refreshing=true;showToast('Nouvelle version — actualisez la page',true);}
   });
 }
 
-// Init: URL params > localStorage > no config screen
+// Init: URL params > localStorage > settings screen
 if(!readUrlParams())config=loadConfig();
 if(config&&config.mac&&config.host)startApp();
 else showSettings();

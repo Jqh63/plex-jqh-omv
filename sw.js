@@ -1,4 +1,4 @@
-var CACHE = 'plex-jqh-omv-v2.10';
+var CACHE = 'plex-jqh-omv-v2.11';
 var FILES = ['./', './manifest.json', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', function(e) {

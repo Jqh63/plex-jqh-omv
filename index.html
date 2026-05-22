@@ -1,0 +1,586 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; frame-src https:; connect-src https:; manifest-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#0c0e14">
+<meta name="mobile-web-app-capable" content="yes">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon-192.png" type="image/png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<title>Plex jqh omv</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:#0c0e14; --surface:#161a25; --surface-hover:#1c2130;
+    --border:#252a3a; --text:#e4e6ef; --text-dim:#6b7194;
+    --accent:#7c6aef; --accent-glow:rgba(124,106,239,.25);
+    --green:#34d399; --green-glow:rgba(52,211,153,.25);
+    --red:#f87171; --red-glow:rgba(248,113,113,.2); --orange:#fbbf24;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html{height:100%}
+  body{
+    font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);
+    min-height:100%;min-height:100dvh;display:flex;flex-direction:column;
+    align-items:center;justify-content:center;padding:24px;
+    padding-top:max(24px,env(safe-area-inset-top));
+    padding-bottom:max(24px,env(safe-area-inset-bottom));
+    -webkit-tap-highlight-color:transparent;-webkit-user-select:none;
+    user-select:none;overflow-y:auto;
+  }
+  body::before{
+    content:'';position:fixed;inset:0;pointer-events:none;z-index:0;
+    background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E");
+  }
+  .screen{position:relative;z-index:1;width:100%;max-width:380px;display:flex;flex-direction:column;align-items:center;gap:24px}
+  .header{text-align:center}
+  .header h1{font-size:22px;font-weight:700;letter-spacing:-.5px;margin-bottom:4px}
+  .header p{font-size:13px;color:var(--text-dim);font-family:'JetBrains Mono',monospace}
+
+  .status-card{width:100%;background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:16px 20px;display:flex;align-items:center;justify-content:space-between;transition:border-color .5s,box-shadow .5s}
+  .status-card.online{border-color:var(--green);box-shadow:0 0 24px var(--green-glow)}
+  .status-card.offline{border-color:var(--red);box-shadow:0 0 24px var(--red-glow)}
+  .status-left{display:flex;align-items:center;gap:14px}
+  .status-dot{width:12px;height:12px;border-radius:50%;background:var(--text-dim);transition:background .4s,box-shadow .4s;flex-shrink:0}
+  .status-dot.online{background:var(--green);box-shadow:0 0 8px var(--green)}
+  .status-dot.offline{background:var(--red);box-shadow:0 0 8px var(--red)}
+  .status-dot.checking{background:var(--orange);animation:pulse 1.2s infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+  .status-left > div:last-child{min-width:0;flex:1}
+  .status-label{font-size:15px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .status-sub{font-size:12px;color:var(--text-dim);font-family:'JetBrains Mono',monospace;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+  .refresh-btn{background:none;border:1px solid var(--border);color:var(--text-dim);border-radius:10px;width:40px;height:40px;min-width:40px;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:all .2s}
+  .refresh-btn:active{background:var(--surface-hover)}
+  .refresh-btn.spinning svg{animation:spin .8s linear}
+  @keyframes spin{from{transform:rotate(0)}to{transform:rotate(360deg)}}
+
+  .power-section{display:flex;flex-direction:column;align-items:center;gap:12px;padding:8px 0}
+  .power-ring{position:relative;width:130px;height:130px;display:flex;align-items:center;justify-content:center}
+  .power-ring::before{content:'';position:absolute;inset:0;border-radius:50%;border:1px solid var(--border);transition:border-color .4s,opacity .4s;opacity:.5;pointer-events:none}
+  .power-ring::after{content:'';position:absolute;inset:-4px;border-radius:50%;border:2px solid transparent;border-top-color:var(--green);opacity:0;pointer-events:none;transition:opacity .3s}
+  .power-ring:has(.power-btn.sent)::after{opacity:1;animation:spin 1.2s linear infinite}
+  .power-btn{width:106px;height:106px;border-radius:50%;border:3px solid var(--border);background:var(--surface);color:var(--text-dim);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .3s}
+  .power-btn:active:not(.online):not(.unavailable){transform:scale(.93)}
+  .power-btn.sent{border-color:var(--green);color:var(--green);box-shadow:0 0 40px var(--green-glow);pointer-events:none}
+  .power-btn.online{border-color:var(--green);color:var(--green);cursor:default;pointer-events:none;box-shadow:0 0 24px var(--green-glow)}
+  .power-btn.unavailable{border-color:var(--red);color:var(--red);opacity:.5;cursor:not-allowed;pointer-events:none}
+  .power-ring:has(.power-btn.sent)::before{border-color:var(--green);opacity:.3}
+  .power-ring:has(.power-btn.online)::before{border-color:var(--green);opacity:.4}
+  .power-ring:has(.power-btn.unavailable)::before{border-color:var(--red);opacity:.3}
+  .power-btn .ico{width:42px;height:42px}
+  .power-btn .ico-check{display:none}
+  .power-btn.online .ico-power{display:none}
+  .power-btn.online .ico-check{display:block}
+  .power-label{font-size:13px;color:var(--text-dim);text-align:center;min-height:18px;transition:color .3s}
+  .power-label.sent{color:var(--green)}
+  .power-label.unavailable{color:var(--red)}
+  .fallback-link{font-size:11px;color:var(--text-dim);text-align:center;margin-top:-4px;opacity:.55;font-family:'JetBrains Mono',monospace;transition:opacity .3s,font-size .3s}
+  .fallback-link a{color:var(--text-dim);text-decoration:underline;text-decoration-color:rgba(107,113,148,.4);text-underline-offset:3px}
+  .fallback-link a:active{opacity:1}
+  .fallback-link.promoted{font-size:13px;opacity:1;font-family:'DM Sans',sans-serif;margin-top:6px}
+  .fallback-link.promoted a{color:var(--red);text-decoration-color:rgba(248,113,113,.6);font-weight:500}
+
+  .links{width:100%;display:flex;flex-direction:column;gap:8px}
+  .link-btn{width:100%;padding:14px 18px;background:var(--surface);border:1px solid var(--border);border-radius:14px;color:var(--text);font-family:'DM Sans',sans-serif;font-size:14px;font-weight:500;text-decoration:none;display:flex;align-items:center;gap:12px;transition:all .15s;cursor:pointer;-webkit-tap-highlight-color:transparent}
+  .link-btn:active{background:var(--surface-hover);transform:scale(.98)}
+  .link-btn.server-dependent.offline{opacity:.5}
+  .link-btn.server-dependent.offline .link-icon{filter:grayscale(.6)}
+  .link-icon{width:36px;height:36px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0}
+  .link-icon.seerr{background:rgba(124,106,239,.15);color:var(--accent)}
+  .link-icon.plex{background:rgba(229,167,58,.15);color:#e5a73a}
+  .link-icon.cfg{background:rgba(107,113,148,.15);color:var(--text-dim)}
+  .link-text{line-height:1.3}
+  .link-sub{font-size:11px;color:var(--text-dim);font-family:'JetBrains Mono',monospace}
+
+  .toast{position:fixed;bottom:max(24px,env(safe-area-inset-bottom,24px));left:50%;transform:translateX(-50%) translateY(80px);background:var(--surface);border:1px solid var(--green);border-radius:12px;padding:12px 20px;font-size:13px;color:var(--green);box-shadow:0 8px 32px rgba(0,0,0,.5);opacity:0;transition:all .4s cubic-bezier(.16,1,.3,1);z-index:10;pointer-events:none;white-space:nowrap}
+  .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+  .toast.warn{border-color:var(--orange);color:var(--orange)}
+  .footer{font-size:10px;color:var(--text-dim);font-family:'JetBrains Mono',monospace;opacity:.3}
+  .header h1{cursor:help;user-select:none}
+  .install-hint{width:100%;background:var(--surface);border:1px solid var(--accent);border-radius:12px;padding:12px 16px;font-size:12px;color:var(--text-dim);text-align:center;display:none}
+  .install-hint strong{color:var(--text)}
+
+  .field{display:flex;flex-direction:column;gap:6px;width:100%}
+  .field label{font-size:13px;font-weight:500;color:var(--text-dim)}
+  .field input{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px 16px;color:var(--text);font-family:'JetBrains Mono',monospace;font-size:14px;outline:none;transition:border-color .2s;-webkit-user-select:text;user-select:text;width:100%}
+  .field input:focus{border-color:var(--accent)}
+  .field input::placeholder{color:var(--text-dim);opacity:.5}
+  .field .hint{font-size:11px;color:var(--text-dim);opacity:.6}
+  .save-btn{width:100%;padding:14px;background:var(--accent);border:none;border-radius:12px;color:white;font-family:'DM Sans',sans-serif;font-size:15px;font-weight:600;cursor:pointer;transition:opacity .2s;margin-top:8px}
+  .save-btn:active{opacity:.8}
+  .button-row{display:flex;gap:8px;width:100%;margin-top:8px}
+  .button-row .save-btn{margin-top:0;flex:2}
+  .cancel-btn{flex:1;padding:14px;background:var(--surface);border:1px solid var(--border);border-radius:12px;color:var(--text-dim);font-family:'DM Sans',sans-serif;font-size:15px;font-weight:600;cursor:pointer;transition:background .15s}
+  .cancel-btn:active{background:var(--surface-hover)}
+</style>
+</head>
+<body>
+
+<!-- Settings screen -->
+<div class="screen" id="settingsScreen" style="display:none;">
+  <div class="header">
+    <h2 style="font-size:20px;font-weight:700">Configuration</h2>
+    <p>Paramètres de connexion</p>
+  </div>
+  <div class="field">
+    <label>Titre <span style="font-size:11px;font-weight:400;opacity:.6">(optionnel)</span></label>
+    <input type="text" id="cfgTitle" placeholder="Mon serveur" autocomplete="off">
+  </div>
+  <div class="field">
+    <label>Domaine</label>
+    <input type="text" id="cfgHost" placeholder="monserveur.exemple.com" autocomplete="off" autocapitalize="off">
+  </div>
+  <div class="field">
+    <label>Adresse MAC <span style="font-size:11px;font-weight:400;opacity:.6">(optionnel — WoL)</span></label>
+    <input type="text" id="cfgMac" placeholder="AABBCCDDEEFF" autocomplete="off" autocapitalize="off">
+  </div>
+  <div class="field">
+    <label>Port WoL</label>
+    <input type="number" id="cfgPort" placeholder="9" autocomplete="off">
+  </div>
+  <div class="field">
+    <label>Applications <span style="font-size:11px;font-weight:400;opacity:.6">(optionnel)</span></label>
+    <input type="text" id="cfgApps" placeholder="seerr,jellyfin" autocomplete="off" autocapitalize="off">
+    <span class="hint">Mots-clés séparés par virgule : seerr, overseerr, jellyseerr, jellyfin, plexweb</span>
+  </div>
+  <div class="button-row">
+    <button class="cancel-btn" id="cancelBtn" type="button" onclick="cancelSettings()" style="display:none">Annuler</button>
+    <button class="save-btn" type="button" onclick="saveConfig()">Enregistrer</button>
+  </div>
+</div>
+
+<!-- Main screen -->
+<div class="screen" id="mainScreen" style="display:none;">
+  <div class="header">
+    <h1 id="appTitle">Plex jqh omv</h1>
+    <p id="headerSub">Serveur multimédia</p>
+  </div>
+
+  <div class="status-card" id="statusCard" role="status" aria-live="polite">
+    <div class="status-left">
+      <div class="status-dot checking" id="statusDot"></div>
+      <div>
+        <div class="status-label" id="statusLabel">Vérification...</div>
+        <div class="status-sub" id="statusSub">ping en cours</div>
+      </div>
+    </div>
+    <button class="refresh-btn" id="refreshBtn" onclick="checkStatus()" aria-label="Vérifier le statut">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+    </button>
+  </div>
+
+  <div class="power-section" id="powerSection">
+    <div class="power-ring">
+      <button class="power-btn" id="powerBtn" onclick="sendWol()" aria-label="Allumer le serveur">
+        <svg class="ico ico-power" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/></svg>
+        <svg class="ico ico-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+      </button>
+    </div>
+    <div class="power-label" id="powerLabel">Allumer le serveur</div>
+    <div class="fallback-link" id="fallbackLink" style="display:none">
+      <a id="fallbackLinkA" href="./fallback.html" target="_blank" rel="noopener">Réveil ne marche pas ? Réveil manuel</a>
+    </div>
+  </div>
+
+  <div class="links" id="linksContainer"></div>
+
+  <div class="install-hint" id="installHint"><strong>Astuce :</strong> menu ⋮ → « Ajouter à l'écran d'accueil »</div>
+  <div class="footer">v2.30</div>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<!-- Do NOT add sandbox="" here, and do NOT tighten CSP frame-src to
+     https://www.depicus.com — depicus appears to redirect internally to
+     a different host on this endpoint and both restrictions silently
+     break the magic packet dispatch (bisected v2.16→v2.19). See CLAUDE.md. -->
+<iframe id="wolFrame" style="display:none;" aria-hidden="true"></iframe>
+
+<script>
+var config=null,isOnline=false,wolSent=false,checking=false,checkInterval=null,wolTimers=[],wolArmedAt=0;
+var depicusReachable=true,depicusProbing=false;
+
+var APP_CATALOG={
+  seerr:      {sub:'seerr',      label:'Demander un film / une série', icon:'🎬', cls:'seerr'},
+  overseerr:  {sub:'overseerr',  label:'Demander un film / une série', icon:'🎬', cls:'seerr'},
+  jellyseerr: {sub:'jellyseerr', label:'Demander un film / une série', icon:'🎬', cls:'seerr'},
+  jellyfin:   {sub:'jellyfin',   label:'Regarder sur Jellyfin',        icon:'▶',  cls:'plex'},
+  plexweb:    {url:'https://app.plex.tv', label:'Regarder sur Plex',  subText:'app.plex.tv', icon:'▶', cls:'plex'}
+};
+
+function loadConfig(){try{var r=localStorage.getItem('plex-jqh-omv-cfg');if(r)return JSON.parse(r)}catch(e){}return null}
+function storeConfig(c){try{localStorage.setItem('plex-jqh-omv-cfg',JSON.stringify(c))}catch(e){}}
+function cleanMac(m){return m.replace(/[:\-\s]/g,'').toLowerCase()}
+function validMac(m){return /^[0-9a-f]{12}$/.test(m)}
+function validHost(h){return h.length>0&&h.length<255&&/\./.test(h)&&!h.includes('..')&&/^[a-zA-Z0-9][a-zA-Z0-9\-\.]*[a-zA-Z0-9]$/.test(h)}
+function showToast(msg,warn){var t=document.getElementById('toast');t.textContent=msg;t.className=warn?'toast warn show':'toast show';setTimeout(function(){t.className='toast'},3000)}
+
+function parseApps(str){
+  var keys=(str||'').split(',').map(function(s){return s.trim()}).filter(Boolean);
+  return keys.map(function(k){return APP_CATALOG[k]||{sub:k,label:k,icon:'🔗',cls:'cfg'}});
+}
+
+function firstSubOf(apps){
+  for(var i=0;i<apps.length;i++){if(apps[i].sub)return apps[i].sub;}
+  return null;
+}
+
+// status target: explicit override > first app subdomain > base host
+function statusHost(){
+  if(config.status)return config.status;
+  var apps=parseApps(config.apps||'seerr,plexweb');
+  var sub=firstSubOf(apps);
+  return sub?sub+'.'+config.host:config.host;
+}
+
+function readUrlParams(){
+  var p=new URLSearchParams(window.location.search);
+  var host=p.get('host');
+  if(!host)return false;
+  if(!validHost(host))return false;
+  var mac=p.get('mac'),cleaned='';
+  if(mac){cleaned=cleanMac(mac);if(!validMac(cleaned))return false;}
+  var portNum=parseInt(p.get('port')||'9',10);
+  if(isNaN(portNum)||portNum<1||portNum>65535)portNum=9;
+  config={host:host,port:String(portNum)};
+  if(cleaned)config.mac=cleaned;
+  var title=p.get('title');if(title)config.title=title;
+  var apps=p.get('apps');if(apps)config.apps=apps;
+  var status=p.get('status');if(status&&validHost(status))config.status=status;
+  storeConfig(config);
+  return true;
+}
+
+function showSettings(){
+  document.getElementById('mainScreen').style.display='none';
+  document.getElementById('settingsScreen').style.display='flex';
+  document.getElementById('cancelBtn').style.display=config?'block':'none';
+  if(config){
+    document.getElementById('cfgTitle').value=config.title||'';
+    document.getElementById('cfgMac').value=config.mac||'';
+    document.getElementById('cfgHost').value=config.host||'';
+    document.getElementById('cfgPort').value=config.port||'9';
+    document.getElementById('cfgApps').value=config.apps||'';
+  }
+  if(checkInterval)clearInterval(checkInterval);
+  setTimeout(function(){document.getElementById('cfgHost').focus();},50);
+}
+
+function cancelSettings(){
+  if(!config)return;
+  startApp();
+}
+
+function saveConfig(){
+  var title=document.getElementById('cfgTitle').value.trim();
+  var mac=document.getElementById('cfgMac').value.trim();
+  var host=document.getElementById('cfgHost').value.trim();
+  var port=document.getElementById('cfgPort').value.trim()||'9';
+  var apps=document.getElementById('cfgApps').value.trim();
+  if(!host){showToast('⚠ Domaine requis',true);return}
+  if(!validHost(host)){showToast('⚠ Domaine invalide',true);return}
+  var cleaned='';
+  if(mac){cleaned=cleanMac(mac);if(!validMac(cleaned)){showToast('⚠ MAC invalide (12 caractères hex)',true);return}}
+  var portNum=parseInt(port,10);
+  if(isNaN(portNum)||portNum<1||portNum>65535){showToast('⚠ Port invalide (1-65535)',true);return}
+  config={host:host,port:String(portNum)};
+  if(cleaned)config.mac=cleaned;
+  if(title)config.title=title;
+  if(apps)config.apps=apps;
+  storeConfig(config);
+  startApp();
+}
+
+function buildLinks(){
+  var container=document.getElementById('linksContainer');
+  while(container.firstChild)container.removeChild(container.firstChild);
+  parseApps(config.apps||'seerr,plexweb').forEach(function(app){
+    var a=document.createElement('a');
+    a.className='link-btn';
+    a.target='_blank';
+    a.rel='noopener';
+    a.href=app.url||('https://'+(app.sub?app.sub+'.'+config.host:config.host));
+    // Sub-based links live on the user's server; external app.url links don't.
+    // Grey out + block clicks on the former when the server is offline.
+    if(!app.url){
+      a.classList.add('server-dependent');
+      if(!isOnline)a.classList.add('offline');
+      a.addEventListener('click',function(e){
+        if(!isOnline){e.preventDefault();showToast('⚠ Serveur éteint — allume-le d’abord',true);}
+      });
+    }
+    var icon=document.createElement('div');
+    icon.className='link-icon '+app.cls;
+    icon.textContent=app.icon;
+    var text=document.createElement('div');
+    text.className='link-text';
+    text.textContent=app.label;
+    var sub=document.createElement('div');
+    sub.className='link-sub';
+    sub.textContent=app.subText||(app.sub?app.sub+'.'+config.host:config.host);
+    text.appendChild(sub);
+    a.appendChild(icon);
+    a.appendChild(text);
+    container.appendChild(a);
+  });
+  var cfg=document.createElement('div');
+  cfg.className='link-btn';
+  cfg.addEventListener('click',showSettings);
+  var cfgIcon=document.createElement('div');
+  cfgIcon.className='link-icon cfg';
+  cfgIcon.textContent='⚙';
+  var cfgText=document.createElement('div');
+  cfgText.className='link-text';
+  cfgText.textContent='Paramètres';
+  var cfgSub=document.createElement('div');
+  cfgSub.className='link-sub';
+  cfgSub.textContent='modifier la configuration';
+  cfgText.appendChild(cfgSub);
+  cfg.appendChild(cfgIcon);
+  cfg.appendChild(cfgText);
+  container.appendChild(cfg);
+}
+
+function startApp(){
+  document.getElementById('settingsScreen').style.display='none';
+  document.getElementById('mainScreen').style.display='flex';
+  document.getElementById('appTitle').textContent=config.title||'Plex jqh omv';
+  document.getElementById('headerSub').textContent=config.host;
+  document.getElementById('powerSection').style.display=config.mac?'flex':'none';
+  document.getElementById('fallbackLink').style.display=config.mac?'block':'none';
+  if(config.mac){
+    var fbUrl='./fallback.html?mac='+encodeURIComponent(config.mac)+'&host='+encodeURIComponent(config.host)+'&port='+encodeURIComponent(config.port||'9');
+    document.getElementById('fallbackLinkA').href=fbUrl;
+  }
+  buildLinks();
+  wolTimers.forEach(function(t){clearTimeout(t)});wolTimers=[];
+  isOnline=false;wolSent=false;checking=false;depicusReachable=true;
+  checkStatus();
+  probeDepicus();
+  if(checkInterval)clearInterval(checkInterval);
+  checkInterval=setInterval(checkStatus,30000);
+  if(!window.matchMedia('(display-mode:standalone)').matches)setTimeout(function(){document.getElementById('installHint').style.display='block'},3000);
+}
+
+function checkStatus(){
+  if(checking||!config)return;checking=true;
+  var dot=document.getElementById('statusDot'),label=document.getElementById('statusLabel'),sub=document.getElementById('statusSub'),card=document.getElementById('statusCard'),btn=document.getElementById('refreshBtn');
+  btn.classList.add('spinning');
+  dot.className='status-dot checking';card.className='status-card';label.textContent='Vérification...';sub.textContent='ping en cours';
+  var ctrl=new AbortController(),timer=setTimeout(function(){ctrl.abort()},5000);
+  fetch('https://'+statusHost(),{mode:'no-cors',cache:'no-store',signal:ctrl.signal})
+    .then(function(){clearTimeout(timer);btn.classList.remove('spinning');checking=false;setOnline()})
+    .catch(function(){clearTimeout(timer);btn.classList.remove('spinning');checking=false;setOffline()});
+  probeDepicus();
+}
+
+// Probe depicus relay reachability. no-cors only resolves opaque responses,
+// so this detects DNS / TLS / total network down — NOT a Cloudflare 522
+// (origin down behind CF still returns a valid HTTP response from the edge).
+// The permanent manual-WoL fallback link covers that residual case.
+function probeDepicus(){
+  if(depicusProbing||!config||!config.mac)return;
+  depicusProbing=true;
+  var ctrl=new AbortController(),timer=setTimeout(function(){ctrl.abort()},2500);
+  fetch('https://www.depicus.com/wake-on-lan/woli',{mode:'no-cors',cache:'no-store',signal:ctrl.signal})
+    .then(function(){clearTimeout(timer);depicusProbing=false;if(!depicusReachable){depicusReachable=true;if(!isOnline&&!wolSent)setOffline();}})
+    .catch(function(){clearTimeout(timer);depicusProbing=false;if(depicusReachable){depicusReachable=false;if(!isOnline&&!wolSent)setOffline();}});
+}
+
+function applyLinksState(){
+  var off=!isOnline;
+  document.querySelectorAll('.link-btn.server-dependent').forEach(function(el){
+    if(off)el.classList.add('offline');else el.classList.remove('offline');
+  });
+}
+
+function setOnline(){
+  isOnline=true;
+  stopCountdown();
+  applyLinksState();
+  document.getElementById('statusDot').className='status-dot online';
+  document.getElementById('statusCard').className='status-card online';
+  document.getElementById('statusLabel').textContent='En ligne';
+  document.getElementById('statusSub').textContent='serveur accessible';
+  if(config.mac){
+    document.getElementById('powerBtn').className='power-btn online';
+    document.getElementById('powerLabel').textContent='Serveur allumé';
+    document.getElementById('powerLabel').className='power-label sent';
+    document.getElementById('fallbackLink').classList.remove('promoted');
+  }
+  if(wolSent){
+    showToast('✓ Serveur démarré avec succès');
+    if(navigator.vibrate)navigator.vibrate([100,50,100]);
+    wolSent=false;
+  }
+}
+
+function setStarting(){
+  document.getElementById('statusDot').className='status-dot checking';
+  document.getElementById('statusCard').className='status-card';
+  document.getElementById('statusLabel').textContent='Démarrage…';
+  document.getElementById('statusSub').textContent='réveil en cours';
+}
+
+var countdownTimer=null,countdownEndsAt=0;
+function startCountdown(seconds){
+  stopCountdown();
+  countdownEndsAt=Date.now()+seconds*1000;
+  var pl=document.getElementById('powerLabel');
+  var tick=function(){
+    var remaining=Math.max(0,Math.round((countdownEndsAt-Date.now())/1000));
+    if(remaining<=0||isOnline||!wolSent){stopCountdown();return;}
+    pl.textContent='Démarrage… vérification dans '+remaining+'s';
+  };
+  tick();
+  countdownTimer=setInterval(tick,1000);
+}
+function stopCountdown(){if(countdownTimer){clearInterval(countdownTimer);countdownTimer=null;}}
+
+function setOffline(){
+  isOnline=false;
+  applyLinksState();
+  // While a WoL request is being processed, keep the "starting" state — a red
+  // "offline" card next to the spinning power button is contradictory.
+  if(wolSent){setStarting();return;}
+  document.getElementById('statusDot').className='status-dot offline';
+  document.getElementById('statusCard').className='status-card offline';
+  document.getElementById('statusLabel').textContent='Hors ligne';
+  document.getElementById('statusSub').textContent=navigator.onLine?'serveur éteint':'pas de réseau';
+  if(config.mac){
+    var btn=document.getElementById('powerBtn'),lbl=document.getElementById('powerLabel');
+    if(depicusReachable){btn.className='power-btn';lbl.textContent='Allumer le serveur';lbl.className='power-label';}
+    else{btn.className='power-btn unavailable';lbl.textContent='Réveil indisponible — utilise le réveil manuel ↓';lbl.className='power-label unavailable';}
+    document.getElementById('fallbackLink').classList.toggle('promoted',!depicusReachable);
+  }
+}
+
+// Reset the hidden WoL iframe to about:blank so it never stays armed pointing
+// at the depicus wake endpoint between dispatches — a persisted src can be
+// replayed by a later reload / restore / depicus-side refresh, firing a
+// phantom wake with no button press.
+function disarmWolFrame(){
+  var wf=document.getElementById('wolFrame');
+  if(wf&&wf.src&&wf.src!=='about:blank')wf.src='about:blank';
+}
+
+function sendWol(){
+  if(isOnline||wolSent||!config||!config.mac)return;
+  if(!depicusReachable){showToast('⚠ Réveil indisponible — utilise le réveil manuel ↓',true);return;}
+  if(navigator.vibrate)navigator.vibrate(50);
+  var url='https://www.depicus.com/wake-on-lan/woli?m='+encodeURIComponent(config.mac)+'&i='+encodeURIComponent(config.host)+'&s=255.255.255.255&p='+encodeURIComponent(config.port);
+  document.getElementById('wolFrame').src=url;
+  // Disarm the iframe once depicus has had time to receive the GET (~1-2s is
+  // enough). visibilitychange below also disarms it in case this timer is
+  // frozen while the app sits in the background.
+  wolArmedAt=Date.now();
+  setTimeout(disarmWolFrame,10000);
+  wolSent=true;
+  document.getElementById('powerBtn').className='power-btn sent';
+  document.getElementById('powerLabel').className='power-label sent';
+  setStarting();
+  startCountdown(60);
+  showToast('⚡ Demande de réveil envoyée');
+  var scheduleCheck=function(delay){wolTimers.push(setTimeout(function(){startCountdown(60);checkStatus();},delay));};
+  scheduleCheck(60000);scheduleCheck(120000);scheduleCheck(180000);
+  wolTimers.push(setTimeout(function(){
+    if(!isOnline){
+      wolSent=false;stopCountdown();probeDepicus();
+      if(navigator.vibrate)navigator.vibrate(300);
+      setOffline();
+    }
+  },240000));
+}
+
+if('serviceWorker' in navigator){
+  // Robust update detection — stack multiple triggers because no single one
+  // is reliable on Android PWA standalone (focus often doesn't fire on
+  // foreground from app switcher, navigation events are rare).
+  var forceSwCheck=function(){
+    navigator.serviceWorker.getRegistration().then(function(reg){
+      if(reg&&reg.update)reg.update();
+    }).catch(function(){});
+  };
+  // updateViaCache:'none' bypasses the HTTP cache when fetching sw.js itself.
+  // Without it, the browser may serve a stale sw.js for up to 24h.
+  navigator.serviceWorker.register('sw.js',{updateViaCache:'none'}).then(function(reg){
+    if(reg&&reg.update)reg.update();
+  }).catch(function(){});
+  // 1. window focus — Chrome desktop, sometimes Android PWA
+  window.addEventListener('focus',forceSwCheck);
+  // 2. document visibility — most reliable on Android PWA standalone
+  document.addEventListener('visibilitychange',function(){
+    if(!document.hidden)forceSwCheck();
+  });
+  // 3. Periodic safety net every 5 minutes while visible — catches the case
+  // where the user keeps the PWA open for hours without any event firing.
+  setInterval(function(){if(!document.hidden)forceSwCheck();},5*60*1000);
+  // Auto-reload on SW update. Skip the very first install (no prior controller)
+  // so a fresh visit isn't reloaded mid-startup.
+  var hadController=!!navigator.serviceWorker.controller;
+  var refreshing=false;
+  navigator.serviceWorker.addEventListener('controllerchange',function(){
+    if(refreshing||!hadController)return;
+    refreshing=true;
+    window.location.reload();
+  });
+}
+
+// Long-press (2s) on the app title opens a debug snapshot page.
+// Discoverable for the admin without adding visible UI for the family.
+// Anchored on the always-visible header instead of the bottom footer
+// (which may need scrolling on short viewports).
+(function(){
+  var lpTimer=null;
+  var start=function(e){if(e.cancelable)e.preventDefault();lpTimer=setTimeout(function(){window.open('debug.html','_blank','noopener');},2000);};
+  var cancel=function(){if(lpTimer){clearTimeout(lpTimer);lpTimer=null;}};
+  document.querySelectorAll('.header h1').forEach(function(el){
+    el.addEventListener('pointerdown',start);
+    el.addEventListener('pointerup',cancel);
+    el.addEventListener('pointerleave',cancel);
+    el.addEventListener('pointercancel',cancel);
+  });
+})();
+
+// Pause the 30s status polling while the PWA is hidden (background tab,
+// app switcher, screen off). Resume immediately on return with a fresh
+// check so the user sees a current state without waiting up to 30s.
+document.addEventListener('visibilitychange',function(){
+  if(!config)return;
+  if(document.hidden){
+    if(checkInterval){clearInterval(checkInterval);checkInterval=null;}
+    // The 10s disarm timer is frozen while backgrounded — disarm here too so
+    // the iframe is never serialized armed. Skip if the dispatch is <3s old:
+    // a slow uplink may not have reached depicus yet, don't abort the GET.
+    if(wolArmedAt&&Date.now()-wolArmedAt>3000)disarmWolFrame();
+  } else {
+    // A fetch in flight when the screen locked may never resolve (Android
+    // suspends network) — its `checking=true` flag would then permanently
+    // block subsequent checks (including the one triggered by wolTimers).
+    // Reset it on resume so the next checkStatus() runs.
+    checking=false;
+    depicusProbing=false;
+    // If a WoL is in flight, the 1Hz countdown setInterval was likely frozen
+    // by the OS during the lock — its label is now stale. Stop it and show
+    // "Vérification…" until the immediate checkStatus() below resolves.
+    if(wolSent&&!isOnline){
+      stopCountdown();
+      var pl=document.getElementById('powerLabel');
+      if(pl)pl.textContent='Vérification…';
+    }
+    if(!checkInterval){checkStatus();checkInterval=setInterval(checkStatus,30000);}
+  }
+});
+
+// Init: URL params > localStorage > settings screen
+if(!readUrlParams())config=loadConfig();
+if(config&&config.host)startApp();
+else showSettings();
+</script>
+</body>
+</html>

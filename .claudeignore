@@ -1,0 +1,26 @@
+# Hygiène préventive — patterns secrets à ne jamais lire.
+# Aucun de ces fichiers n'existe aujourd'hui dans le repo (le projet
+# n'utilise aucun secret par construction), mais on les liste pour
+# éviter la lecture accidentelle si un futur contributeur en ajoute.
+
+# Variables d'environnement
+.env
+.env.*
+!.env.example
+
+# Certificats et clés
+*.pem
+*.key
+*.crt
+*.pfx
+
+# Identités SSH (au cas où le repo serait cloné dans un dossier qui en contient)
+id_rsa
+id_rsa.*
+id_ed25519
+id_ed25519.*
+
+# Secrets / credentials génériques
+secrets/
+**/credentials*
+**/auth.json

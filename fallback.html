@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'; frame-src 'none'">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#0c0e14">
+<title>Réveil manuel — Plex jqh omv</title>
+<link rel="icon" href="icon-192.png" type="image/png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:#0c0e14; --surface:#161a25; --surface-hover:#1c2130;
+    --border:#252a3a; --text:#e4e6ef; --text-dim:#6b7194;
+    --accent:#7c6aef; --accent-glow:rgba(124,106,239,.25);
+    --green:#34d399; --orange:#fbbf24;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html{height:100%}
+  body{
+    font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);
+    min-height:100%;min-height:100dvh;
+    padding:24px 16px;
+    padding-top:max(24px,env(safe-area-inset-top));
+    padding-bottom:max(40px,env(safe-area-inset-bottom));
+    -webkit-tap-highlight-color:transparent;line-height:1.5;
+  }
+  body::before{
+    content:'';position:fixed;inset:0;pointer-events:none;z-index:0;
+    background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E");
+  }
+  .page{position:relative;z-index:1;max-width:560px;margin:0 auto;display:flex;flex-direction:column;gap:20px}
+
+  header{text-align:center;padding:8px 0 4px}
+  header h1{font-size:24px;font-weight:700;letter-spacing:-.5px;margin-bottom:8px}
+  header p{font-size:14px;color:var(--text-dim);max-width:42ch;margin:0 auto}
+
+  .params{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:16px}
+  .params h2{font-size:14px;font-weight:600;color:var(--accent);margin-bottom:10px;display:flex;align-items:center;gap:8px}
+  .params h2::before{content:'';width:6px;height:6px;border-radius:50%;background:var(--accent);box-shadow:0 0 8px var(--accent)}
+  .params .params-hint{font-size:12px;color:var(--text-dim);margin-bottom:12px}
+  .params-list{display:flex;flex-direction:column;gap:8px}
+  .param{display:flex;flex-direction:column;gap:4px}
+  .param label{font-size:11px;font-weight:500;color:var(--text-dim);text-transform:uppercase;letter-spacing:.5px}
+  .param code{
+    font-family:'JetBrains Mono',monospace;font-size:14px;
+    background:var(--bg);border:1px solid var(--border);border-radius:8px;
+    padding:10px 12px;color:var(--text);
+    cursor:pointer;transition:all .15s;display:flex;align-items:center;justify-content:space-between;
+  }
+  .param code::after{content:'📋';font-size:12px;opacity:.4;margin-left:8px;transition:opacity .15s}
+  .param code:hover::after{opacity:.8}
+  .param code.copied{border-color:var(--green);color:var(--green)}
+  .param code.copied::after{content:'✓';color:var(--green);opacity:1}
+  .param code.copy-fail{border-color:var(--orange);color:var(--orange)}
+  .param code.copy-fail::after{content:'✕';color:var(--orange);opacity:1}
+  .param .copy-hint{font-size:11px;color:var(--orange);margin-top:4px;display:none;font-family:'DM Sans',sans-serif}
+  .param.copy-failed .copy-hint{display:block}
+
+  section.os{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:18px 16px}
+  section.os h2{font-size:16px;font-weight:600;margin-bottom:6px;display:flex;align-items:center;gap:10px}
+  section.os .app-name{font-size:13px;color:var(--text-dim);font-family:'JetBrains Mono',monospace;margin-bottom:12px}
+  section.os ol{padding-left:20px;font-size:14px;color:var(--text-dim);margin-bottom:14px}
+  section.os ol li{margin-bottom:6px}
+  section.os ol li::marker{color:var(--accent)}
+  section.os strong{color:var(--text)}
+  .cta{
+    display:inline-flex;align-items:center;gap:8px;
+    padding:10px 14px;background:var(--bg);border:1px solid var(--border);border-radius:10px;
+    color:var(--text);text-decoration:none;font-size:13px;font-weight:500;
+    transition:all .15s;
+  }
+  .cta:active{background:var(--surface-hover);transform:scale(.98)}
+  .cta::after{content:'↗';opacity:.5}
+
+  details{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:14px 16px}
+  details summary{font-size:14px;font-weight:500;color:var(--text-dim);cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px}
+  details summary::-webkit-details-marker{display:none}
+  details summary::after{content:'▾';margin-left:auto;transition:transform .2s}
+  details[open] summary::after{transform:rotate(180deg)}
+  details[open] summary{color:var(--text);margin-bottom:12px}
+  details p{font-size:13px;color:var(--text-dim);margin-bottom:8px}
+  details pre,section.os pre{
+    background:var(--bg);border:1px solid var(--border);border-radius:8px;
+    padding:10px 12px;font-family:'JetBrains Mono',monospace;font-size:12px;
+    overflow-x:auto;color:var(--text);margin-bottom:10px;
+  }
+  details ul{padding-left:18px;font-size:13px;color:var(--text-dim)}
+  details code:not(pre code){background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:1px 6px;font-size:12px;font-family:'JetBrains Mono',monospace}
+
+  footer{margin-top:8px;display:flex;align-items:center;justify-content:space-between;font-size:12px;color:var(--text-dim);font-family:'JetBrains Mono',monospace}
+  footer a{color:var(--accent);text-decoration:none;display:inline-flex;align-items:center;gap:6px}
+  footer a:active{opacity:.7}
+  footer .version{opacity:.5}
+
+  .note{font-size:12px;color:var(--text-dim);padding:12px 14px;background:rgba(124,106,239,.06);border:1px solid rgba(124,106,239,.2);border-radius:10px}
+</style>
+</head>
+<body>
+<div class="page">
+  <header>
+    <h1>Réveil manuel</h1>
+    <p>Si le bouton d'allumage ne répond pas dans l'app, vous pouvez réveiller le serveur depuis votre téléphone ou ordinateur avec une de ces apps gratuites.</p>
+  </header>
+
+  <div class="params">
+    <h2>Vos paramètres</h2>
+    <div class="params-hint">Cliquez sur une valeur pour la copier, puis collez-la dans l'app que vous choisissez ci-dessous.</div>
+    <div class="params-list">
+      <div class="param">
+        <label>Adresse MAC</label>
+        <code id="paramMac" data-copy="">—</code>
+        <span class="copy-hint">Copie auto indisponible — sélectionnez le texte à la main</span>
+      </div>
+      <div class="param">
+        <label>Domaine (Host)</label>
+        <code id="paramHost" data-copy="">—</code>
+        <span class="copy-hint">Copie auto indisponible — sélectionnez le texte à la main</span>
+      </div>
+      <div class="param">
+        <label>Port</label>
+        <code id="paramPort" data-copy="">9</code>
+        <span class="copy-hint">Copie auto indisponible — sélectionnez le texte à la main</span>
+      </div>
+    </div>
+  </div>
+
+  <section class="os">
+    <h2>📱 Android</h2>
+    <div class="app-name">WolOn — gratuit, Play Store</div>
+    <ol>
+      <li>Installez <strong>WolOn</strong> depuis le Play Store</li>
+      <li>Ouvrez l'app, ajoutez un nouvel appareil</li>
+      <li>Collez la MAC, le domaine et le port (en haut de cette page)</li>
+      <li>Sauvegardez, puis cliquez sur l'appareil pour le réveiller</li>
+    </ol>
+    <a class="cta" href="https://play.google.com/store/search?q=WolOn&c=apps" target="_blank" rel="noopener">Chercher WolOn</a>
+  </section>
+
+  <section class="os">
+    <h2>🍎 iPhone / iPad</h2>
+    <div class="app-name">Mocha WOL — gratuit, App Store</div>
+    <ol>
+      <li>Installez <strong>Mocha WOL</strong> depuis l'App Store</li>
+      <li>Ajoutez un appareil</li>
+      <li>Collez la MAC, le domaine (champ Host ou IP) et le port</li>
+      <li>Sauvegardez, puis cliquez sur l'appareil pour le réveiller</li>
+    </ol>
+    <a class="cta" href="https://apps.apple.com/search?term=mocha%20wol" target="_blank" rel="noopener">Chercher Mocha WOL</a>
+  </section>
+
+  <section class="os">
+    <h2>💻 Windows</h2>
+    <div class="app-name">PowerShell — intégré à Windows, aucune installation</div>
+    <ol>
+      <li>Ouvrez le menu Démarrer, tapez <strong>PowerShell</strong> et lancez-le</li>
+      <li>Copiez la commande ci-dessous (déjà remplie avec vos paramètres)</li>
+      <li>Collez-la dans PowerShell et appuyez sur <strong>Entrée</strong></li>
+    </ol>
+    <pre id="psLine">$mac=[byte[]]-split('AABBCCDDEEFF' -replace '..','0x$0 ');$u=New-Object Net.Sockets.UdpClient;$u.Connect('myserver.example.com',9);$u.Send(([byte[]](,0xFF*6)+($mac*16)),102)|Out-Null</pre>
+  </section>
+
+  <details>
+    <summary>💻 Linux / macOS (avancé, ligne de commande)</summary>
+    <p>Installation :</p>
+    <ul>
+      <li>Debian/Ubuntu : <code>sudo apt install wakeonlan</code></li>
+      <li>macOS : <code>brew install wakeonlan</code></li>
+    </ul>
+    <p style="margin-top:10px">Commande de réveil :</p>
+    <pre id="cmdLine">wakeonlan -i myserver.example.com -p 9 AA:BB:CC:DD:EE:FF</pre>
+  </details>
+
+  <div class="note">
+    Toutes ces apps envoient exactement le même signal de réveil que le bouton de l'app principale. Si le réveil a déjà marché avant avec l'app, il marchera avec ces outils en utilisant les mêmes paramètres.
+  </div>
+
+  <footer>
+    <a href="./">← Retour à l'app</a>
+    <span class="version">v2.30</span>
+  </footer>
+</div>
+
+<script>
+var p = new URLSearchParams(window.location.search);
+var mac = p.get('mac') || '';
+var host = p.get('host') || '';
+var port = p.get('port') || '9';
+
+function formatMac(m) {
+  if (!m || !/^[0-9a-fA-F]{12}$/.test(m)) return m || '—';
+  return m.match(/.{2}/g).join(':').toUpperCase();
+}
+
+var macFmt = formatMac(mac);
+var macEl = document.getElementById('paramMac');
+var hostEl = document.getElementById('paramHost');
+var portEl = document.getElementById('paramPort');
+
+macEl.textContent = macFmt;
+macEl.dataset.copy = macFmt;
+hostEl.textContent = host || '—';
+hostEl.dataset.copy = host || '';
+portEl.textContent = port;
+portEl.dataset.copy = port;
+
+// Update the Windows PowerShell command
+var psLine = document.getElementById('psLine');
+if (psLine) {
+  var psMac = /^[0-9a-fA-F]{12}$/.test(mac) ? mac.toUpperCase() : 'AABBCCDDEEFF';
+  var psHost = host || 'myserver.example.com';
+  psLine.textContent = "$mac=[byte[]]-split('" + psMac + "' -replace '..','0x$0 ');"
+    + "$u=New-Object Net.Sockets.UdpClient;$u.Connect('" + psHost + "'," + port + ");"
+    + "$u.Send(([byte[]](,0xFF*6)+($mac*16)),102)|Out-Null";
+}
+
+// Update the Linux/macOS command line
+var cmdLine = document.getElementById('cmdLine');
+if (cmdLine) {
+  var cmdMac = macFmt && macFmt !== '—' ? macFmt : 'AA:BB:CC:DD:EE:FF';
+  var cmdHost = host || 'myserver.example.com';
+  cmdLine.textContent = 'wakeonlan -i ' + cmdHost + ' -p ' + port + ' ' + cmdMac;
+}
+
+// Click-to-copy on parameter values.
+// On clipboard failure (API unavailable, permission denied, insecure context),
+// surface a visible ✕ + hint so the user knows to select manually instead of
+// silently doing nothing.
+function flagCopyFail(el) {
+  el.classList.add('copy-fail');
+  el.parentNode.classList.add('copy-failed');
+  setTimeout(function() {
+    el.classList.remove('copy-fail');
+    el.parentNode.classList.remove('copy-failed');
+  }, 3000);
+}
+
+document.querySelectorAll('.param code').forEach(function(el) {
+  el.addEventListener('click', function() {
+    var value = el.dataset.copy;
+    if (!value || value === '—') return;
+    if (!navigator.clipboard || !navigator.clipboard.writeText) {
+      flagCopyFail(el);
+      return;
+    }
+    navigator.clipboard.writeText(value).then(function() {
+      el.classList.add('copied');
+      setTimeout(function() { el.classList.remove('copied'); }, 1500);
+    }).catch(function() {
+      flagCopyFail(el);
+    });
+  });
+});
+</script>
+</body>
+</html>

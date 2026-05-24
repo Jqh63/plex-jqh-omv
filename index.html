@@ -207,7 +207,7 @@
   <div class="links" id="linksContainer"></div>
 
   <div class="install-hint" id="installHint"><strong>Astuce :</strong> menu ⋮ → « Ajouter à l'écran d'accueil »</div>
-  <div class="footer">v3.3</div>
+  <div class="footer">v3.4</div>
 </div>
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
@@ -215,13 +215,18 @@
 <script>
 var config=null,isOnline=false,wolSent=false,checking=false,checkInterval=null;
 var relayReachable=true,relayProbing=false;
-var wolStartTime=0,wolPollTimer=null;
-var WOL_POLL_MS=15000, WOL_TIMEOUT_MS=240000;
+var wolStartTime=0,wolPollTimer=null,wolRetryTimers=[];
+var WOL_POLL_MS=15000, WOL_TIMEOUT_MS=300000;
+// Resend the POST at these offsets after the initial fire (server-side
+// already sends 3 packets per POST). 3 POSTs × 3 packets = 12 magic
+// packets over 90 s — drowns out any plausible UDP loss pattern.
+var WOL_RETRY_DELAYS_MS=[30000, 60000, 90000];
 
 // Fallback ETA before any boot history is recorded. Calibrated to the actual
-// observed boot time on the author's J5005 OMV (~1m40), which the median will
-// converge on after a few wakes.
-var ETA_FALLBACK_MS=100000;
+// observed boot time on the author's J5005 OMV (~80 s wall-clock from magic
+// packet to first HTTPS response), which the median will converge on after a
+// few wakes anyway.
+var ETA_FALLBACK_MS=80000;
 var BOOT_HISTORY_KEY='plex-jqh-omv-boot-history';
 var BOOT_HISTORY_MAX=10;
 // Exclude outliers: <10s = false positive (server was already up when we
@@ -414,6 +419,7 @@ function startApp(){
   }
   buildLinks();
   clearWolPoll();
+  clearWolRetries();
   isOnline=false;wolSent=false;checking=false;relayReachable=true;
   checkStatus();
   probeRelay();
@@ -479,6 +485,7 @@ function setOnline(){
   isOnline=true;
   stopCountdown();
   clearWolPoll();
+  clearWolRetries();
   applyLinksState();
   document.getElementById('statusDot').className='status-dot online';
   document.getElementById('statusCard').className='status-card online';
@@ -543,6 +550,38 @@ function stopCountdown(){
 function clearWolPoll(){
   if(wolPollTimer){clearInterval(wolPollTimer);wolPollTimer=null;}
 }
+function clearWolRetries(){
+  wolRetryTimers.forEach(function(t){clearTimeout(t)});
+  wolRetryTimers=[];
+}
+
+// One POST to the relay. `isRetry=true` means a follow-up shot to cover
+// transient UDP loss: we don't want a single retry hitting a 503 or a
+// network blip to reset the wake state — the original POST may already
+// have woken the server, we're just being paranoid. Initial POST keeps
+// the strict 401/403/network handling so a misconfigured token surfaces
+// immediately instead of waiting for the 5-min timeout.
+function postWol(isRetry){
+  fetch(config.relay+'/wol',{
+    method:'POST',
+    cache:'no-store',
+    headers:{'Content-Type':'application/json','X-Token':config.token},
+    body:JSON.stringify({mac:macToColon(config.mac)})
+  }).then(function(r){
+    if(r.ok||isRetry)return;
+    wolSent=false;wolStartTime=0;stopCountdown();clearWolPoll();clearWolRetries();
+    var msg=(r.status===401||r.status===403)?'Authentification refusée par le relais':'Erreur relais HTTP '+r.status;
+    if(navigator.vibrate)navigator.vibrate(300);
+    showToast('⚠ '+msg+' — utilise le réveil manuel ↓',true);
+    setOffline();
+  }).catch(function(){
+    if(isRetry)return;
+    wolSent=false;wolStartTime=0;stopCountdown();clearWolPoll();clearWolRetries();probeRelay();
+    if(navigator.vibrate)navigator.vibrate(300);
+    showToast('⚠ Relais injoignable — utilise le réveil manuel ↓',true);
+    setOffline();
+  });
+}
 
 function setOffline(){
   isOnline=false;
@@ -573,24 +612,14 @@ function sendWol(){
   setStarting();
   startCountdown();
   showToast('⚡ Demande de réveil envoyée');
-  fetch(config.relay+'/wol',{
-    method:'POST',
-    cache:'no-store',
-    headers:{'Content-Type':'application/json','X-Token':config.token},
-    body:JSON.stringify({mac:macToColon(config.mac)})
-  }).then(function(r){
-    if(!r.ok){
-      wolSent=false;wolStartTime=0;stopCountdown();
-      var msg=(r.status===401||r.status===403)?'Authentification refusée par le relais':'Erreur relais HTTP '+r.status;
-      if(navigator.vibrate)navigator.vibrate(300);
-      showToast('⚠ '+msg+' — utilise le réveil manuel ↓',true);
-      setOffline();
-    }
-  }).catch(function(){
-    wolSent=false;wolStartTime=0;stopCountdown();probeRelay();
-    if(navigator.vibrate)navigator.vibrate(300);
-    showToast('⚠ Relais injoignable — utilise le réveil manuel ↓',true);
-    setOffline();
+  postWol(false);
+  // Retry POSTs to drown out UDP loss. Server-side already sends 3
+  // packets per POST, so 4 POSTs × 3 = 12 magic packets over 90 s.
+  WOL_RETRY_DELAYS_MS.forEach(function(delay){
+    wolRetryTimers.push(setTimeout(function(){
+      if(!wolSent||isOnline)return;
+      postWol(true);
+    },delay));
   });
   // Single polling interval instead of 60/120/180 s setTimeouts. Two reasons:
   //  1. Tighter detection window — boots faster than 60 s previously missed
@@ -601,7 +630,7 @@ function sendWol(){
   wolPollTimer=setInterval(function(){
     if(!wolSent||isOnline){clearWolPoll();return;}
     if(Date.now()-wolStartTime>WOL_TIMEOUT_MS){
-      wolSent=false;wolStartTime=0;clearWolPoll();stopCountdown();probeRelay();
+      wolSent=false;wolStartTime=0;clearWolPoll();clearWolRetries();stopCountdown();probeRelay();
       if(navigator.vibrate)navigator.vibrate(300);
       setOffline();
       return;

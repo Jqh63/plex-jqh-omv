@@ -207,15 +207,16 @@
   <div class="links" id="linksContainer"></div>
 
   <div class="install-hint" id="installHint"><strong>Astuce :</strong> menu ⋮ → « Ajouter à l'écran d'accueil »</div>
-  <div class="footer">v3.2</div>
+  <div class="footer">v3.3</div>
 </div>
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 <script>
-var config=null,isOnline=false,wolSent=false,checking=false,checkInterval=null,wolTimers=[];
+var config=null,isOnline=false,wolSent=false,checking=false,checkInterval=null;
 var relayReachable=true,relayProbing=false;
-var wolStartTime=0;
+var wolStartTime=0,wolPollTimer=null;
+var WOL_POLL_MS=15000, WOL_TIMEOUT_MS=240000;
 
 // Fallback ETA before any boot history is recorded. Calibrated to the actual
 // observed boot time on the author's J5005 OMV (~1m40), which the median will
@@ -412,7 +413,7 @@ function startApp(){
     document.getElementById('fallbackLinkA').href=fbUrl;
   }
   buildLinks();
-  wolTimers.forEach(function(t){clearTimeout(t)});wolTimers=[];
+  clearWolPoll();
   isOnline=false;wolSent=false;checking=false;relayReachable=true;
   checkStatus();
   probeRelay();
@@ -477,6 +478,7 @@ function setFallbackState(){
 function setOnline(){
   isOnline=true;
   stopCountdown();
+  clearWolPoll();
   applyLinksState();
   document.getElementById('statusDot').className='status-dot online';
   document.getElementById('statusCard').className='status-card online';
@@ -538,6 +540,9 @@ function stopCountdown(){
   var box=document.getElementById('powerProgress');
   if(box)box.classList.remove('active');
 }
+function clearWolPoll(){
+  if(wolPollTimer){clearInterval(wolPollTimer);wolPollTimer=null;}
+}
 
 function setOffline(){
   isOnline=false;
@@ -587,15 +592,22 @@ function sendWol(){
     showToast('⚠ Relais injoignable — utilise le réveil manuel ↓',true);
     setOffline();
   });
-  var scheduleCheck=function(delay){wolTimers.push(setTimeout(function(){checkStatus();},delay));};
-  scheduleCheck(60000);scheduleCheck(120000);scheduleCheck(180000);
-  wolTimers.push(setTimeout(function(){
-    if(!isOnline){
-      wolSent=false;wolStartTime=0;stopCountdown();probeRelay();
+  // Single polling interval instead of 60/120/180 s setTimeouts. Two reasons:
+  //  1. Tighter detection window — boots faster than 60 s previously missed
+  //     the first check and waited for the 120 s one (visible gap of ~55 s).
+  //  2. setInterval survives background freeze on mobile better than 3 staggered
+  //     setTimeouts — at resume, the next tick lands quickly without juggling
+  //     which of the three timers did or didn't fire.
+  wolPollTimer=setInterval(function(){
+    if(!wolSent||isOnline){clearWolPoll();return;}
+    if(Date.now()-wolStartTime>WOL_TIMEOUT_MS){
+      wolSent=false;wolStartTime=0;clearWolPoll();stopCountdown();probeRelay();
       if(navigator.vibrate)navigator.vibrate(300);
       setOffline();
+      return;
     }
-  },240000));
+    checkStatus();
+  },WOL_POLL_MS);
 }
 
 if('serviceWorker' in navigator){
@@ -658,19 +670,19 @@ document.addEventListener('visibilitychange',function(){
   } else {
     // A fetch in flight when the screen locked may never resolve (Android
     // suspends network) — its `checking=true` flag would then permanently
-    // block subsequent checks (including the one triggered by wolTimers).
-    // Reset it on resume so the next checkStatus() runs.
+    // block subsequent checks. Reset it on resume so the next checkStatus()
+    // runs unhindered.
     checking=false;
     relayProbing=false;
-    // If a WoL is in flight, the 1Hz countdown setInterval was likely frozen
-    // by the OS during the lock — its label is now stale. Stop it and show
-    // "Vérification…" until the immediate checkStatus() below resolves.
-    if(wolSent&&!isOnline){
-      stopCountdown();
-      var pl=document.getElementById('powerLabel');
-      if(pl)pl.textContent='Vérification…';
-    }
-    if(!checkInterval){checkStatus();checkInterval=setInterval(checkStatus,30000);}
+    // Always force an immediate check on resume, even if checkInterval still
+    // exists — wolPollTimer / checkInterval may have been frozen during the
+    // background phase and the next scheduled tick could be seconds or
+    // minutes away. The user just looked at the screen; give them fresh data.
+    checkStatus();
+    if(!checkInterval)checkInterval=setInterval(checkStatus,30000);
+    // Note: countdown / progress bar are intentionally NOT stopped here.
+    // Their tick uses Date.now() (wall-clock), so on resume they self-correct
+    // to the right position without losing visual continuity.
   }
 });
 

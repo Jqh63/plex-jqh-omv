@@ -2,7 +2,7 @@
 <html lang="fr">
 <head>
 <meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; frame-src https:; connect-src https:; manifest-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; frame-src 'none'; connect-src https:; manifest-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -145,6 +145,16 @@
     <input type="number" id="cfgPort" placeholder="9" autocomplete="off">
   </div>
   <div class="field">
+    <label>Relais WoL <span style="font-size:11px;font-weight:400;opacity:.6">(optionnel — URL HTTPS)</span></label>
+    <input type="url" id="cfgRelay" placeholder="https://wol.exemple.com" autocomplete="off" autocapitalize="off">
+    <span class="hint">URL du relais self-hosted qui envoie le magic packet (laisser vide si pas de WoL)</span>
+  </div>
+  <div class="field">
+    <label>Token relais <span style="font-size:11px;font-weight:400;opacity:.6">(optionnel)</span></label>
+    <input type="password" id="cfgToken" placeholder="" autocomplete="off">
+    <span class="hint">Secret partagé envoyé au relais (header X-Token)</span>
+  </div>
+  <div class="field">
     <label>Applications <span style="font-size:11px;font-weight:400;opacity:.6">(optionnel)</span></label>
     <input type="text" id="cfgApps" placeholder="seerr,jellyfin" autocomplete="off" autocapitalize="off">
     <span class="hint">Mots-clés séparés par virgule : seerr, overseerr, jellyseerr, jellyfin, plexweb</span>
@@ -191,19 +201,14 @@
   <div class="links" id="linksContainer"></div>
 
   <div class="install-hint" id="installHint"><strong>Astuce :</strong> menu ⋮ → « Ajouter à l'écran d'accueil »</div>
-  <div class="footer">v2.30</div>
+  <div class="footer">v3.0</div>
 </div>
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
-<!-- Do NOT add sandbox="" here, and do NOT tighten CSP frame-src to
-     https://www.depicus.com — depicus appears to redirect internally to
-     a different host on this endpoint and both restrictions silently
-     break the magic packet dispatch (bisected v2.16→v2.19). See CLAUDE.md. -->
-<iframe id="wolFrame" style="display:none;" aria-hidden="true"></iframe>
 
 <script>
-var config=null,isOnline=false,wolSent=false,checking=false,checkInterval=null,wolTimers=[],wolArmedAt=0;
-var depicusReachable=true,depicusProbing=false;
+var config=null,isOnline=false,wolSent=false,checking=false,checkInterval=null,wolTimers=[];
+var relayReachable=true,relayProbing=false;
 
 var APP_CATALOG={
   seerr:      {sub:'seerr',      label:'Demander un film / une série', icon:'🎬', cls:'seerr'},
@@ -217,7 +222,10 @@ function loadConfig(){try{var r=localStorage.getItem('plex-jqh-omv-cfg');if(r)re
 function storeConfig(c){try{localStorage.setItem('plex-jqh-omv-cfg',JSON.stringify(c))}catch(e){}}
 function cleanMac(m){return m.replace(/[:\-\s]/g,'').toLowerCase()}
 function validMac(m){return /^[0-9a-f]{12}$/.test(m)}
+function macToColon(m){return m.replace(/(.{2})/g,'$1:').slice(0,-1)}
 function validHost(h){return h.length>0&&h.length<255&&/\./.test(h)&&!h.includes('..')&&/^[a-zA-Z0-9][a-zA-Z0-9\-\.]*[a-zA-Z0-9]$/.test(h)}
+function cleanRelay(u){return u.replace(/\/+$/,'')}
+function validRelay(u){return /^https:\/\/[a-zA-Z0-9.\-]+(:\d+)?(\/.*)?$/.test(u)&&u.length<255}
 function showToast(msg,warn){var t=document.getElementById('toast');t.textContent=msg;t.className=warn?'toast warn show':'toast show';setTimeout(function(){t.className='toast'},3000)}
 
 function parseApps(str){
@@ -249,6 +257,8 @@ function readUrlParams(){
   if(isNaN(portNum)||portNum<1||portNum>65535)portNum=9;
   config={host:host,port:String(portNum)};
   if(cleaned)config.mac=cleaned;
+  var relay=p.get('relay');if(relay){var cr=cleanRelay(relay);if(validRelay(cr))config.relay=cr;}
+  var token=p.get('token');if(token)config.token=token;
   var title=p.get('title');if(title)config.title=title;
   var apps=p.get('apps');if(apps)config.apps=apps;
   var status=p.get('status');if(status&&validHost(status))config.status=status;
@@ -265,6 +275,8 @@ function showSettings(){
     document.getElementById('cfgMac').value=config.mac||'';
     document.getElementById('cfgHost').value=config.host||'';
     document.getElementById('cfgPort').value=config.port||'9';
+    document.getElementById('cfgRelay').value=config.relay||'';
+    document.getElementById('cfgToken').value=config.token||'';
     document.getElementById('cfgApps').value=config.apps||'';
   }
   if(checkInterval)clearInterval(checkInterval);
@@ -281,6 +293,8 @@ function saveConfig(){
   var mac=document.getElementById('cfgMac').value.trim();
   var host=document.getElementById('cfgHost').value.trim();
   var port=document.getElementById('cfgPort').value.trim()||'9';
+  var relay=document.getElementById('cfgRelay').value.trim();
+  var token=document.getElementById('cfgToken').value.trim();
   var apps=document.getElementById('cfgApps').value.trim();
   if(!host){showToast('⚠ Domaine requis',true);return}
   if(!validHost(host)){showToast('⚠ Domaine invalide',true);return}
@@ -288,8 +302,12 @@ function saveConfig(){
   if(mac){cleaned=cleanMac(mac);if(!validMac(cleaned)){showToast('⚠ MAC invalide (12 caractères hex)',true);return}}
   var portNum=parseInt(port,10);
   if(isNaN(portNum)||portNum<1||portNum>65535){showToast('⚠ Port invalide (1-65535)',true);return}
+  var cleanedRelay='';
+  if(relay){cleanedRelay=cleanRelay(relay);if(!validRelay(cleanedRelay)){showToast('⚠ Relais invalide (URL HTTPS)',true);return}}
   config={host:host,port:String(portNum)};
   if(cleaned)config.mac=cleaned;
+  if(cleanedRelay)config.relay=cleanedRelay;
+  if(token)config.token=token;
   if(title)config.title=title;
   if(apps)config.apps=apps;
   storeConfig(config);
@@ -346,12 +364,14 @@ function buildLinks(){
   container.appendChild(cfg);
 }
 
+function wolReady(){return !!(config&&config.mac&&config.relay&&config.token);}
+
 function startApp(){
   document.getElementById('settingsScreen').style.display='none';
   document.getElementById('mainScreen').style.display='flex';
   document.getElementById('appTitle').textContent=config.title||'Plex jqh omv';
   document.getElementById('headerSub').textContent=config.host;
-  document.getElementById('powerSection').style.display=config.mac?'flex':'none';
+  document.getElementById('powerSection').style.display=wolReady()?'flex':'none';
   document.getElementById('fallbackLink').style.display=config.mac?'block':'none';
   if(config.mac){
     var fbUrl='./fallback.html?mac='+encodeURIComponent(config.mac)+'&host='+encodeURIComponent(config.host)+'&port='+encodeURIComponent(config.port||'9');
@@ -359,9 +379,9 @@ function startApp(){
   }
   buildLinks();
   wolTimers.forEach(function(t){clearTimeout(t)});wolTimers=[];
-  isOnline=false;wolSent=false;checking=false;depicusReachable=true;
+  isOnline=false;wolSent=false;checking=false;relayReachable=true;
   checkStatus();
-  probeDepicus();
+  probeRelay();
   if(checkInterval)clearInterval(checkInterval);
   checkInterval=setInterval(checkStatus,30000);
   if(!window.matchMedia('(display-mode:standalone)').matches)setTimeout(function(){document.getElementById('installHint').style.display='block'},3000);
@@ -376,20 +396,20 @@ function checkStatus(){
   fetch('https://'+statusHost(),{mode:'no-cors',cache:'no-store',signal:ctrl.signal})
     .then(function(){clearTimeout(timer);btn.classList.remove('spinning');checking=false;setOnline()})
     .catch(function(){clearTimeout(timer);btn.classList.remove('spinning');checking=false;setOffline()});
-  probeDepicus();
+  probeRelay();
 }
 
-// Probe depicus relay reachability. no-cors only resolves opaque responses,
-// so this detects DNS / TLS / total network down — NOT a Cloudflare 522
-// (origin down behind CF still returns a valid HTTP response from the edge).
-// The permanent manual-WoL fallback link covers that residual case.
-function probeDepicus(){
-  if(depicusProbing||!config||!config.mac)return;
-  depicusProbing=true;
+// Probe self-hosted relay reachability via GET /health (returns 200 + JSON).
+// The relay sets CORS for this origin so a normal fetch can read the status
+// code — unlike the previous depicus probe which had to use no-cors and was
+// blind to Cloudflare 522s. Here a true non-OK response is detected directly.
+function probeRelay(){
+  if(relayProbing||!wolReady())return;
+  relayProbing=true;
   var ctrl=new AbortController(),timer=setTimeout(function(){ctrl.abort()},2500);
-  fetch('https://www.depicus.com/wake-on-lan/woli',{mode:'no-cors',cache:'no-store',signal:ctrl.signal})
-    .then(function(){clearTimeout(timer);depicusProbing=false;if(!depicusReachable){depicusReachable=true;if(!isOnline&&!wolSent)setOffline();}})
-    .catch(function(){clearTimeout(timer);depicusProbing=false;if(depicusReachable){depicusReachable=false;if(!isOnline&&!wolSent)setOffline();}});
+  fetch(config.relay+'/health',{cache:'no-store',signal:ctrl.signal})
+    .then(function(r){clearTimeout(timer);relayProbing=false;var ok=r.ok;if(ok){if(!relayReachable){relayReachable=true;if(!isOnline&&!wolSent)setOffline();}}else{if(relayReachable){relayReachable=false;if(!isOnline&&!wolSent)setOffline();}}})
+    .catch(function(){clearTimeout(timer);relayProbing=false;if(relayReachable){relayReachable=false;if(!isOnline&&!wolSent)setOffline();}});
 }
 
 function applyLinksState(){
@@ -452,45 +472,48 @@ function setOffline(){
   document.getElementById('statusCard').className='status-card offline';
   document.getElementById('statusLabel').textContent='Hors ligne';
   document.getElementById('statusSub').textContent=navigator.onLine?'serveur éteint':'pas de réseau';
-  if(config.mac){
+  if(wolReady()){
     var btn=document.getElementById('powerBtn'),lbl=document.getElementById('powerLabel');
-    if(depicusReachable){btn.className='power-btn';lbl.textContent='Allumer le serveur';lbl.className='power-label';}
+    if(relayReachable){btn.className='power-btn';lbl.textContent='Allumer le serveur';lbl.className='power-label';}
     else{btn.className='power-btn unavailable';lbl.textContent='Réveil indisponible — utilise le réveil manuel ↓';lbl.className='power-label unavailable';}
-    document.getElementById('fallbackLink').classList.toggle('promoted',!depicusReachable);
+    document.getElementById('fallbackLink').classList.toggle('promoted',!relayReachable);
   }
 }
 
-// Reset the hidden WoL iframe to about:blank so it never stays armed pointing
-// at the depicus wake endpoint between dispatches — a persisted src can be
-// replayed by a later reload / restore / depicus-side refresh, firing a
-// phantom wake with no button press.
-function disarmWolFrame(){
-  var wf=document.getElementById('wolFrame');
-  if(wf&&wf.src&&wf.src!=='about:blank')wf.src='about:blank';
-}
-
 function sendWol(){
-  if(isOnline||wolSent||!config||!config.mac)return;
-  if(!depicusReachable){showToast('⚠ Réveil indisponible — utilise le réveil manuel ↓',true);return;}
+  if(isOnline||wolSent||!wolReady())return;
+  if(!relayReachable){showToast('⚠ Relais WoL injoignable — utilise le réveil manuel ↓',true);return;}
   if(navigator.vibrate)navigator.vibrate(50);
-  var url='https://www.depicus.com/wake-on-lan/woli?m='+encodeURIComponent(config.mac)+'&i='+encodeURIComponent(config.host)+'&s=255.255.255.255&p='+encodeURIComponent(config.port);
-  document.getElementById('wolFrame').src=url;
-  // Disarm the iframe once depicus has had time to receive the GET (~1-2s is
-  // enough). visibilitychange below also disarms it in case this timer is
-  // frozen while the app sits in the background.
-  wolArmedAt=Date.now();
-  setTimeout(disarmWolFrame,10000);
   wolSent=true;
   document.getElementById('powerBtn').className='power-btn sent';
   document.getElementById('powerLabel').className='power-label sent';
   setStarting();
   startCountdown(60);
   showToast('⚡ Demande de réveil envoyée');
+  fetch(config.relay+'/wol',{
+    method:'POST',
+    cache:'no-store',
+    headers:{'Content-Type':'application/json','X-Token':config.token},
+    body:JSON.stringify({mac:macToColon(config.mac)})
+  }).then(function(r){
+    if(!r.ok){
+      wolSent=false;stopCountdown();
+      var msg=(r.status===401||r.status===403)?'Authentification refusée par le relais':'Erreur relais HTTP '+r.status;
+      if(navigator.vibrate)navigator.vibrate(300);
+      showToast('⚠ '+msg+' — utilise le réveil manuel ↓',true);
+      setOffline();
+    }
+  }).catch(function(){
+    wolSent=false;stopCountdown();probeRelay();
+    if(navigator.vibrate)navigator.vibrate(300);
+    showToast('⚠ Relais injoignable — utilise le réveil manuel ↓',true);
+    setOffline();
+  });
   var scheduleCheck=function(delay){wolTimers.push(setTimeout(function(){startCountdown(60);checkStatus();},delay));};
   scheduleCheck(60000);scheduleCheck(120000);scheduleCheck(180000);
   wolTimers.push(setTimeout(function(){
     if(!isOnline){
-      wolSent=false;stopCountdown();probeDepicus();
+      wolSent=false;stopCountdown();probeRelay();
       if(navigator.vibrate)navigator.vibrate(300);
       setOffline();
     }
@@ -554,17 +577,13 @@ document.addEventListener('visibilitychange',function(){
   if(!config)return;
   if(document.hidden){
     if(checkInterval){clearInterval(checkInterval);checkInterval=null;}
-    // The 10s disarm timer is frozen while backgrounded — disarm here too so
-    // the iframe is never serialized armed. Skip if the dispatch is <3s old:
-    // a slow uplink may not have reached depicus yet, don't abort the GET.
-    if(wolArmedAt&&Date.now()-wolArmedAt>3000)disarmWolFrame();
   } else {
     // A fetch in flight when the screen locked may never resolve (Android
     // suspends network) — its `checking=true` flag would then permanently
     // block subsequent checks (including the one triggered by wolTimers).
     // Reset it on resume so the next checkStatus() runs.
     checking=false;
-    depicusProbing=false;
+    relayProbing=false;
     // If a WoL is in flight, the 1Hz countdown setInterval was likely frozen
     // by the OS during the lock — its label is now stale. Stop it and show
     // "Vérification…" until the immediate checkStatus() below resolves.

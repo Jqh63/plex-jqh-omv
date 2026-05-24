@@ -80,6 +80,9 @@
   .power-label{font-size:13px;color:var(--text-dim);text-align:center;min-height:18px;transition:color .3s}
   .power-label.sent{color:var(--green)}
   .power-label.unavailable{color:var(--red)}
+  .power-progress{display:none;width:120px;height:3px;background:var(--border);border-radius:2px;overflow:hidden;margin-top:6px}
+  .power-progress.active{display:block}
+  .power-progress-bar{height:100%;width:0;background:var(--green);box-shadow:0 0 6px var(--green-glow)}
   .fallback-link{font-size:11px;color:var(--text-dim);text-align:center;margin-top:-4px;opacity:.55;font-family:'JetBrains Mono',monospace;transition:opacity .3s,font-size .3s}
   .fallback-link a{color:var(--text-dim);text-decoration:underline;text-decoration-color:rgba(107,113,148,.4);text-underline-offset:3px}
   .fallback-link a:active{opacity:1}
@@ -195,6 +198,7 @@
       </button>
     </div>
     <div class="power-label" id="powerLabel">Allumer le serveur</div>
+    <div class="power-progress" id="powerProgress" aria-hidden="true"><div class="power-progress-bar" id="powerProgressBar"></div></div>
     <div class="fallback-link" id="fallbackLink" style="display:none">
       <a id="fallbackLinkA" href="./fallback.html" target="_blank" rel="noopener">Réveil ne marche pas ? Réveil manuel</a>
     </div>
@@ -203,7 +207,7 @@
   <div class="links" id="linksContainer"></div>
 
   <div class="install-hint" id="installHint"><strong>Astuce :</strong> menu ⋮ → « Ajouter à l'écran d'accueil »</div>
-  <div class="footer">v3.1</div>
+  <div class="footer">v3.2</div>
 </div>
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
@@ -211,6 +215,18 @@
 <script>
 var config=null,isOnline=false,wolSent=false,checking=false,checkInterval=null,wolTimers=[];
 var relayReachable=true,relayProbing=false;
+var wolStartTime=0;
+
+// Fallback ETA before any boot history is recorded. Calibrated to the actual
+// observed boot time on the author's J5005 OMV (~1m40), which the median will
+// converge on after a few wakes.
+var ETA_FALLBACK_MS=100000;
+var BOOT_HISTORY_KEY='plex-jqh-omv-boot-history';
+var BOOT_HISTORY_MAX=10;
+// Exclude outliers: <10s = false positive (server was already up when we
+// fired), >5min = anomaly (network glitch, manual interference). Either
+// would skew the median for the rest of the user's sessions.
+var BOOT_MIN_MS=10000, BOOT_MAX_MS=300000;
 
 var APP_CATALOG={
   seerr:      {sub:'seerr',      label:'Demander un film / une série', icon:'🎬', cls:'seerr'},
@@ -229,6 +245,22 @@ function validHost(h){return h.length>0&&h.length<255&&/\./.test(h)&&!h.includes
 function cleanRelay(u){return u.replace(/\/+$/,'')}
 function validRelay(u){return /^https:\/\/[a-zA-Z0-9.\-]+(:\d+)?(\/.*)?$/.test(u)&&u.length<255}
 function showToast(msg,warn){var t=document.getElementById('toast');t.textContent=msg;t.className=warn?'toast warn show':'toast show';setTimeout(function(){t.className='toast'},3000)}
+
+function getBootHistory(){try{var r=localStorage.getItem(BOOT_HISTORY_KEY);if(r){var a=JSON.parse(r);if(Array.isArray(a))return a;}}catch(e){}return [];}
+function recordBootTime(ms){
+  if(ms<BOOT_MIN_MS||ms>BOOT_MAX_MS)return;
+  var h=getBootHistory();
+  h.push(ms);
+  if(h.length>BOOT_HISTORY_MAX)h=h.slice(-BOOT_HISTORY_MAX);
+  try{localStorage.setItem(BOOT_HISTORY_KEY,JSON.stringify(h))}catch(e){}
+}
+function getEta(){
+  var h=getBootHistory();
+  if(h.length===0)return ETA_FALLBACK_MS;
+  var sorted=h.slice().sort(function(a,b){return a-b;});
+  var mid=Math.floor(sorted.length/2);
+  return sorted.length%2===0?Math.round((sorted[mid-1]+sorted[mid])/2):sorted[mid];
+}
 
 function parseApps(str){
   var keys=(str||'').split(',').map(function(s){return s.trim()}).filter(Boolean);
@@ -457,6 +489,10 @@ function setOnline(){
     setFallbackState();
   }
   if(wolSent){
+    if(wolStartTime){
+      recordBootTime(Date.now()-wolStartTime);
+      wolStartTime=0;
+    }
     showToast('✓ Serveur démarré avec succès');
     if(navigator.vibrate)navigator.vibrate([100,50,100]);
     wolSent=false;
@@ -471,19 +507,37 @@ function setStarting(){
 }
 
 var countdownTimer=null,countdownEndsAt=0;
-function startCountdown(seconds){
+function startCountdown(){
   stopCountdown();
-  countdownEndsAt=Date.now()+seconds*1000;
+  var etaMs=getEta();
+  countdownEndsAt=Date.now()+etaMs;
   var pl=document.getElementById('powerLabel');
+  var bar=document.getElementById('powerProgressBar');
+  var box=document.getElementById('powerProgress');
+  box.classList.add('active');
+  // Reset to 0 then animate to 100% over etaMs. Force a reflow between the two
+  // width assignments so the browser registers the start state before the
+  // transition begins — otherwise the second assignment collapses with the
+  // first and the bar jumps to 100% with no animation.
+  bar.style.transition='none';
+  bar.style.width='0%';
+  void bar.offsetWidth;
+  bar.style.transition='width '+(etaMs/1000)+'s linear';
+  bar.style.width='100%';
   var tick=function(){
     var remaining=Math.max(0,Math.round((countdownEndsAt-Date.now())/1000));
-    if(remaining<=0||isOnline||!wolSent){stopCountdown();return;}
-    pl.textContent='Démarrage… vérification dans '+remaining+'s';
+    if(isOnline||!wolSent){stopCountdown();return;}
+    if(remaining<=0)pl.textContent='Réveil… presque prêt';
+    else pl.textContent='Réveil… environ '+remaining+'s';
   };
   tick();
   countdownTimer=setInterval(tick,1000);
 }
-function stopCountdown(){if(countdownTimer){clearInterval(countdownTimer);countdownTimer=null;}}
+function stopCountdown(){
+  if(countdownTimer){clearInterval(countdownTimer);countdownTimer=null;}
+  var box=document.getElementById('powerProgress');
+  if(box)box.classList.remove('active');
+}
 
 function setOffline(){
   isOnline=false;
@@ -508,10 +562,11 @@ function sendWol(){
   if(!relayReachable){showToast('⚠ Relais WoL injoignable — utilise le réveil manuel ↓',true);return;}
   if(navigator.vibrate)navigator.vibrate(50);
   wolSent=true;
+  wolStartTime=Date.now();
   document.getElementById('powerBtn').className='power-btn sent';
   document.getElementById('powerLabel').className='power-label sent';
   setStarting();
-  startCountdown(60);
+  startCountdown();
   showToast('⚡ Demande de réveil envoyée');
   fetch(config.relay+'/wol',{
     method:'POST',
@@ -520,23 +575,23 @@ function sendWol(){
     body:JSON.stringify({mac:macToColon(config.mac)})
   }).then(function(r){
     if(!r.ok){
-      wolSent=false;stopCountdown();
+      wolSent=false;wolStartTime=0;stopCountdown();
       var msg=(r.status===401||r.status===403)?'Authentification refusée par le relais':'Erreur relais HTTP '+r.status;
       if(navigator.vibrate)navigator.vibrate(300);
       showToast('⚠ '+msg+' — utilise le réveil manuel ↓',true);
       setOffline();
     }
   }).catch(function(){
-    wolSent=false;stopCountdown();probeRelay();
+    wolSent=false;wolStartTime=0;stopCountdown();probeRelay();
     if(navigator.vibrate)navigator.vibrate(300);
     showToast('⚠ Relais injoignable — utilise le réveil manuel ↓',true);
     setOffline();
   });
-  var scheduleCheck=function(delay){wolTimers.push(setTimeout(function(){startCountdown(60);checkStatus();},delay));};
+  var scheduleCheck=function(delay){wolTimers.push(setTimeout(function(){checkStatus();},delay));};
   scheduleCheck(60000);scheduleCheck(120000);scheduleCheck(180000);
   wolTimers.push(setTimeout(function(){
     if(!isOnline){
-      wolSent=false;stopCountdown();probeRelay();
+      wolSent=false;wolStartTime=0;stopCountdown();probeRelay();
       if(navigator.vibrate)navigator.vibrate(300);
       setOffline();
     }

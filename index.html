@@ -85,6 +85,8 @@
   .fallback-link a:active{opacity:1}
   .fallback-link.promoted{font-size:13px;opacity:1;font-family:'DM Sans',sans-serif;margin-top:6px}
   .fallback-link.promoted a{color:var(--red);text-decoration-color:rgba(248,113,113,.6);font-weight:500}
+  .fallback-link.warn{font-size:13px;opacity:1;font-family:'DM Sans',sans-serif;margin-top:6px}
+  .fallback-link.warn a{color:var(--orange);text-decoration-color:rgba(251,191,36,.6);font-weight:500}
 
   .links{width:100%;display:flex;flex-direction:column;gap:8px}
   .link-btn{width:100%;padding:14px 18px;background:var(--surface);border:1px solid var(--border);border-radius:14px;color:var(--text);font-family:'DM Sans',sans-serif;font-size:14px;font-weight:500;text-decoration:none;display:flex;align-items:center;gap:12px;transition:all .15s;cursor:pointer;-webkit-tap-highlight-color:transparent}
@@ -201,7 +203,7 @@
   <div class="links" id="linksContainer"></div>
 
   <div class="install-hint" id="installHint"><strong>Astuce :</strong> menu ⋮ → « Ajouter à l'écran d'accueil »</div>
-  <div class="footer">v3.0</div>
+  <div class="footer">v3.1</div>
 </div>
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
@@ -419,6 +421,27 @@ function applyLinksState(){
   });
 }
 
+// Three-state fallback link reflecting both server and relay reachability.
+// Style/wording chosen so the admin sees a relay outage even while the server
+// is up — otherwise the issue only surfaces the next time WoL is needed.
+function setFallbackState(){
+  if(!config||!config.mac)return;
+  var link=document.getElementById('fallbackLink');
+  var a=document.getElementById('fallbackLinkA');
+  link.classList.remove('promoted','warn');
+  if(!relayReachable){
+    if(isOnline){
+      link.classList.add('warn');
+      a.textContent='⚠ Relais WoL injoignable — Réveil manuel';
+    }else{
+      link.classList.add('promoted');
+      a.textContent='Réveil ne marche pas ? Réveil manuel';
+    }
+  }else{
+    a.textContent='Réveil ne marche pas ? Réveil manuel';
+  }
+}
+
 function setOnline(){
   isOnline=true;
   stopCountdown();
@@ -431,7 +454,7 @@ function setOnline(){
     document.getElementById('powerBtn').className='power-btn online';
     document.getElementById('powerLabel').textContent='Serveur allumé';
     document.getElementById('powerLabel').className='power-label sent';
-    document.getElementById('fallbackLink').classList.remove('promoted');
+    setFallbackState();
   }
   if(wolSent){
     showToast('✓ Serveur démarré avec succès');
@@ -476,7 +499,7 @@ function setOffline(){
     var btn=document.getElementById('powerBtn'),lbl=document.getElementById('powerLabel');
     if(relayReachable){btn.className='power-btn';lbl.textContent='Allumer le serveur';lbl.className='power-label';}
     else{btn.className='power-btn unavailable';lbl.textContent='Réveil indisponible — utilise le réveil manuel ↓';lbl.className='power-label unavailable';}
-    document.getElementById('fallbackLink').classList.toggle('promoted',!relayReachable);
+    setFallbackState();
   }
 }
 

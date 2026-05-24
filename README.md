@@ -5,7 +5,7 @@ A lightweight PWA to wake and monitor a media server via Wake-on-LAN.
 ## Features
 
 - **Server status** — checks every 30s via HTTPS fetch
-- **Wake-on-LAN** — sends magic packet through [depicus.com](https://www.depicus.com) (hidden iframe)
+- **Wake-on-LAN** — sends magic packet via a self-hosted HTTP→UDP relay (browsers cannot send UDP directly — see [Relay](#relay-required-for-wol) below)
 - **Auto-retry** — rechecks at 1, 2, and 3 min after WoL; manual retry available after 4 min
 - **Dynamic app links** — configurable via URL parameter, built from a catalog of known apps
 - **Read-only mode** — works without a MAC address (status monitoring only, no WoL button)
@@ -19,7 +19,7 @@ A lightweight PWA to wake and monitor a media server via Wake-on-LAN.
 Share this link with your users:
 
 ```
-https://<your-github>.github.io/plex-jqh-omv/?mac=AABBCCDDEEFF&host=myserver.example.com&port=9
+https://<your-github>.github.io/plex-jqh-omv/?mac=AABBCCDDEEFF&host=myserver.example.com&port=9&relay=https://wol.example.com&token=<your-shared-token>
 ```
 
 Parameters are read on first visit and stored in localStorage. The app works immediately.
@@ -28,9 +28,11 @@ Parameters are read on first visit and stored in localStorage. The app works imm
 
 | Parameter | Required | Default | Description |
 |---|---|---|---|
-| `host` | yes | — | Base domain (used for WoL and deriving app URLs) |
-| `mac` | no | — | MAC address for Wake-on-LAN (omit for read-only mode) |
-| `port` | no | `9` | WoL UDP port |
+| `host` | yes | — | Base domain (used for status check target and deriving app URLs) |
+| `mac` | no | — | MAC address for Wake-on-LAN (omit for read-only mode — power button hidden) |
+| `port` | no | `9` | WoL UDP port (forwarded to relay) |
+| `relay` | no | — | HTTPS URL of your self-hosted relay (e.g. `https://wol.example.com`). Required together with `token` to enable the power button |
+| `token` | no | — | Shared secret sent as `X-Token` header to the relay. Required together with `relay` |
 | `title` | no | `Plex jqh omv` | App title shown in the header |
 | `apps` | no | `seerr,plexweb` | Comma-separated list of app keys (see catalog below) |
 | `status` | no | first subdomain app | Override the host used for the status check |
@@ -49,24 +51,24 @@ Unknown keys create a generic link to `{key}.{host}`.
 
 #### Examples
 
-Plex + Seerr setup (WoL + Seerr link + Plex link):
+Plex + Seerr setup (full WoL + Seerr link + Plex link):
 ```
-?mac=AABBCCDDEEFF&host=myserver.example.com&port=9
+?mac=AABBCCDDEEFF&host=myserver.example.com&port=9&relay=https://wol.example.com&token=<shared-token>
 ```
 
 Customise the apps shown (override the default list):
 ```
-?mac=AABBCCDDEEFF&host=myserver.example.com&port=9&apps=overseerr,jellyfin,plexweb
+?mac=AABBCCDDEEFF&host=myserver.example.com&port=9&relay=https://wol.example.com&token=<shared-token>&apps=overseerr,jellyfin,plexweb
 ```
 
-Another user with Jellyfin, no WoL:
+Another user with Jellyfin, no WoL (read-only mode):
 ```
 ?host=mon.serveur.com&apps=jellyseerr,jellyfin&title=Mon+Media
 ```
 
 ### Option 2 — Manual configuration
 
-Open the app without parameters. A settings form will appear to enter title, domain, MAC address, WoL port, and apps.
+Open the app without parameters. A settings form will appear to enter title, domain, MAC address, WoL port, relay URL, shared token, and apps.
 
 ## Status check logic
 
@@ -81,7 +83,7 @@ Example: `host=myserver.example.com` + `apps=seerr,plexweb` → pings `seerr.mys
 | File | Description |
 |---|---|
 | `index.html` | App (HTML + CSS + JS, single file) |
-| `fallback.html` | French manual-WoL fallback page (single file, opened from the PWA when the depicus probe fails or as a permanent safety net) |
+| `fallback.html` | French manual-WoL fallback page (single file, opened from the PWA when the relay probe fails or as a permanent safety net) |
 | `manifest.json` | PWA manifest |
 | `sw.js` | Service worker (cache with `ignoreSearch`, auto-update) |
 | `icon-192.png` | App icon 192x192 |
@@ -97,11 +99,11 @@ Example: `host=myserver.example.com` + `apps=seerr,plexweb` → pings `seerr.mys
 
 ## Security
 
-- **Zero personal data in source code** — MAC, host and port are only in URL parameters and localStorage
+- **Zero personal data in source code** — MAC, host, port, relay URL and token are only in URL parameters and localStorage
 - No `innerHTML` for user data — DOM API only (XSS safe)
 - `rel="noopener"` on all external links
-- No API keys, tokens or passwords
-- WoL risk: someone with the URL can only power on the server — no access to services
+- No API keys, tokens or passwords baked into the source — the shared `token` lives only in the per-user URL (treated as a sensitive bookmark)
+- WoL risk: someone with the URL can only power on the server — no access to services. Relay-side MAC allowlist (recommended) further restricts what targets the token can wake
 
 ## Compatibility
 
@@ -113,15 +115,81 @@ Example: `host=myserver.example.com` + `apps=seerr,plexweb` → pings `seerr.mys
 
 > iOS PWA must be installed from Safari. Chrome on iOS does not support Add to Home Screen.
 
-## Fallback — manual Wake-on-LAN if the power button fails
+## Relay (required for WoL)
 
-This app sends the magic packet via [depicus.com](https://www.depicus.com), a third-party HTTP→UDP relay (browsers cannot send UDP directly). If depicus is unreachable, the power button silently fails — the iframe still loads but no packet is emitted.
+Browsers cannot send raw UDP, so the magic packet must be dispatched by a small HTTP→UDP relay you host yourself. The PWA `POST`s a JSON payload over HTTPS; the relay validates and forwards the magic packet to the target.
 
-Since **v2.13**, the app probes depicus reachability on load and every 30 s. When the probe fails, the power button is visually disabled and labelled "Service WoL externe injoignable" so users get explicit feedback instead of a silent click. The probe uses `fetch` with `mode: 'no-cors'`, which detects DNS / TLS / total network outage but **cannot** detect a Cloudflare 522 from depicus (the edge still serves a valid HTTP response). A small permanent "Réveil manuel" link sits under the power button — it covers the residual case and the deeper SPOF until a self-hosted relay replaces depicus.
+### API contract
 
-Since **v2.14**, that link points to a dedicated **French user-friendly fallback page** served from this same repo (`fallback.html`), with the user's MAC, host and port pre-filled (read from URL query parameters). The page gives a per-OS method (Android: WolOn, iOS: Mocha WOL, Windows: PowerShell), with click-to-copy on the parameter values. The section below remains the canonical developer reference.
+```
+GET /health
+  → 200 {"status":"ok"}        (used by the PWA reachability probe)
 
-Until that single point of failure is resolved, users can wake the server manually using OS-native tools. Keep the same values handy as your URL parameters: server MAC address, host (e.g. `myserver.example.com`), and UDP port (default `9`).
+POST /wol
+  Headers: Content-Type: application/json
+           X-Token: <shared-token>
+  Body:    {"mac":"AA:BB:CC:DD:EE:FF"}
+  → 200 on success, 401 on bad token, 403 on disallowed MAC,
+    422 on malformed body, 4xx/5xx otherwise.
+
+CORS: must allow your GitHub Pages origin
+  (e.g. https://<your-github>.github.io) for POST + GET with header X-Token.
+```
+
+### Recommended hardening
+
+- **MAC allowlist on the relay side** — only the MAC(s) you own can be woken. A leaked token then only powers on hardware you control.
+- **TLS via Let's Encrypt** (Caddy auto-HTTPS or equivalent) — the token transits in a header, must be encrypted.
+- **Resolve the target host server-side** — do not accept an IP from the client; resolve a fixed FQDN like `myserver.example.com` instead so a leaked token cannot redirect packets to arbitrary hosts.
+- **Drop privileges** — run the relay as a non-root user, disable PrivateTmp / write paths in systemd.
+
+### Minimal reference (FastAPI, ~30 lines)
+
+```python
+import os, socket
+from fastapi import FastAPI, HTTPException, Header
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+
+ALLOWED_MAC  = os.environ["ALLOWED_MAC"].lower()
+SHARED_TOKEN = os.environ["WOL_TOKEN"]
+TARGET_HOST  = os.environ["TARGET_HOST"]
+TARGET_PORT  = int(os.environ.get("TARGET_PORT", "9"))
+
+app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+app.add_middleware(CORSMiddleware,
+  allow_origins=["https://<your-github>.github.io"],
+  allow_methods=["POST", "GET"], allow_headers=["Content-Type", "X-Token"])
+
+class WolReq(BaseModel):
+    mac: str = Field(..., pattern=r"^([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}$")
+
+@app.get("/health")
+def health(): return {"status": "ok"}
+
+@app.post("/wol")
+def wol(req: WolReq, x_token: str = Header(...)):
+    if x_token != SHARED_TOKEN:        raise HTTPException(401)
+    if req.mac.lower() != ALLOWED_MAC: raise HTTPException(403)
+    target_ip = socket.gethostbyname(TARGET_HOST)
+    pkt = b"\xff" * 6 + bytes.fromhex(req.mac.replace(":", "")) * 16
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    s.sendto(pkt, (target_ip, TARGET_PORT))
+    return {"sent": True}
+```
+
+### Hosting suggestions
+
+Any small VM with UDP egress and a public HTTPS endpoint works. Some always-free options as of 2026: **GCP Compute Engine e2-micro** (us-west1/central1/east1), **Oracle Cloud Always Free** (broader regions). Avoid serverless platforms that can't open raw UDP sockets (Cloudflare Workers, Vercel Edge, Deno Deploy).
+
+## Fallback — manual Wake-on-LAN if the relay fails
+
+The app probes `GET <relay>/health` on load and every 30 s. When the probe fails, the power button is visually disabled and labelled "Réveil indisponible — utilise le réveil manuel ↓" so users get explicit feedback instead of a silent click. A small permanent "Réveil manuel" link sits under the power button — it covers cases the probe can miss (relay up but `/wol` broken, network blip mid-dispatch) and the residual SPOF inherent to any single relay.
+
+That link points to a dedicated **French user-friendly fallback page** served from this same repo (`fallback.html`), with the user's MAC, host and port pre-filled (read from URL query parameters). The page gives a per-OS method (Android: WolOn, iOS: Mocha WOL, Windows: PowerShell), with click-to-copy on the parameter values. The section below remains the canonical developer reference.
+
+If the relay is down for a while, users can wake the server manually using OS-native tools. Keep the same values handy as your URL parameters: server MAC address, host (e.g. `myserver.example.com`), and UDP port (default `9`).
 
 ### Android
 
@@ -152,15 +220,16 @@ $mac=[byte[]]-split('AABBCCDDEEFF' -replace '..','0x$0 ');$u=New-Object Net.Sock
 
 - **`etherwake`** (LAN-only, no host argument): `sudo etherwake AA:BB:CC:DD:EE:FF`
 
-> All these tools send the same magic packet that depicus sends. They work whether the server is on your LAN (direct broadcast) or remote (provided your router/NAT forwards UDP port 9 to the server's broadcast address). If WoL succeeded with this app before, it will succeed with these tools using the same parameters.
+> All these tools send the same magic packet the relay sends. They work whether the server is on your LAN (direct broadcast) or remote (provided your router/NAT forwards UDP port 9 to the server's broadcast address). If WoL succeeded with this app before, it will succeed with these tools using the same parameters.
 
 ## Technical notes
 
 - URL params are never cleaned (required for iOS standalone — separate localStorage)
 - Service worker uses `ignoreSearch: true` to match cache with query params
 - `skipWaiting` + `clients.claim` + `controllerchange` listener for seamless updates
-- WoL sent via hidden iframe to depicus.com (browsers cannot send UDP directly)
-- Status check uses `fetch` with `mode: 'no-cors'` — opaque response = server up, network error = server down
+- WoL sent via `fetch POST` to your self-hosted relay (browsers cannot send UDP directly — see [Relay](#relay-required-for-wol))
+- Relay reachability probed with `fetch GET /health` — true status code read (no `no-cors` blind spot)
+- Status check on the media server itself uses `fetch` with `mode: 'no-cors'` — opaque response = server up, network error = server down (no CORS needed since we only care about reachability)
 
 ## License
 

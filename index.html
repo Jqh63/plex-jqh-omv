@@ -207,7 +207,7 @@
   <div class="links" id="linksContainer"></div>
 
   <div class="install-hint" id="installHint"><strong>Astuce :</strong> menu ⋮ → « Ajouter à l'écran d'accueil »</div>
-  <div class="footer">v3.4</div>
+  <div class="footer">v3.5</div>
 </div>
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
@@ -218,9 +218,14 @@ var relayReachable=true,relayProbing=false;
 var wolStartTime=0,wolPollTimer=null,wolRetryTimers=[];
 var WOL_POLL_MS=15000, WOL_TIMEOUT_MS=300000;
 // Resend the POST at these offsets after the initial fire (server-side
-// already sends 3 packets per POST). 3 POSTs × 3 packets = 12 magic
-// packets over 90 s — drowns out any plausible UDP loss pattern.
-var WOL_RETRY_DELAYS_MS=[30000, 60000, 90000];
+// already sends 3 packets per POST). 4 POSTs × 3 packets = 15 magic
+// packets over 90 s. The 15 s first retry is tuned for the ARP-cache
+// timing on the home router: the initial wake often misses because the
+// router still has a fresh ARP entry pointing at the now-sleeping NIC
+// and unicasts the packet instead of broadcasting. By T+15 s that
+// cache has usually started to expire on the affected hop, and a
+// retry stands a much better chance of being broadcast through.
+var WOL_RETRY_DELAYS_MS=[15000, 30000, 60000, 90000];
 
 // Fallback ETA before any boot history is recorded. Calibrated to the actual
 // observed boot time on the author's J5005 OMV (~80 s wall-clock from magic
@@ -434,7 +439,11 @@ function checkStatus(){
   btn.classList.add('spinning');
   dot.className='status-dot checking';card.className='status-card';label.textContent='Vérification...';sub.textContent='ping en cours';
   var ctrl=new AbortController(),timer=setTimeout(function(){ctrl.abort()},5000);
-  fetch('https://'+statusHost(),{mode:'no-cors',cache:'no-store',signal:ctrl.signal})
+  // redirect:'manual' so Seerr's 302 -> /login doesn't trigger Chrome's Private
+  // Network Access block (the redirect target resolves to a LAN IP and the
+  // fetch originates from a public origin — github.io). The opaqueredirect
+  // type still counts as a successful "server responded" for our purposes.
+  fetch('https://'+statusHost(),{mode:'no-cors',cache:'no-store',redirect:'manual',signal:ctrl.signal})
     .then(function(){clearTimeout(timer);btn.classList.remove('spinning');checking=false;setOnline()})
     .catch(function(){clearTimeout(timer);btn.classList.remove('spinning');checking=false;setOffline()});
   probeRelay();
@@ -613,8 +622,9 @@ function sendWol(){
   startCountdown();
   showToast('⚡ Demande de réveil envoyée');
   postWol(false);
-  // Retry POSTs to drown out UDP loss. Server-side already sends 3
-  // packets per POST, so 4 POSTs × 3 = 12 magic packets over 90 s.
+  // Retry POSTs to drown out UDP loss AND walk past the router's ARP
+  // cache TTL (see WOL_RETRY_DELAYS_MS comment). Server-side also sends
+  // 3 packets per POST, so 5 POSTs × 3 = 15 magic packets over 90 s.
   WOL_RETRY_DELAYS_MS.forEach(function(delay){
     wolRetryTimers.push(setTimeout(function(){
       if(!wolSent||isOnline)return;

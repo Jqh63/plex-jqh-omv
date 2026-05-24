@@ -20,10 +20,17 @@ in French; everything else (commits, PRs, docs, code comments) in
 English.
 
 The **roadmap, decisions and broader homelab context** for this PWA
-live in the author's **private `knowledge-base` repo** (e.g. the plan
-to replace depicus with a self-hosted relay). Don't duplicate roadmap
-items here — link or summarize when needed, but the source of truth
-is private.
+live in the author's **private `knowledge-base` repo**. Don't duplicate
+roadmap items here — link or summarize when needed, but the source of
+truth is private.
+
+The PWA used to depend on `depicus.com` (3rd-party WoL relay, served
+via iframe). Since v3.0 (2026-05-24) the dependency is replaced by a
+self-hosted relay (FastAPI + Caddy on a GCP `e2-micro` Always Free
+VM), with code versioned in the private `knowledge-base/wol-relay/`.
+The PWA now does a `fetch POST` to the relay's `/wol` endpoint with
+proper success/failure feedback (the previous `no-cors` iframe was a
+black box).
 
 ## Non-negotiable rules
 
@@ -101,18 +108,8 @@ on the public URL after merge.
 
 ## Architecture traps to avoid
 
-Two constraints were learned the hard way (bisected v2.16 → v2.19) and
-the fix lives in the code. Don't undo them without re-bisecting:
-
-- **The depicus iframe must not have `sandbox=""`**, and **CSP `frame-src`
-  must stay broad (`https:`), not tight to `https://www.depicus.com`.**
-  Either restriction silently breaks the magic packet dispatch — the
-  browser still issues a GET, depicus answers 200, but no UDP packet
-  goes out. Best guess: depicus redirects internally to a non-www host
-  and/or relies on cookies that the sandbox blocks. The endpoint is a
-  black box and the only reliable validation is in production. The
-  rest of the CSP (default-src `'self'`, base-uri `'none'`, etc.)
-  stays useful — only `frame-src` is the danger zone.
+Two constraints were learned the hard way and the fix lives in the
+code. Don't undo them without re-bisecting:
 
 - **Robust PWA auto-update needs a layered defence — no single trigger
   is reliable on Android standalone.** Required pieces:
@@ -151,10 +148,12 @@ the fix lives in the code. Don't undo them without re-bisecting:
 
 - **No JS framework, no build step, no `package.json`.** Single HTML
   file = maximum portability and easy visual audit.
-- **No tracking, no cookies, no backend.**
-- If a feature requires a backend (e.g. replacing the depicus WoL
-  relay with a self-hosted service), create a **separate repo** for
-  the service — do not mix backend and PWA in this repo.
+- **No tracking, no cookies.**
+- **No backend in this repo.** The self-hosted WoL relay (the only
+  current backend) lives in the author's private
+  `knowledge-base/wol-relay/` repo, behind a `fetch POST` to a
+  user-configured URL. Any future backend would follow the same
+  pattern — a separate repo, never mixed with the PWA.
 
 ## When in doubt
 

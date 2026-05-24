@@ -207,7 +207,7 @@
   <div class="links" id="linksContainer"></div>
 
   <div class="install-hint" id="installHint"><strong>Astuce :</strong> menu ⋮ → « Ajouter à l'écran d'accueil »</div>
-  <div class="footer">v3.5</div>
+  <div class="footer">v3.6</div>
 </div>
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
@@ -439,11 +439,11 @@ function checkStatus(){
   btn.classList.add('spinning');
   dot.className='status-dot checking';card.className='status-card';label.textContent='Vérification...';sub.textContent='ping en cours';
   var ctrl=new AbortController(),timer=setTimeout(function(){ctrl.abort()},5000);
-  // redirect:'manual' so Seerr's 302 -> /login doesn't trigger Chrome's Private
-  // Network Access block (the redirect target resolves to a LAN IP and the
-  // fetch originates from a public origin — github.io). The opaqueredirect
-  // type still counts as a successful "server responded" for our purposes.
-  fetch('https://'+statusHost(),{mode:'no-cors',cache:'no-store',redirect:'manual',signal:ctrl.signal})
+  // no-cors keeps the response opaque (we only care that the server answered),
+  // and per Fetch spec is incompatible with redirect:'manual' (returns a
+  // network error). The Chrome PNA noise on redirects is cosmetic-only and
+  // doesn't break detection — leaving redirect at its default ('follow').
+  fetch('https://'+statusHost(),{mode:'no-cors',cache:'no-store',signal:ctrl.signal})
     .then(function(){clearTimeout(timer);btn.classList.remove('spinning');checking=false;setOnline()})
     .catch(function(){clearTimeout(timer);btn.classList.remove('spinning');checking=false;setOffline()});
   probeRelay();

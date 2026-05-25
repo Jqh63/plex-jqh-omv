@@ -1,6 +1,13 @@
 var config=null,isOnline=false,wolSent=false,checking=false,checkInterval=null;
 var relayReachable=true,relayProbing=false;
 var wolStartTime=0,wolPollTimer=null,wolRetryTimers=[];
+// Cold-radio resume: on Android PWA, the first fetch after a long background
+// often times out before the mobile radio is back up. justResumed=true marks
+// a window where one quick retry is scheduled on failure (at +5s, when the
+// radio should be warm). One retry only — no change to the regular 30 s
+// polling cadence, no battery impact in the nominal case.
+var justResumed=false,resumeRetryTimer=null;
+function clearResumeRetry(){if(resumeRetryTimer){clearTimeout(resumeRetryTimer);resumeRetryTimer=null;}}
 var WOL_POLL_MS=15000, WOL_TIMEOUT_MS=300000;
 // Resend the POST at these offsets after the initial fire (server-side
 // already sends 3 packets per POST). 4 POSTs × 3 packets = 15 magic
@@ -253,7 +260,9 @@ function startApp(){
   buildLinks();
   clearWolPoll();
   clearWolRetries();
+  clearResumeRetry();
   isOnline=false;wolSent=false;checking=false;relayReachable=true;
+  justResumed=true;
   checkStatus();
   probeRelay();
   if(checkInterval)clearInterval(checkInterval);
@@ -272,8 +281,13 @@ function checkStatus(){
   // network error). The Chrome PNA noise on redirects is cosmetic-only and
   // doesn't break detection — leaving redirect at its default ('follow').
   fetch('https://'+statusHost(),{mode:'no-cors',cache:'no-store',signal:ctrl.signal})
-    .then(function(){clearTimeout(timer);btn.classList.remove('spinning');checking=false;setOnline()})
-    .catch(function(){clearTimeout(timer);btn.classList.remove('spinning');checking=false;setOffline()});
+    .then(function(){clearTimeout(timer);btn.classList.remove('spinning');checking=false;justResumed=false;clearResumeRetry();setOnline();})
+    .catch(function(){clearTimeout(timer);btn.classList.remove('spinning');checking=false;setOffline();
+      // First check after resume often fails on cold radio. Schedule one
+      // retry at +5s (radio warm by then) so the user doesn't wait 30 s
+      // for the next regular tick. Single shot — clear the flag.
+      if(justResumed){justResumed=false;clearResumeRetry();resumeRetryTimer=setTimeout(checkStatus,5000);}
+    });
   probeRelay();
 }
 
@@ -281,13 +295,24 @@ function checkStatus(){
 // The relay sets CORS for this origin so a normal fetch can read the status
 // code — unlike the previous depicus probe which had to use no-cors and was
 // blind to Cloudflare 522s. Here a true non-OK response is detected directly.
+// On every relayReachable flip, repaint UI even when the server is online —
+// setOnline() reads relayReachable once at call time, so a later probe that
+// flips it from false→true while isOnline=true would otherwise leave the
+// "⚠ Relais injoignable" banner stuck until the next 30 s status tick.
 function probeRelay(){
   if(relayProbing||!wolReady())return;
   relayProbing=true;
   var ctrl=new AbortController(),timer=setTimeout(function(){ctrl.abort()},2500);
+  var applyFlip=function(ok){
+    var changed=(ok!==relayReachable);
+    relayReachable=ok;
+    if(!changed)return;
+    if(!isOnline&&!wolSent)setOffline();
+    else setFallbackState();
+  };
   fetch(config.relay+'/health',{cache:'no-store',signal:ctrl.signal})
-    .then(function(r){clearTimeout(timer);relayProbing=false;var ok=r.ok;if(ok){if(!relayReachable){relayReachable=true;if(!isOnline&&!wolSent)setOffline();}}else{if(relayReachable){relayReachable=false;if(!isOnline&&!wolSent)setOffline();}}})
-    .catch(function(){clearTimeout(timer);relayProbing=false;if(relayReachable){relayReachable=false;if(!isOnline&&!wolSent)setOffline();}});
+    .then(function(r){clearTimeout(timer);relayProbing=false;applyFlip(r.ok);})
+    .catch(function(){clearTimeout(timer);relayProbing=false;applyFlip(false);});
 }
 
 function applyLinksState(){
@@ -549,6 +574,8 @@ document.addEventListener('visibilitychange',function(){
     // runs unhindered.
     checking=false;
     relayProbing=false;
+    clearResumeRetry();
+    justResumed=true;
     // Always force an immediate check on resume, even if checkInterval still
     // exists — wolPollTimer / checkInterval may have been frozen during the
     // background phase and the next scheduled tick could be seconds or

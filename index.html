@@ -218,7 +218,7 @@
   <div class="links" id="linksContainer"></div>
 
   <div class="install-hint" id="installHint"><strong>Astuce :</strong> menu ⋮ → « Ajouter à l'écran d'accueil »</div>
-  <div class="footer">v3.7</div>
+  <div class="footer">v3.8</div>
 </div>
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
@@ -578,10 +578,11 @@ function setStarting(){
   document.getElementById('statusSub').textContent='réveil en cours';
 }
 
-var countdownTimer=null,countdownEndsAt=0;
+var countdownTimer=null,countdownEndsAt=0,wolEtaMs=0;
 function startCountdown(){
   stopCountdown();
   var etaMs=getEta();
+  wolEtaMs=etaMs;
   countdownEndsAt=Date.now()+etaMs;
   var pl=document.getElementById('powerLabel');
   var bar=document.getElementById('powerProgressBar');
@@ -613,6 +614,7 @@ function startCountdown(){
 }
 function stopCountdown(){
   if(countdownTimer){clearInterval(countdownTimer);countdownTimer=null;}
+  wolEtaMs=0;
   var box=document.getElementById('powerProgress');
   if(box)box.classList.remove('active');
 }
@@ -779,9 +781,28 @@ document.addEventListener('visibilitychange',function(){
     // minutes away. The user just looked at the screen; give them fresh data.
     checkStatus();
     if(!checkInterval)checkInterval=setInterval(checkStatus,30000);
-    // Note: countdown / progress bar are intentionally NOT stopped here.
-    // Their tick uses Date.now() (wall-clock), so on resume they self-correct
-    // to the right position without losing visual continuity.
+    // Countdown text self-corrects from Date.now() on the next tick, but the
+    // CSS progress bar transition does NOT — it was started once with a
+    // duration of etaMs and is frozen-then-resumed by the suspend, so on
+    // unlock the bar fills at the original pace from its frozen position,
+    // ending etaMs+(suspend_duration) later than the text countdown. Resync
+    // it explicitly: snap to the elapsed-ratio position, then re-arm a fresh
+    // transition for the remaining ms.
+    if(wolSent&&countdownTimer&&wolStartTime&&wolEtaMs){
+      var elapsed=Date.now()-wolStartTime;
+      var ratio=Math.min(1,Math.max(0,elapsed/wolEtaMs));
+      var remainingMs=Math.max(0,countdownEndsAt-Date.now());
+      var bar=document.getElementById('powerProgressBar');
+      if(bar){
+        bar.style.transition='none';
+        bar.style.width=(ratio*100)+'%';
+        void bar.offsetWidth;
+        if(remainingMs>0){
+          bar.style.transition='width '+(remainingMs/1000)+'s linear';
+          bar.style.width='100%';
+        }
+      }
+    }
   }
 });
 

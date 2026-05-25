@@ -5,8 +5,6 @@ function setText(id,val,cls){
   if(cls)el.className=cls;
 }
 
-setText('appVersion','v2.28');
-
 if('serviceWorker' in navigator){
   navigator.serviceWorker.getRegistration().then(function(reg){
     if(reg){
@@ -20,10 +18,18 @@ if('serviceWorker' in navigator){
     caches.keys().then(function(names){
       var ours=names.filter(function(n){return n.indexOf('plex-jqh-omv')===0;});
       setText('swCache',ours.join(', ')||'aucun');
+      // Derive app version from the active SW cache name (`plex-jqh-omv-vX.Y`)
+      // so debug stays in lockstep with sw.js — used to drift silently when
+      // the version was hardcoded here.
+      var m=ours[0]&&ours[0].match(/-v(\d+\.\d+)$/);
+      setText('appVersion',m?'v'+m[1]:'—');
     });
+  } else {
+    setText('appVersion','—');
   }
 } else {
   setText('swState','API absente','warn');
+  setText('appVersion','—');
 }
 
 try {

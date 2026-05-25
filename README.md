@@ -94,8 +94,12 @@ Example: `host=myserver.example.com` + `apps=seerr,plexweb` → pings `seerr.mys
 
 | File | Description |
 |---|---|
-| `index.html` | App (HTML + CSS + JS, single file) |
-| `fallback.html` | French manual-WoL fallback page (single file, opened from the PWA when the relay probe fails or as a permanent safety net) |
+| `index.html` | App markup + inline `<style>` |
+| `app.js` | App logic (extracted from `index.html` so the CSP can drop `'unsafe-inline'` from `script-src`) |
+| `fallback.html` | French manual-WoL fallback page markup, opened from the PWA when the relay probe fails or as a permanent safety net |
+| `fallback.js` | Logic for `fallback.html` (same CSP rationale as `app.js`) |
+| `debug.html` | Debug snapshot page (long-press the app title for 2s to open) |
+| `debug.js` | Logic for `debug.html` |
 | `manifest.json` | PWA manifest |
 | `sw.js` | Service worker (cache with `ignoreSearch`, auto-update) |
 | `icon-192.png` | App icon 192x192 |

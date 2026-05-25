@@ -1,7 +1,7 @@
 # CLAUDE.md — plex-jqh-omv
 
 > Read first by any AI tool working in this repo. Kept short by design —
-> the scope is small (~600 lines, single-file PWA).
+> the scope is small (~600 lines, PWA with extracted JS modules).
 
 ## Context
 

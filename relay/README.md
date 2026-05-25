@@ -17,7 +17,7 @@ PWA ↔ relay contract is defined in the [root README](../README.md#api-contract
 
 | File | Runtime destination | Role |
 |---|---|---|
-| `app.py` | `/opt/wol-relay/app.py` (owner `wol:wol`) | FastAPI relay. Validates token + MAC allowlist, sends 3 magic packets spaced 500 ms apart |
+| `app.py` | `/opt/wol-relay/app.py` (owner `wol:wol`) | FastAPI relay. Rate-limits per source IP, validates token + MAC allowlist, audit-logs every attempt, sends 3 magic packets spaced 500 ms apart |
 | `Caddyfile` | `/etc/caddy/Caddyfile` | Reverse proxy + automatic HTTPS via Let's Encrypt + CORS handling on 502 |
 | `wol-relay.service` | `/etc/systemd/system/wol-relay.service` | systemd unit for uvicorn, sandboxed (NoNewPrivileges, ProtectSystem=strict) |
 | `wol-relay.env.example` | (template) | FastAPI env file template. Copy to `/etc/wol-relay.env` (mode `0640 root:wol`), fill in real values |
@@ -243,6 +243,8 @@ templates and posts the dispatcher.
 | Caddy auto-HTTPS Let's Encrypt | TLS without manual config; the token transits in an encrypted header |
 | Caddy CORS on 502 | Error responses don't break browser-side diagnostics |
 | uvicorn `--no-access-log` | The token never ends up in a log |
+| Sliding-window rate limit on `/wol` (10 req/min/IP, in-memory) | Caps scan / brute force velocity before any other check; refuses with 429 |
+| Audit log on `/wol` (`journalctl -u wol-relay`) | Every attempt is logged with source IP + status (200/401/403/429/502). Token and MAC are **never** logged. Lets you spot unauthorized scans |
 | systemd `NoNewPrivileges` + `ProtectSystem=strict` + `PrivateTmp` | Limits the blast radius of a hypothetical RCE in FastAPI |
 | user `wol` (non-priv, no shell) | uvicorn doesn't run as root |
 | `EnvironmentFile` mode `0640 root:<service-user>` | Tokens readable only by root and the service user |

@@ -8,16 +8,23 @@ Security model (defense in depth):
 - MAC allowlist (a leaked token can only wake the listed MAC)
 - TARGET_HOST resolved server-side (clients cannot redirect packets
   to arbitrary hosts)
+- Sliding-window rate limit per source IP (limits scan / brute force
+  velocity on the /wol endpoint, applied before any other check)
+- Audit log of every /wol attempt (status + client IP, never token or
+  MAC) — visible via `journalctl -u wol-relay`
 - CORS restricted to the GitHub Pages origin
 - Runs as a non-privileged systemd user, ProtectSystem=strict
 
 Cf. relay/README.md for the full deploy / hardening procedure.
 """
+import logging
 import os
 import socket
+import threading
 import time
+from collections import defaultdict, deque
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -32,6 +39,22 @@ TARGET_PORT = int(os.environ.get("TARGET_PORT", "9"))
 # packets back-to-back.
 PACKET_REPEATS = 3
 PACKET_GAP_S = 0.5
+
+# Rate limit per source IP on /wol. Sliding window, in-memory: a leaked
+# token can't be brute-bursted, and a scanner hitting /wol gets capped
+# fast without ever reaching the token comparison. uvicorn runs as a
+# single worker (see wol-relay.service), so a process-local dict is
+# coherent; threading.Lock guards concurrent requests within that worker.
+RATE_LIMIT_WINDOW_S = 60
+RATE_LIMIT_MAX_REQ = 10
+_rate_lock = threading.Lock()
+_rate_state: dict[str, deque] = defaultdict(deque)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+logger = logging.getLogger("wol-relay")
 
 # CORS is handled exclusively at the Caddy layer (see Caddyfile). Caddy
 # is the only public ingress, so injecting headers there covers both
@@ -50,6 +73,32 @@ def magic_packet(mac: str) -> bytes:
     clean = mac.replace(":", "").replace("-", "")
     payload = bytes.fromhex(clean)
     return b"\xff" * 6 + payload * 16
+
+
+def client_ip(request: Request) -> str:
+    # uvicorn binds 127.0.0.1 only, Caddy is the sole ingress and sets
+    # X-Forwarded-For by default — so the header is trustworthy here.
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def rate_limited(ip: str) -> bool:
+    now = time.monotonic()
+    cutoff = now - RATE_LIMIT_WINDOW_S
+    with _rate_lock:
+        dq = _rate_state[ip]
+        while dq and dq[0] < cutoff:
+            dq.popleft()
+        if not dq:
+            # Drop empty entries to bound dict growth on scan traffic.
+            _rate_state.pop(ip, None)
+            dq = _rate_state[ip]
+        if len(dq) >= RATE_LIMIT_MAX_REQ:
+            return True
+        dq.append(now)
+    return False
 
 
 @app.get("/health")
@@ -90,14 +139,21 @@ def health_deep():
 
 
 @app.post("/wol")
-def wol(req: WolReq, x_token: str = Header(...)):
+def wol(req: WolReq, request: Request, x_token: str = Header(...)):
+    ip = client_ip(request)
+    if rate_limited(ip):
+        logger.warning("wol ip=%s status=429 reason=rate_limit", ip)
+        raise HTTPException(status_code=429, detail="rate limited")
     if x_token != SHARED_TOKEN:
+        logger.warning("wol ip=%s status=401 reason=bad_token", ip)
         raise HTTPException(status_code=401, detail="bad token")
     if req.mac.lower() != ALLOWED_MAC:
+        logger.warning("wol ip=%s status=403 reason=mac_not_allowed", ip)
         raise HTTPException(status_code=403, detail="mac not allowed")
     try:
         target_ip = socket.gethostbyname(TARGET_HOST)
     except socket.gaierror:
+        logger.error("wol ip=%s status=502 reason=dns_resolution_failed", ip)
         raise HTTPException(status_code=502, detail="dns resolution failed")
     pkt = magic_packet(req.mac)
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -109,4 +165,5 @@ def wol(req: WolReq, x_token: str = Header(...)):
                 time.sleep(PACKET_GAP_S)
     finally:
         s.close()
+    logger.info("wol ip=%s status=200", ip)
     return {"sent": True, "to": target_ip, "port": TARGET_PORT, "repeats": PACKET_REPEATS}

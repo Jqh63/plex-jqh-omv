@@ -281,13 +281,24 @@ function checkStatus(){
 // The relay sets CORS for this origin so a normal fetch can read the status
 // code — unlike the previous depicus probe which had to use no-cors and was
 // blind to Cloudflare 522s. Here a true non-OK response is detected directly.
+// On every relayReachable flip, repaint UI even when the server is online —
+// setOnline() reads relayReachable once at call time, so a later probe that
+// flips it from false→true while isOnline=true would otherwise leave the
+// "⚠ Relais injoignable" banner stuck until the next 30 s status tick.
 function probeRelay(){
   if(relayProbing||!wolReady())return;
   relayProbing=true;
   var ctrl=new AbortController(),timer=setTimeout(function(){ctrl.abort()},2500);
+  var applyFlip=function(ok){
+    var changed=(ok!==relayReachable);
+    relayReachable=ok;
+    if(!changed)return;
+    if(!isOnline&&!wolSent)setOffline();
+    else setFallbackState();
+  };
   fetch(config.relay+'/health',{cache:'no-store',signal:ctrl.signal})
-    .then(function(r){clearTimeout(timer);relayProbing=false;var ok=r.ok;if(ok){if(!relayReachable){relayReachable=true;if(!isOnline&&!wolSent)setOffline();}}else{if(relayReachable){relayReachable=false;if(!isOnline&&!wolSent)setOffline();}}})
-    .catch(function(){clearTimeout(timer);relayProbing=false;if(relayReachable){relayReachable=false;if(!isOnline&&!wolSent)setOffline();}});
+    .then(function(r){clearTimeout(timer);relayProbing=false;applyFlip(r.ok);})
+    .catch(function(){clearTimeout(timer);relayProbing=false;applyFlip(false);});
 }
 
 function applyLinksState(){

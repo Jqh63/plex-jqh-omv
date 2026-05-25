@@ -123,6 +123,13 @@
   .button-row .save-btn{margin-top:0;flex:2}
   .cancel-btn{flex:1;padding:14px;background:var(--surface);border:1px solid var(--border);border-radius:12px;color:var(--text-dim);font-family:'DM Sans',sans-serif;font-size:15px;font-weight:600;cursor:pointer;transition:background .15s}
   .cancel-btn:active{background:var(--surface-hover)}
+  .test-btn{width:100%;padding:10px 14px;background:transparent;border:1px solid var(--border);border-radius:10px;color:var(--text-dim);font-family:'DM Sans',sans-serif;font-size:13px;cursor:pointer;transition:all .15s}
+  .test-btn:active{background:var(--surface-hover);color:var(--text)}
+  .test-btn:disabled{opacity:.4;cursor:not-allowed}
+  .test-status{font-size:12px;color:var(--text-dim);min-height:16px;font-family:'JetBrains Mono',monospace;line-height:1.4}
+  .test-status.ok{color:var(--green)}
+  .test-status.warn{color:var(--orange)}
+  .test-status.fail{color:var(--red)}
 </style>
 </head>
 <body>
@@ -158,6 +165,10 @@
     <label>Token relais <span style="font-size:11px;font-weight:400;opacity:.6">(optionnel)</span></label>
     <input type="password" id="cfgToken" placeholder="" autocomplete="off">
     <span class="hint">Secret partagé envoyé au relais (header X-Token)</span>
+  </div>
+  <div class="field">
+    <button class="test-btn" type="button" onclick="testRelay(this)">Tester le relais</button>
+    <div id="relayTestStatus" class="test-status"></div>
   </div>
   <div class="field">
     <label>Applications <span style="font-size:11px;font-weight:400;opacity:.6">(optionnel)</span></label>
@@ -207,7 +218,7 @@
   <div class="links" id="linksContainer"></div>
 
   <div class="install-hint" id="installHint"><strong>Astuce :</strong> menu ⋮ → « Ajouter à l'écran d'accueil »</div>
-  <div class="footer">v3.6</div>
+  <div class="footer">v3.7</div>
 </div>
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
@@ -357,6 +368,49 @@ function saveConfig(){
   if(apps)config.apps=apps;
   storeConfig(config);
   startApp();
+}
+
+// Pings the configured relay's /health/deep (falls back to /health on older
+// relays that don't expose the deep endpoint). Designed for the settings
+// "Tester le relais" button: surfaces reachability + DNS/UDP readiness inline,
+// without sending a /wol POST (would wake the server) and without touching
+// the configured token (testing it would require POST /wol — same problem).
+function testRelay(btn){
+  var status=document.getElementById('relayTestStatus');
+  var relay=document.getElementById('cfgRelay').value.trim();
+  if(!relay){status.className='test-status fail';status.textContent='✕ URL relais vide';return;}
+  var cleaned=cleanRelay(relay);
+  if(!validRelay(cleaned)){status.className='test-status fail';status.textContent='✕ URL invalide (https://…)';return;}
+  status.className='test-status';status.textContent='Test en cours…';
+  btn.disabled=true;
+  var done=function(cls,txt){btn.disabled=false;status.className='test-status '+cls;status.textContent=txt;};
+  var ctrl=new AbortController(),timer=setTimeout(function(){ctrl.abort()},5000);
+  fetch(cleaned+'/health/deep',{cache:'no-store',signal:ctrl.signal})
+    .then(function(r){
+      clearTimeout(timer);
+      if(r.ok){
+        r.json().then(function(j){
+          var c=j.checks||{};
+          var ok=Object.keys(c).filter(function(k){return c[k]==='ok'});
+          done('ok','✓ Relais OK ('+ok.join(', ')+')');
+        }).catch(function(){done('ok','✓ Relais OK');});
+      }else if(r.status===503){
+        r.json().then(function(j){
+          var c=j.checks||{};
+          var failed=Object.keys(c).filter(function(k){return c[k]!=='ok'});
+          done('warn','⚠ Dégradé : '+(failed.join(', ')||'inconnu'));
+        }).catch(function(){done('warn','⚠ Relais dégradé');});
+      }else if(r.status===404){
+        // Older relay without /health/deep — fall back to /health for compat.
+        fetch(cleaned+'/health',{cache:'no-store'}).then(function(r2){
+          if(r2.ok)done('ok','✓ Relais OK (legacy /health)');
+          else done('fail','✕ Relais répond mais /health KO ('+r2.status+')');
+        }).catch(function(){done('fail','✕ Relais injoignable');});
+      }else{
+        done('fail','✕ HTTP '+r.status);
+      }
+    })
+    .catch(function(){clearTimeout(timer);done('fail','✕ Relais injoignable');});
 }
 
 function buildLinks(){
@@ -542,11 +596,17 @@ function startCountdown(){
   void bar.offsetWidth;
   bar.style.transition='width '+(etaMs/1000)+'s linear';
   bar.style.width='100%';
+  // Three labels by elapsed time. Past T=0 we used to leave "presque prêt"
+  // displayed for up to 5 min (the WoL_TIMEOUT_MS) which made the family
+  // wonder whether the relay was actually doing anything. 30 s past ETA is
+  // ~38% above the median boot, which is a fair signal that something is
+  // slower than usual — gives the user information without crying wolf.
   var tick=function(){
-    var remaining=Math.max(0,Math.round((countdownEndsAt-Date.now())/1000));
+    var diff=Math.round((countdownEndsAt-Date.now())/1000);
     if(isOnline||!wolSent){stopCountdown();return;}
-    if(remaining<=0)pl.textContent='Réveil… presque prêt';
-    else pl.textContent='Réveil… environ '+remaining+'s';
+    if(diff<-30)pl.textContent='Réveil… plus long que d\'habitude';
+    else if(diff<=0)pl.textContent='Réveil… presque prêt';
+    else pl.textContent='Réveil… environ '+diff+'s';
   };
   tick();
   countdownTimer=setInterval(tick,1000);

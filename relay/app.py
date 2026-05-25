@@ -18,6 +18,7 @@ import socket
 import time
 
 from fastapi import FastAPI, Header, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 ALLOWED_MAC = os.environ["ALLOWED_MAC"].lower()
@@ -54,6 +55,38 @@ def magic_packet(mac: str) -> bytes:
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/health/deep")
+def health_deep():
+    # Verifies the things /wol actually needs at runtime: DNS resolution of
+    # TARGET_HOST and the ability to open a broadcast-capable UDP socket.
+    # The /wol path itself is unauthenticated until the X-Token check, so we
+    # keep this endpoint anonymous too — it never reveals MAC/token values,
+    # only ok/fail per check.
+    checks = {"uvicorn": "ok"}
+    overall = True
+
+    try:
+        socket.gethostbyname(TARGET_HOST)
+        checks["dns"] = "ok"
+    except socket.gaierror:
+        checks["dns"] = "fail"
+        overall = False
+
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        s.close()
+        checks["udp"] = "ok"
+    except OSError:
+        checks["udp"] = "fail"
+        overall = False
+
+    return JSONResponse(
+        content={"status": "ok" if overall else "degraded", "checks": checks},
+        status_code=200 if overall else 503,
+    )
 
 
 @app.post("/wol")

@@ -1,6 +1,13 @@
 var config=null,isOnline=false,wolSent=false,checking=false,checkInterval=null;
 var relayReachable=true,relayProbing=false;
 var wolStartTime=0,wolPollTimer=null,wolRetryTimers=[];
+// Cold-radio resume: on Android PWA, the first fetch after a long background
+// often times out before the mobile radio is back up. justResumed=true marks
+// a window where one quick retry is scheduled on failure (at +5s, when the
+// radio should be warm). One retry only — no change to the regular 30 s
+// polling cadence, no battery impact in the nominal case.
+var justResumed=false,resumeRetryTimer=null;
+function clearResumeRetry(){if(resumeRetryTimer){clearTimeout(resumeRetryTimer);resumeRetryTimer=null;}}
 var WOL_POLL_MS=15000, WOL_TIMEOUT_MS=300000;
 // Resend the POST at these offsets after the initial fire (server-side
 // already sends 3 packets per POST). 4 POSTs × 3 packets = 15 magic
@@ -253,7 +260,9 @@ function startApp(){
   buildLinks();
   clearWolPoll();
   clearWolRetries();
+  clearResumeRetry();
   isOnline=false;wolSent=false;checking=false;relayReachable=true;
+  justResumed=true;
   checkStatus();
   probeRelay();
   if(checkInterval)clearInterval(checkInterval);
@@ -272,8 +281,13 @@ function checkStatus(){
   // network error). The Chrome PNA noise on redirects is cosmetic-only and
   // doesn't break detection — leaving redirect at its default ('follow').
   fetch('https://'+statusHost(),{mode:'no-cors',cache:'no-store',signal:ctrl.signal})
-    .then(function(){clearTimeout(timer);btn.classList.remove('spinning');checking=false;setOnline()})
-    .catch(function(){clearTimeout(timer);btn.classList.remove('spinning');checking=false;setOffline()});
+    .then(function(){clearTimeout(timer);btn.classList.remove('spinning');checking=false;justResumed=false;clearResumeRetry();setOnline();})
+    .catch(function(){clearTimeout(timer);btn.classList.remove('spinning');checking=false;setOffline();
+      // First check after resume often fails on cold radio. Schedule one
+      // retry at +5s (radio warm by then) so the user doesn't wait 30 s
+      // for the next regular tick. Single shot — clear the flag.
+      if(justResumed){justResumed=false;clearResumeRetry();resumeRetryTimer=setTimeout(checkStatus,5000);}
+    });
   probeRelay();
 }
 
@@ -560,6 +574,8 @@ document.addEventListener('visibilitychange',function(){
     // runs unhindered.
     checking=false;
     relayProbing=false;
+    clearResumeRetry();
+    justResumed=true;
     // Always force an immediate check on resume, even if checkInterval still
     // exists — wolPollTimer / checkInterval may have been frozen during the
     // background phase and the next scheduled tick could be seconds or

@@ -26,11 +26,11 @@ truth is private.
 
 The PWA used to depend on `depicus.com` (3rd-party WoL relay, served
 via iframe). Since v3.0 (2026-05-24) the dependency is replaced by a
-self-hosted relay (FastAPI + Caddy on a GCP `e2-micro` Always Free
-VM), with code versioned in the private `knowledge-base/wol-relay/`.
-The PWA now does a `fetch POST` to the relay's `/wol` endpoint with
-proper success/failure feedback (the previous `no-cors` iframe was a
-black box).
+self-hosted relay (FastAPI + Caddy on a small always-free VM). The
+relay's source lives **alongside the PWA in this repo** under
+[`relay/`](relay/) — see *Scope* below. The PWA does a `fetch POST`
+to the relay's `/wol` endpoint with proper success/failure feedback
+(the previous `no-cors` iframe was a black box).
 
 ## Non-negotiable rules
 
@@ -149,11 +149,15 @@ code. Don't undo them without re-bisecting:
 - **No JS framework, no build step, no `package.json`.** Single HTML
   file = maximum portability and easy visual audit.
 - **No tracking, no cookies.**
-- **No backend in this repo.** The self-hosted WoL relay (the only
-  current backend) lives in the author's private
-  `knowledge-base/wol-relay/` repo, behind a `fetch POST` to a
-  user-configured URL. Any future backend would follow the same
-  pattern — a separate repo, never mixed with the PWA.
+- **One co-located backend, by exception: the WoL relay** (under
+  [`relay/`](relay/)). It is the only server-side component the PWA
+  strictly depends on, and the wire contract between the two is
+  small and stable enough that they evolve together. **No applicative
+  coupling beyond the HTTP contract** — the PWA must keep working
+  against any backend that honours `POST /wol` + `GET /health`, and
+  the relay must keep working without assuming anything about the
+  caller. **Any other future backend stays in its own repo** — this
+  exception is not a precedent.
 
 ## When in doubt
 

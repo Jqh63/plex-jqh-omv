@@ -1,0 +1,21 @@
+[Unit]
+Description=WoL Relay FastAPI
+After=network.target
+
+[Service]
+Type=simple
+User=wol
+Group=wol
+WorkingDirectory=/opt/wol-relay
+EnvironmentFile=/etc/wol-relay.env
+ExecStart=/opt/wol-relay/venv/bin/uvicorn app:app --host 127.0.0.1 --port 8000 --no-access-log
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=
+
+[Install]
+WantedBy=multi-user.target

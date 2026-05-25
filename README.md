@@ -2,6 +2,16 @@
 
 A lightweight PWA to wake and monitor a media server via Wake-on-LAN.
 
+This repo bundles **two components**:
+
+- The **PWA** itself (`index.html`, `sw.js`, `manifest.json`, …) — pure
+  HTML/JS/CSS, hosted on GitHub Pages.
+- A **reference HTTP→UDP relay** in [`relay/`](relay/) — the small
+  server-side process the PWA `POST`s to in order to dispatch the
+  magic packet (browsers cannot send raw UDP). Use this implementation
+  as-is, or substitute any compatible relay; the wire contract is
+  documented under [API contract](#api-contract) below.
+
 ## Features
 
 - **Server status** — checks every 30s via HTTPS fetch
@@ -80,6 +90,8 @@ Example: `host=myserver.example.com` + `apps=seerr,plexweb` → pings `seerr.mys
 
 ## Files
 
+### PWA (repo root)
+
 | File | Description |
 |---|---|
 | `index.html` | App (HTML + CSS + JS, single file) |
@@ -90,12 +102,27 @@ Example: `host=myserver.example.com` + `apps=seerr,plexweb` → pings `seerr.mys
 | `icon-512.png` | App icon 512x512 |
 | `icon.svg` | Source icon (SVG) |
 
+### Relay ([`relay/`](relay/))
+
+See [`relay/README.md`](relay/README.md) for the full file inventory
+(FastAPI app, Caddyfile, systemd unit, env templates, bootstrap
+scripts, GitOps deploy channel). Use it as-is, fork it, or replace
+with any backend that honours the [API contract](#api-contract).
+
 ## Deployment
+
+### PWA (GitHub Pages)
 
 1. Create a public GitHub repository
 2. Upload all files
 3. Enable GitHub Pages (Settings > Pages > Deploy from branch `main`)
 4. Share the URL with parameters to your users
+
+### Relay (your own small VM)
+
+Follow [`relay/README.md`](relay/README.md). The relay needs a public
+HTTPS endpoint and UDP egress — any always-free VM works (GCP
+e2-micro, Oracle Cloud, etc.).
 
 ## Security
 
@@ -118,6 +145,11 @@ Example: `host=myserver.example.com` + `apps=seerr,plexweb` → pings `seerr.mys
 ## Relay (required for WoL)
 
 Browsers cannot send raw UDP, so the magic packet must be dispatched by a small HTTP→UDP relay you host yourself. The PWA `POST`s a JSON payload over HTTPS; the relay validates and forwards the magic packet to the target.
+
+**A reference implementation ships in [`relay/`](relay/)** — FastAPI +
+Caddy auto-HTTPS, ~80 lines of Python, sandboxed systemd unit, GitOps
+deploy channel. The contract below is the source of truth; any
+backend that honours it is interchangeable with the reference.
 
 ### API contract
 
@@ -143,41 +175,13 @@ CORS: must allow your GitHub Pages origin
 - **Resolve the target host server-side** — do not accept an IP from the client; resolve a fixed FQDN like `myserver.example.com` instead so a leaked token cannot redirect packets to arbitrary hosts.
 - **Drop privileges** — run the relay as a non-root user, disable PrivateTmp / write paths in systemd.
 
-### Minimal reference (FastAPI, ~30 lines)
+### Reference implementation
 
-```python
-import os, socket
-from fastapi import FastAPI, HTTPException, Header
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
-
-ALLOWED_MAC  = os.environ["ALLOWED_MAC"].lower()
-SHARED_TOKEN = os.environ["WOL_TOKEN"]
-TARGET_HOST  = os.environ["TARGET_HOST"]
-TARGET_PORT  = int(os.environ.get("TARGET_PORT", "9"))
-
-app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
-app.add_middleware(CORSMiddleware,
-  allow_origins=["https://<your-github>.github.io"],
-  allow_methods=["POST", "GET"], allow_headers=["Content-Type", "X-Token"])
-
-class WolReq(BaseModel):
-    mac: str = Field(..., pattern=r"^([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}$")
-
-@app.get("/health")
-def health(): return {"status": "ok"}
-
-@app.post("/wol")
-def wol(req: WolReq, x_token: str = Header(...)):
-    if x_token != SHARED_TOKEN:        raise HTTPException(401)
-    if req.mac.lower() != ALLOWED_MAC: raise HTTPException(403)
-    target_ip = socket.gethostbyname(TARGET_HOST)
-    pkt = b"\xff" * 6 + bytes.fromhex(req.mac.replace(":", "")) * 16
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-    s.sendto(pkt, (target_ip, TARGET_PORT))
-    return {"sent": True}
-```
+Full working code (FastAPI + Caddy + systemd unit + deploy scripts)
+lives in [`relay/`](relay/). It implements every item under
+*Recommended hardening* above and adds a GitOps deploy channel for
+safe remote updates. See [`relay/README.md`](relay/README.md) for the
+full procedure.
 
 ### Hosting suggestions
 

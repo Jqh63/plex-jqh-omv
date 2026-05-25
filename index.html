@@ -141,28 +141,28 @@
     <p>Paramètres de connexion</p>
   </div>
   <div class="field">
-    <label>Titre <span style="font-size:11px;font-weight:400;opacity:.6">(optionnel)</span></label>
+    <label for="cfgTitle">Titre <span style="font-size:11px;font-weight:400;opacity:.6">(optionnel)</span></label>
     <input type="text" id="cfgTitle" placeholder="Mon serveur" autocomplete="off">
   </div>
   <div class="field">
-    <label>Domaine</label>
+    <label for="cfgHost">Domaine</label>
     <input type="text" id="cfgHost" placeholder="monserveur.exemple.com" autocomplete="off" autocapitalize="off">
   </div>
   <div class="field">
-    <label>Adresse MAC <span style="font-size:11px;font-weight:400;opacity:.6">(optionnel — WoL)</span></label>
+    <label for="cfgMac">Adresse MAC <span style="font-size:11px;font-weight:400;opacity:.6">(optionnel — WoL)</span></label>
     <input type="text" id="cfgMac" placeholder="AABBCCDDEEFF" autocomplete="off" autocapitalize="off">
   </div>
   <div class="field">
-    <label>Port WoL</label>
+    <label for="cfgPort">Port WoL</label>
     <input type="number" id="cfgPort" placeholder="9" autocomplete="off">
   </div>
   <div class="field">
-    <label>Relais WoL <span style="font-size:11px;font-weight:400;opacity:.6">(optionnel — URL HTTPS)</span></label>
+    <label for="cfgRelay">Relais WoL <span style="font-size:11px;font-weight:400;opacity:.6">(optionnel — URL HTTPS)</span></label>
     <input type="url" id="cfgRelay" placeholder="https://wol.exemple.com" autocomplete="off" autocapitalize="off">
     <span class="hint">URL du relais self-hosted qui envoie le magic packet (laisser vide si pas de WoL)</span>
   </div>
   <div class="field">
-    <label>Token relais <span style="font-size:11px;font-weight:400;opacity:.6">(optionnel)</span></label>
+    <label for="cfgToken">Token relais <span style="font-size:11px;font-weight:400;opacity:.6">(optionnel)</span></label>
     <input type="password" id="cfgToken" placeholder="" autocomplete="off">
     <span class="hint">Secret partagé envoyé au relais (header X-Token)</span>
   </div>
@@ -171,7 +171,7 @@
     <div id="relayTestStatus" class="test-status"></div>
   </div>
   <div class="field">
-    <label>Applications <span style="font-size:11px;font-weight:400;opacity:.6">(optionnel)</span></label>
+    <label for="cfgApps">Applications <span style="font-size:11px;font-weight:400;opacity:.6">(optionnel)</span></label>
     <input type="text" id="cfgApps" placeholder="seerr,jellyfin" autocomplete="off" autocapitalize="off">
     <span class="hint">Mots-clés séparés par virgule : seerr, overseerr, jellyseerr, jellyfin, plexweb</span>
   </div>
@@ -218,7 +218,7 @@
   <div class="links" id="linksContainer"></div>
 
   <div class="install-hint" id="installHint"><strong>Astuce :</strong> menu ⋮ → « Ajouter à l'écran d'accueil »</div>
-  <div class="footer">v3.8</div>
+  <div class="footer">v3.9</div>
 </div>
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>

@@ -1,12 +1,22 @@
 var config=null,isOnline=false,wolSent=false,checking=false,checkInterval=null;
 var relayReachable=true,relayProbing=false;
 var wolStartTime=0,wolPollTimer=null,wolRetryTimers=[];
-// Cold-radio resume: on Android PWA, the first fetch after a long background
-// often times out before the mobile radio is back up. justResumed=true marks
-// a window where one quick retry is scheduled on failure (at +5s, when the
-// radio should be warm). One retry only — no change to the regular 30 s
-// polling cadence, no battery impact in the nominal case.
-var justResumed=false,resumeRetryTimer=null;
+// Cold-radio resume grace window. On Android PWA resume (and on initial
+// load), the first fetch from the foregrounded app often times out while
+// the mobile radio is still warming up. Without a defer, the user sees a
+// 5-7 s false-positive cycle: green → "Vérification…" → ⚠ "Relais
+// injoignable" → red "Hors ligne" → back to green once the radio is up.
+// While inResumeWindow(), the first failure of checkStatus is deferred
+// (no KO paint, one quick retry scheduled at +5 s) and the first failure
+// of probeRelay is deferred (relayReachable is not flipped to false). The
+// 6 s deadline covers both handlers' first attempts and lets the natural
+// 30 s tick resolve real outages. PR #19 covered checkStatus only; the
+// probe was still flipping and painting "⚠ Relais injoignable" before
+// the radio was warm.
+var resumeUntil=0,resumeRetryTimer=null;
+var RESUME_GRACE_MS=6000;
+function inResumeWindow(){return resumeUntil>0&&Date.now()<resumeUntil;}
+function openResumeWindow(){resumeUntil=Date.now()+RESUME_GRACE_MS;}
 function clearResumeRetry(){if(resumeRetryTimer){clearTimeout(resumeRetryTimer);resumeRetryTimer=null;}}
 var WOL_POLL_MS=15000, WOL_TIMEOUT_MS=300000;
 // Resend the POST at these offsets after the initial fire (server-side
@@ -262,7 +272,7 @@ function startApp(){
   clearWolRetries();
   clearResumeRetry();
   isOnline=false;wolSent=false;checking=false;relayReachable=true;
-  justResumed=true;
+  openResumeWindow();
   checkStatus();
   probeRelay();
   if(checkInterval)clearInterval(checkInterval);
@@ -281,12 +291,20 @@ function checkStatus(){
   // network error). The Chrome PNA noise on redirects is cosmetic-only and
   // doesn't break detection — leaving redirect at its default ('follow').
   fetch('https://'+statusHost(),{mode:'no-cors',cache:'no-store',signal:ctrl.signal})
-    .then(function(){clearTimeout(timer);btn.classList.remove('spinning');checking=false;justResumed=false;clearResumeRetry();setOnline();})
-    .catch(function(){clearTimeout(timer);btn.classList.remove('spinning');checking=false;setOffline();
-      // First check after resume often fails on cold radio. Schedule one
-      // retry at +5s (radio warm by then) so the user doesn't wait 30 s
-      // for the next regular tick. Single shot — clear the flag.
-      if(justResumed){justResumed=false;clearResumeRetry();resumeRetryTimer=setTimeout(checkStatus,5000);}
+    .then(function(){clearTimeout(timer);btn.classList.remove('spinning');checking=false;clearResumeRetry();setOnline();})
+    .catch(function(){
+      clearTimeout(timer);btn.classList.remove('spinning');checking=false;
+      if(inResumeWindow()){
+        // Defer: keep the "Vérification…" pulsing already on screen, schedule
+        // one retry at +5 s. The window stays open until its natural deadline
+        // so probeRelay (running in parallel) can also defer its first
+        // failure. If the retry still fails after the window closes, the
+        // KO paint happens honestly via the regular path below.
+        clearResumeRetry();
+        resumeRetryTimer=setTimeout(checkStatus,5000);
+        return;
+      }
+      setOffline();
     });
   probeRelay();
 }
@@ -304,6 +322,13 @@ function probeRelay(){
   relayProbing=true;
   var ctrl=new AbortController(),timer=setTimeout(function(){ctrl.abort()},2500);
   var applyFlip=function(ok){
+    // Cold-radio defer mirroring checkStatus (see resumeUntil comment):
+    // during the resume window, the first relay probe failure is treated
+    // as likely radio-warmup noise. Keep relayReachable as-is; the next
+    // checkStatus tick (or the in-flight checkStatus retry) will tell the
+    // truth a few seconds later. Without this, the "⚠ Relais injoignable"
+    // banner flashes for ~5 s on every PWA foreground return.
+    if(!ok&&relayReachable&&inResumeWindow())return;
     var changed=(ok!==relayReachable);
     relayReachable=ok;
     if(!changed)return;
@@ -575,7 +600,7 @@ document.addEventListener('visibilitychange',function(){
     checking=false;
     relayProbing=false;
     clearResumeRetry();
-    justResumed=true;
+    openResumeWindow();
     // Always force an immediate check on resume, even if checkInterval still
     // exists — wolPollTimer / checkInterval may have been frozen during the
     // background phase and the next scheduled tick could be seconds or

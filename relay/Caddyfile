@@ -1,36 +1,36 @@
 {
-    email {$LE_EMAIL}
+	email {$LE_EMAIL}
 }
 
 {$RELAY_DOMAIN} {
-    encode gzip
+	encode gzip
 
-    # CORS headers — set at the Caddy layer so they're present on
-    # Caddy-generated error responses too. When uvicorn is down, Caddy
-    # returns a 502 without ever calling FastAPI, and without these
-    # headers the browser blocks the response with a CORS error before
-    # the JS catch handler can see the failure. The PWA then
-    # misinterprets "relay down" as a CORS issue.
-    @from_pwa header Origin {$CORS_ORIGIN}
-    header @from_pwa Access-Control-Allow-Origin "{$CORS_ORIGIN}"
-    header @from_pwa Access-Control-Allow-Methods "GET, POST, OPTIONS"
-    header @from_pwa Access-Control-Allow-Headers "Content-Type, X-Token"
-    header @from_pwa Vary "Origin"
+	# CORS headers — set at the Caddy layer so they're present on
+	# Caddy-generated error responses too. When uvicorn is down, Caddy
+	# returns a 502 without ever calling FastAPI, and without these
+	# headers the browser blocks the response with a CORS error before
+	# the JS catch handler can see the failure. The PWA then
+	# misinterprets "relay down" as a CORS issue.
+	@from_pwa header Origin {$CORS_ORIGIN}
+	header @from_pwa Access-Control-Allow-Origin "{$CORS_ORIGIN}"
+	header @from_pwa Access-Control-Allow-Methods "GET, POST, OPTIONS"
+	header @from_pwa Access-Control-Allow-Headers "Content-Type, X-Token"
+	header @from_pwa Vary "Origin"
 
-    # Handle OPTIONS preflight at the Caddy level so it succeeds even
-    # when uvicorn is unavailable (FastAPI normally answers preflights,
-    # but only if it's actually reachable).
-    @options method OPTIONS
-    handle @options {
-        respond "" 204
-    }
+	# Handle OPTIONS preflight at the Caddy level so it succeeds even
+	# when uvicorn is unavailable (FastAPI normally answers preflights,
+	# but only if it's actually reachable).
+	@options method OPTIONS
+	handle @options {
+		respond "" 204
+	}
 
-    reverse_proxy localhost:8000
+	reverse_proxy localhost:8000
 
-    header {
-        Strict-Transport-Security "max-age=31536000"
-        X-Content-Type-Options "nosniff"
-        X-Frame-Options "DENY"
-        Referrer-Policy "no-referrer"
-    }
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+	}
 }

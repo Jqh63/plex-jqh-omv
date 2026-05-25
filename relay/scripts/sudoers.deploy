@@ -1,0 +1,30 @@
+# /etc/sudoers.d/deploy — relay VM.
+#
+# Source: relay/scripts/sudoers.deploy in this repo.
+#
+# Minimal sudoers for the `deploy` user invoked by dispatch.sh:
+# exact verbs, literal paths, no wildcards.
+#
+# Allowed surface:
+#   - install the 3 staged files to their runtime destinations
+#     (app.py owned wol:wol to match the uvicorn user; the others
+#     root:root mode 0644)
+#   - systemctl daemon-reload (needed when wol-relay.service changes)
+#   - systemctl restart wol-relay
+#   - systemctl reload caddy
+#
+# Note: do NOT add `deploy` to the `sudo` group nor authorise arbitrary
+# verbs — the forced-command + minimal sudoers isolation is the whole
+# point of this pattern.
+
+Cmnd_Alias WOL_RELAY_INSTALL = \
+  /usr/bin/install -o wol -g wol -m 0644 /tmp/wol-relay-staging/app.py /opt/wol-relay/app.py, \
+  /usr/bin/install -m 0644 /tmp/wol-relay-staging/Caddyfile /etc/caddy/Caddyfile, \
+  /usr/bin/install -m 0644 /tmp/wol-relay-staging/wol-relay.service /etc/systemd/system/wol-relay.service
+
+Cmnd_Alias WOL_RELAY_SYSTEMCTL = \
+  /bin/systemctl daemon-reload, \
+  /bin/systemctl restart wol-relay, \
+  /bin/systemctl reload caddy
+
+deploy ALL=(root) NOPASSWD: WOL_RELAY_INSTALL, WOL_RELAY_SYSTEMCTL

@@ -89,12 +89,14 @@ wol-relay` + `reload caddy`) and a final `health`. Typical duration:
 ### Individual subcommands
 
 ```bash
-ssh wol-relay-deploy status       # systemctl is-active wol-relay caddy
-ssh wol-relay-deploy health       # curl http://127.0.0.1:8000/health
+ssh wol-relay-deploy status         # systemctl is-active wol-relay caddy
+ssh wol-relay-deploy health         # curl http://127.0.0.1:8000/health
+ssh wol-relay-deploy logs-wol-relay # journalctl -u wol-relay -n 100 --no-pager
+ssh wol-relay-deploy logs-caddy     # journalctl -u caddy -n 100 --no-pager
 ssh wol-relay-deploy push-app < relay/app.py             # stage only
 ssh wol-relay-deploy push-caddyfile < relay/Caddyfile    # stage only
 ssh wol-relay-deploy push-service < relay/wol-relay.service
-ssh wol-relay-deploy apply        # install + restart (run push-* first)
+ssh wol-relay-deploy apply          # install + restart (run push-* first)
 ```
 
 Security by construction: forced-command `dispatch.sh` on the VM

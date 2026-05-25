@@ -12,6 +12,8 @@
 #   - systemctl daemon-reload (needed when wol-relay.service changes)
 #   - systemctl restart wol-relay
 #   - systemctl reload caddy
+#   - journalctl read-only tail (-n 100 --no-pager, fixed args) on the
+#     two services this VM runs, for the dispatch.sh logs-* subcommands
 #
 # Note: do NOT add `deploy` to the `sudo` group nor authorise arbitrary
 # verbs — the forced-command + minimal sudoers isolation is the whole
@@ -27,4 +29,8 @@ Cmnd_Alias WOL_RELAY_SYSTEMCTL = \
   /bin/systemctl restart wol-relay, \
   /bin/systemctl reload caddy
 
-deploy ALL=(root) NOPASSWD: WOL_RELAY_INSTALL, WOL_RELAY_SYSTEMCTL
+Cmnd_Alias WOL_RELAY_LOGS = \
+  /usr/bin/journalctl -u wol-relay -n 100 --no-pager, \
+  /usr/bin/journalctl -u caddy -n 100 --no-pager
+
+deploy ALL=(root) NOPASSWD: WOL_RELAY_INSTALL, WOL_RELAY_SYSTEMCTL, WOL_RELAY_LOGS

@@ -13,6 +13,8 @@
 #   ssh wol-relay-deploy apply             # install the 3 files + restart services
 #   ssh wol-relay-deploy status            # systemctl is-active wol-relay caddy
 #   ssh wol-relay-deploy health            # curl http://127.0.0.1:8000/health
+#   ssh wol-relay-deploy logs-wol-relay    # journalctl -u wol-relay -n 100 (read-only)
+#   ssh wol-relay-deploy logs-caddy        # journalctl -u caddy -n 100 (read-only)
 #
 # Standard usage pattern: `relay/scripts/deploy.sh` on the deploying host
 # pipes the 3 push commands from the local repo, then triggers apply.
@@ -66,9 +68,18 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
   health)
     /usr/bin/curl -fsS http://127.0.0.1:8000/health
     ;;
+  logs-wol-relay)
+    # Read-only journal tail. journalctl needs sudo because the `deploy`
+    # user isn't in the systemd-journal group; the sudoers entry pins
+    # the exact arg vector (no user-controlled flags, fixed -n 100).
+    sudo /usr/bin/journalctl -u wol-relay -n 100 --no-pager
+    ;;
+  logs-caddy)
+    sudo /usr/bin/journalctl -u caddy -n 100 --no-pager
+    ;;
   *)
     echo "dispatch.sh: unknown command '${SSH_ORIGINAL_COMMAND:-}'" >&2
-    echo "Expected: push-app, push-caddyfile, push-service, apply, status, health." >&2
+    echo "Expected: push-app, push-caddyfile, push-service, apply, status, health, logs-wol-relay, logs-caddy." >&2
     exit 64
     ;;
 esac

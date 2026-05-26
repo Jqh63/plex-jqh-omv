@@ -9,10 +9,11 @@ useful for tight iteration on timing logic. The browser E2E
 (`cold-radio-e2e.py`) is the source of truth — this sim is a
 lightweight first line of defence.
 
-Three implementations side-by-side:
+Four implementations side-by-side:
   - BuggyApp: pre-v4.3 logic (justResumed flag, checkStatus retry only)
   - V43App:   v4.3 logic (resumeUntil window, both handlers defer once)
-  - FixedApp: v4.4 logic (v4.3 + 2-fail probe streak when server-down)
+  - V44App:   v4.4 logic (v4.3 + 2-fail probe streak)
+  - FixedApp: v4.5 logic (v4.4 + 2-fail status streak — same pattern)
 
 For each scenario we feed sequences of (latency, ok) outcomes for the
 status and probe fetches. latency=None means the fetch times out at
@@ -257,20 +258,14 @@ class V43App(App):
                 self.paint("offline-relay-promoted")
 
 
-class FixedApp(App):
+class V44App(App):
     """v4.4 logic — v4.3 window + universal 2-fail probe streak.
 
-    Rationale: a single post-window probe failure is more often cold-radio
-    noise (radio still warming, transient packet loss, GCP micro-burst) than
-    a real relay outage. Requiring 2 consecutive post-window fails to flip
-    relayReachable → false eliminates the false-positive 'Réveil
-    indisponible' / '⚠ Relais injoignable' paints regardless of isOnline
-    state (the bug surfaces in both cold-launch and background→fg cases).
-
-    Trade-off: real relay-down detection delayed by ~30s (caught at the next
-    tick after the first post-window fail). Acceptable because the WoL click
-    path surfaces relay errors immediately via the postWol() catch toast —
-    the preemptive banner is just an early signal.
+    Fixes the post-v4.3 relay false-positive (cold-radio probe leaks past
+    the 6 s window via the checkStatus retry's probe). Still flips status
+    (isOnline) on the first post-window status failure though, which
+    produces a 'serveur éteint' RED false-positive when the radio is also
+    cold on the status fetch.
     """
 
     def __init__(self, clock, scenario):
@@ -296,14 +291,73 @@ class FixedApp(App):
         super().on_probe_ok()
 
     def on_probe_fail(self):
-        # Cold-radio defer (v4.3): first fail inside resume window doesn't
-        # flip AND doesn't count toward the streak (likely radio warmup noise).
         if self._in_resume_window() and self.relay_reachable:
             return
         self.probe_fail_streak += 1
-        # 2-fail streak (v4.4): require 2 consecutive post-window fails to
-        # flip relay → false. Single transient fails are absorbed; real
-        # outages are detected on the second consecutive fail.
+        if self.relay_reachable and self.probe_fail_streak < 2:
+            return
+        prev = self.relay_reachable
+        self.relay_reachable = False
+        if prev:
+            if self.is_online:
+                self.paint("warn-relay")
+            else:
+                self.paint("offline-relay-promoted")
+
+
+class FixedApp(App):
+    """v4.5 logic — v4.4 + symmetric 2-fail status streak.
+
+    Same pattern as the v4.4 probe streak, applied to the status fetch.
+    Single post-window status failure is more often cold-radio noise than
+    a real server-down event (the 6 s window + the retry's 5 s window can
+    still leave the radio cold on slow Android setups — user report
+    2026-05-25: 'serveur éteint' for ~1 min before recovering green).
+
+    Trade-off: real server-down detection delayed by ~15 s (caught at the
+    next 30 s tick after the first post-window status fail). The
+    'Vérification…' pulsing dot stays on screen during the defer.
+    """
+
+    def __init__(self, clock, scenario):
+        super().__init__(clock, scenario)
+        self.probe_fail_streak = 0
+        self.status_fail_streak = 0
+
+    def _in_resume_window(self):
+        return self.resume_until > 0 and self.clock.now < self.resume_until
+
+    def on_status_ok(self):
+        self.status_fail_streak = 0
+        super().on_status_ok()
+        self.resume_retry_id = None
+
+    def on_status_fail(self):
+        if self._in_resume_window():
+            self.clock.after(RESUME_RETRY, lambda: self.fire_status())
+            return
+        self.status_fail_streak += 1
+        # 2-fail streak (v4.5, universal): require 2 consecutive post-window
+        # status fails to paint setOffline RED. Single transient fails
+        # (cold-radio Android, network blip) are absorbed; real outages are
+        # detected on the second consecutive fail at the next 30 s tick.
+        # Mirror of the v4.4 probe streak — applied universally regardless
+        # of prior isOnline state (cold launches start with isOnline=false
+        # from startApp() but the user hasn't yet been informed visually,
+        # so deferring the paint avoids the false-positive RED flash too).
+        if self.status_fail_streak < 2:
+            return
+        self.is_online = False
+        self.paint("offline")
+
+    def on_probe_ok(self):
+        self.probe_fail_streak = 0
+        super().on_probe_ok()
+
+    def on_probe_fail(self):
+        if self._in_resume_window() and self.relay_reachable:
+            return
+        self.probe_fail_streak += 1
         if self.relay_reachable and self.probe_fail_streak < 2:
             return
         prev = self.relay_reachable
@@ -364,13 +418,16 @@ SCENARIOS = [
         resume_at=20,
     ),
     Scenario(
+        # Real server-down on resume. v4.5's 2-fail streak adds ~30 s on
+        # detection: T+65 ish instead of T+25 (v4.4 painted on first
+        # post-window fail). Real outages still get caught — just slower.
         name="resume-server-down",
-        status_outcomes=[FetchOutcome(0.2, True)] + [FetchOutcome(None, False)] * 3,
-        probe_outcomes=[FetchOutcome(0.3, True)] * 4,
+        status_outcomes=[FetchOutcome(0.2, True)] + [FetchOutcome(None, False)] * 5,
+        probe_outcomes=[FetchOutcome(0.3, True)] * 5,
         resume_at=20,
         expect_final_online=False,
         forbid_red_flash=False,    # red IS expected here — server is really down
-        horizon=60.0,
+        horizon=75.0,
     ),
     Scenario(
         # Real relay-down on resume. v4.4's 2-fail streak adds ~30 s on
@@ -415,6 +472,29 @@ SCENARIOS = [
         forbid_warn_flash=True,             # relay false-positive warn is THE BUG
         horizon=60.0,
     ),
+    Scenario(
+        # The v4.5 fix targets this: server actually UP, cold radio causes
+        # both status #1 (window defers) AND status #2 retry (post-window,
+        # v4.4 paints RED — false positive) to fail. T+30 tick succeeds
+        # (radio warm). User report 2026-05-25: 'serveur éteint' shown for
+        # ~1 min before recovering green on Android PWA. v4.5 streak
+        # counter requires 2 post-window status fails to paint RED.
+        name="cold-start-server-up-with-cold-radio-status-noise",
+        status_outcomes=[
+            FetchOutcome(None, False),  # T+5 cold-radio fail — window defers
+            FetchOutcome(None, False),  # T+15 retry status — post-window, v4.4 BUG
+            FetchOutcome(0.3, True),    # T+30+ tick — radio warm, recovers
+            FetchOutcome(0.3, True),
+            FetchOutcome(0.3, True),
+        ],
+        probe_outcomes=[FetchOutcome(0.4, True)] * 5,
+        resume_at=0,                        # cold launch
+        expect_final_online=True,           # server actually up — must end green
+        expect_final_relay_reachable=True,
+        forbid_red_flash=True,              # RED false positive is THE BUG
+        forbid_warn_flash=True,
+        horizon=60.0,
+    ),
 ]
 
 
@@ -424,12 +504,12 @@ def fmt_paints(paints):
 
 def main():
     print("=" * 72)
-    print("PWA state-machine simulation — Buggy (pre-v4.3) vs V43 vs Fixed (v4.4)")
+    print("PWA state-machine simulation — Buggy/V43/V44/Fixed(v4.5)")
     print("=" * 72)
     overall_pass = True
     for scenario in SCENARIOS:
         print(f"\n## {scenario.name}")
-        for cls in (BuggyApp, V43App, FixedApp):
+        for cls in (BuggyApp, V43App, V44App, FixedApp):
             res = evaluate(run(scenario, cls))
             ok_red = not res["red"] if scenario.forbid_red_flash else True
             ok_warn = not res["warn"] if scenario.forbid_warn_flash else True
@@ -451,7 +531,7 @@ def main():
             if issues:
                 print(f"               issues: {'; '.join(issues)}")
     print("\n" + "=" * 72)
-    print(f"FixedApp (v4.4): {'all scenarios PASS' if overall_pass else 'AT LEAST ONE FAIL'}")
+    print(f"FixedApp (v4.5): {'all scenarios PASS' if overall_pass else 'AT LEAST ONE FAIL'}")
     return 0 if overall_pass else 1
 
 

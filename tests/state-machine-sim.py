@@ -16,10 +16,10 @@ Five implementations side-by-side:
   - V45App:   v4.5 logic (v4.4 + 2-fail status streak)
   - FixedApp: v5.0 logic (v4.5 + cached-state paint on startup + adaptive
               tick after defer instead of waiting the regular tick).
-              v5.1 retunes the constants (3 s timeout, 5 s adaptive,
-              15 s tick) so steady-state server-dies-mid-tick detection
-              completes ≤ 26 s — see v51-steady-state-server-dies-mid-tick
-              scenario for the fenced bound.
+              v5.1 retuned the constants for tight detection. v5.3 trims
+              the status timeout further (3 s → 2 s) so steady-state
+              server-dies-mid-tick detection completes ≤ 24 s — see
+              v51-steady-state-server-dies-mid-tick for the fenced bound.
 
 For each scenario we feed sequences of (latency, ok) outcomes for the
 status and probe fetches. latency=None means the fetch times out at
@@ -40,10 +40,10 @@ import heapq
 from dataclasses import dataclass, field
 from typing import Optional, Callable, List
 
-STATUS_TIMEOUT = 3.0  # v5.1: 5 s → 3 s. Server fetches that don't answer in
-                      # 3 s are almost certainly down (typical RTT < 500 ms on
-                      # 4G to the home box). The 2-fail streak still absorbs
-                      # transient blips. See server-dies-mid-tick scenario.
+STATUS_TIMEOUT = 2.0  # v5.3: 3 s → 2 s. Caps the orange "Vérification..."
+                      # card on cold launch without cache. Typical RTT to the
+                      # home box is <500 ms; 2 s is generous. The 2-fail
+                      # streak still absorbs cold-radio transient blips.
 PROBE_TIMEOUT = 2.5
 CHECK_INTERVAL = 15.0  # v5.1: 30 s → 15 s. Halves the "status up while server
                        # is actually down" worst-case window. Foreground-only
@@ -520,8 +520,8 @@ SCENARIOS = [
         # detection: T+65 ish instead of T+25 (v4.4 painted on first
         # post-window fail). Real outages still get caught — just slower.
         name="resume-server-down",
-        status_outcomes=[FetchOutcome(0.2, True)] + [FetchOutcome(None, False)] * 5,
-        probe_outcomes=[FetchOutcome(0.3, True)] * 5,
+        status_outcomes=[FetchOutcome(0.2, True)] + [FetchOutcome(None, False)] * 10,
+        probe_outcomes=[FetchOutcome(0.3, True)] * 10,
         resume_at=20,
         expect_final_online=False,
         forbid_red_flash=False,    # red IS expected here — server is really down
@@ -656,29 +656,28 @@ SCENARIOS = [
         horizon=40.0,
     ),
     Scenario(
-        # v5.1 — steady-state detection bound. App was open with a
-        # confirmed-online state (cached), then the server dies right
-        # after the first successful check. The next regular tick at
-        # T=15 fails (timeout at T=18), adaptive fires at T=23 (fail at
-        # T=26), streak=2 → setOffline at T=26. horizon=26.5 fences the
-        # detection: any regression that pushes it past 26.5 s flips the
-        # final state and fails the scenario. User-visible answer to the
-        # "25 s with status up while server is down" complaint pre-v5.1.
+        # v5.1 — steady-state detection bound. v5.3 retuned the timeout:
+        # next regular tick at T=15 fails (timeout at T=17), adaptive
+        # fires at T=22 (fail at T=24), streak=2 → setOffline at T=24.
+        # horizon=24.5 fences the detection: any regression past 24.5 s
+        # flips the final state and fails the scenario. User-visible
+        # answer to the "25 s with status up while server is down"
+        # complaint pre-v5.1.
         name="v51-steady-state-server-dies-mid-tick",
         status_outcomes=[
             FetchOutcome(0.3, True),    # T=0 cold check — server still up
             FetchOutcome(None, False),  # T=15 tick — server now down
-            FetchOutcome(None, False),  # T=23 adaptive — confirms
+            FetchOutcome(None, False),  # T=22 adaptive — confirms
         ],
         probe_outcomes=[FetchOutcome(0.4, True)] * 5,
         cached_state={"is_online": True, "relay_reachable": True},
         resume_at=0,
-        expect_final_online=False,          # truth wins by T=26
+        expect_final_online=False,          # truth wins by T=24
         expect_final_relay_reachable=True,
         forbid_red_flash=False,             # red IS expected — server really down
         forbid_warn_flash=True,
         forbid_checking_paint=True,         # cached state → no orange flash
-        horizon=26.5,                       # fence: detection must complete here
+        horizon=24.5,                       # fence: detection must complete here
     ),
 ]
 

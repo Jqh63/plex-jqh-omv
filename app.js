@@ -18,10 +18,16 @@ function clearAdaptiveTick(){if(adaptiveTickTimer){clearTimeout(adaptiveTickTime
 // confirmed setOnline / setOffline / probe flip; loaded on startApp() so
 // the user sees the prior state immediately instead of an orange
 // "Vérification..." card. TTL chosen short enough to avoid showing a stale
-// state for too long: 5 min covers the common "open the PWA, close it,
-// reopen it 30 s later" flow but expires before the user is likely to
-// trust a cached green that's hours old.
-var STATE_CACHE_KEY='plex-jqh-omv-state', STATE_CACHE_TTL_MS=300000;
+// state for too long: 15 min covers the common "open the PWA several
+// times during a session" flow but expires before the user is likely
+// to trust a cached green that's hours old.
+// v5.3: 5 min → 15 min. The user's typical pattern is "open the PWA
+// several times within a 30 min window" — extending TTL catches more
+// of those re-opens with a fresh cached green/red, avoiding the orange
+// "Vérification..." flash. Trade-off: a server that flips state
+// between re-opens shows the stale paint for ~24 s (steady-state
+// detection bound) before correcting — acceptable.
+var STATE_CACHE_KEY='plex-jqh-omv-state', STATE_CACHE_TTL_MS=900000;
 function saveState(){
   if(!hasConfirmedState)return;  // never persist unconfirmed state
   try{localStorage.setItem(STATE_CACHE_KEY,JSON.stringify({
@@ -54,7 +60,12 @@ var RESUME_GRACE_MS=6000;
 function inResumeWindow(){return resumeUntil>0&&Date.now()<resumeUntil;}
 function openResumeWindow(){resumeUntil=Date.now()+RESUME_GRACE_MS;}
 function clearResumeRetry(){if(resumeRetryTimer){clearTimeout(resumeRetryTimer);resumeRetryTimer=null;}}
-var WOL_POLL_MS=15000, WOL_TIMEOUT_MS=300000;
+// v5.3: 15 s → 5 s. The "Démarrage…" state hung up to 15 s past the
+// actual server-up moment because the next poll hadn't fired yet —
+// a manual refresh would flip to green immediately. 5 s caps the
+// post-up delay; with STATUS_TIMEOUT=2 s, each poll is a tight ping
+// (≤ 2 s response or timeout), so we get 12 polls/min during boot.
+var WOL_POLL_MS=5000, WOL_TIMEOUT_MS=300000;
 // Resend the POST at these offsets after the initial fire (server-side
 // already sends 3 packets per POST). 4 POSTs × 3 packets = 15 magic
 // packets over 90 s. The 15 s first retry is tuned for the ARP-cache
@@ -343,10 +354,12 @@ function checkStatus(){
   }else{
     dot.className='status-dot checking';card.className='status-card';label.textContent='Vérification...';sub.textContent='ping en cours';
   }
-  // v5.1: 5 s → 3 s timeout. Home server typical RTT is <500 ms on 4G/WG;
-  // a 3 s no-answer is essentially "down". The 2-fail streak still absorbs
-  // transient blips that happen to fall in the 0.5–3 s slow-RTT range.
-  var ctrl=new AbortController(),timer=setTimeout(function(){ctrl.abort()},3000);
+  // v5.3: 3 s → 2 s timeout. Home server typical RTT is <500 ms on
+  // 4G/WG; a 2 s no-answer is essentially "down". Caps the orange
+  // "Vérification..." card duration on cold launch without cache.
+  // The 2-fail streak still absorbs cold-radio blips in the 0.5–2 s
+  // slow-RTT range.
+  var ctrl=new AbortController(),timer=setTimeout(function(){ctrl.abort()},2000);
   // no-cors keeps the response opaque (we only care that the server answered),
   // and per Fetch spec is incompatible with redirect:'manual' (returns a
   // network error). The Chrome PNA noise on redirects is cosmetic-only and
@@ -371,11 +384,12 @@ function checkStatus(){
       // the 6 s resume window) is absorbed; real outages are detected on
       // the second consecutive fail at the next adaptive tick.
       if(statusFailStreak<2){
-        // Adaptive polling (v5.0 B, retuned v5.1): instead of waiting up
-        // to 15 s for the next regular tick, schedule a faster follow-up
-        // at +5 s. Pinned to the steady-state server-dies-mid-tick bound
-        // of ~26 s (15 s next tick + 3 s timeout + 5 s adaptive + 3 s
-        // timeout). Cleared on success or on background.
+        // Adaptive polling (v5.0 B, retuned v5.1, v5.3): instead of
+        // waiting up to 15 s for the next regular tick, schedule a
+        // faster follow-up at +5 s. Pinned to the steady-state
+        // server-dies-mid-tick bound of ~24 s (15 s next tick + 2 s
+        // timeout + 5 s adaptive + 2 s timeout). Cleared on success
+        // or on background.
         clearAdaptiveTick();
         adaptiveTickTimer=setTimeout(checkStatus,5000);
         return;

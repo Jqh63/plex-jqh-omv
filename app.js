@@ -650,6 +650,10 @@ function sendWol(){
     if(Date.now()-wolStartTime>WOL_TIMEOUT_MS){
       wolSent=false;wolStartTime=0;clearWolPoll();clearWolRetries();stopCountdown();probeRelay();
       if(navigator.vibrate)navigator.vibrate(300);
+      // Surface the timeout — silent failure (vibration + flip to red) used to
+      // leave family members wondering whether the app was broken. Toast tells
+      // them what happened and points to the manual fallback.
+      showToast('⚠ Le serveur n\'a pas démarré — réessaie ou utilise le réveil manuel ↓',true);
       setOffline();
       return;
     }

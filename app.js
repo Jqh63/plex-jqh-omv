@@ -63,9 +63,15 @@ function clearResumeRetry(){if(resumeRetryTimer){clearTimeout(resumeRetryTimer);
 // v5.3: 15 s → 5 s. The "Démarrage…" state hung up to 15 s past the
 // actual server-up moment because the next poll hadn't fired yet —
 // a manual refresh would flip to green immediately. 5 s caps the
-// post-up delay; with STATUS_TIMEOUT=2 s, each poll is a tight ping
-// (≤ 2 s response or timeout), so we get 12 polls/min during boot.
+// post-up delay; with STATUS_TIMEOUT_MS=2 s, each poll is a tight
+// ping (≤ 2 s response or timeout), so we get 12 polls/min during boot.
 var WOL_POLL_MS=5000, WOL_TIMEOUT_MS=300000;
+// v5.4 (hygiene): match the sim's constant naming. STATUS_TIMEOUT_MS
+// caps the status fetch (home server). PROBE_TIMEOUT_MS caps the relay
+// /health probe — tighter because the GCP relay is HTTPS with proper
+// CORS, so a successful response lands quickly and a hang is more
+// often a dead-relay signal than a slow-network one.
+var STATUS_TIMEOUT_MS=2000, PROBE_TIMEOUT_MS=2500;
 // Resend the POST at these offsets after the initial fire (server-side
 // already sends 3 packets per POST). 4 POSTs × 3 packets = 15 magic
 // packets over 90 s. The 15 s first retry is tuned for the ARP-cache
@@ -354,12 +360,11 @@ function checkStatus(){
   }else{
     dot.className='status-dot checking';card.className='status-card';label.textContent='Vérification...';sub.textContent='ping en cours';
   }
-  // v5.3: 3 s → 2 s timeout. Home server typical RTT is <500 ms on
-  // 4G/WG; a 2 s no-answer is essentially "down". Caps the orange
-  // "Vérification..." card duration on cold launch without cache.
-  // The 2-fail streak still absorbs cold-radio blips in the 0.5–2 s
-  // slow-RTT range.
-  var ctrl=new AbortController(),timer=setTimeout(function(){ctrl.abort()},2000);
+  // v5.3: 3 s → 2 s timeout (STATUS_TIMEOUT_MS). Home server typical
+  // RTT is <500 ms on 4G/WG; 2 s no-answer is essentially "down".
+  // Caps the orange "Vérification..." card on cold launch without
+  // cache. The 2-fail streak still absorbs cold-radio blips.
+  var ctrl=new AbortController(),timer=setTimeout(function(){ctrl.abort()},STATUS_TIMEOUT_MS);
   // no-cors keeps the response opaque (we only care that the server answered),
   // and per Fetch spec is incompatible with redirect:'manual' (returns a
   // network error). The Chrome PNA noise on redirects is cosmetic-only and
@@ -406,11 +411,11 @@ function checkStatus(){
 // On every relayReachable flip, repaint UI even when the server is online —
 // setOnline() reads relayReachable once at call time, so a later probe that
 // flips it from false→true while isOnline=true would otherwise leave the
-// "⚠ Relais injoignable" banner stuck until the next 30 s status tick.
+// "⚠ Relais injoignable" banner stuck until the next 15 s status tick.
 function probeRelay(){
   if(relayProbing||!wolReady())return;
   relayProbing=true;
-  var ctrl=new AbortController(),timer=setTimeout(function(){ctrl.abort()},2500);
+  var ctrl=new AbortController(),timer=setTimeout(function(){ctrl.abort()},PROBE_TIMEOUT_MS);
   var applyFlip=function(ok){
     // Cold-radio defer (v4.3, see resumeUntil comment): during the resume
     // window the first probe failure is treated as radio-warmup noise.

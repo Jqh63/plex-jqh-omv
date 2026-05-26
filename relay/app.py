@@ -17,6 +17,7 @@ Security model (defense in depth):
 
 Cf. relay/README.md for the full deploy / hardening procedure.
 """
+import hmac
 import logging
 import os
 import socket
@@ -144,7 +145,10 @@ def wol(req: WolReq, request: Request, x_token: str = Header(...)):
     if rate_limited(ip):
         logger.warning("wol ip=%s status=429 reason=rate_limit", ip)
         raise HTTPException(status_code=429, detail="rate limited")
-    if x_token != SHARED_TOKEN:
+    # Constant-time comparison defeats timing-based brute-force on the
+    # token (a regular `!=` short-circuits on the first byte mismatch
+    # and leaks length / prefix information through response timing).
+    if not hmac.compare_digest(x_token, SHARED_TOKEN):
         logger.warning("wol ip=%s status=401 reason=bad_token", ip)
         raise HTTPException(status_code=401, detail="bad token")
     if req.mac.lower() != ALLOWED_MAC:

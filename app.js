@@ -110,7 +110,10 @@ function macToColon(m){return m.replace(/(.{2})/g,'$1:').slice(0,-1)}
 function validHost(h){return h.length>0&&h.length<255&&/\./.test(h)&&!h.includes('..')&&/^[a-zA-Z0-9][a-zA-Z0-9\-\.]*[a-zA-Z0-9]$/.test(h)}
 function cleanRelay(u){return u.replace(/\/+$/,'')}
 function validRelay(u){return /^https:\/\/[a-zA-Z0-9.\-]+(:\d+)?(\/.*)?$/.test(u)&&u.length<255}
-function showToast(msg,warn){var t=document.getElementById('toast');t.textContent=msg;t.className=warn?'toast warn show':'toast show';setTimeout(function(){t.className='toast'},3000)}
+// ms defaults to 3000 — short ack/validation toasts. Pass 5000 for messages
+// that the user needs time to read (success confirmation after a long wait,
+// explanatory failures with a "use the manual fallback" call to action).
+function showToast(msg,warn,ms){var t=document.getElementById('toast');t.textContent=msg;t.className=warn?'toast warn show':'toast show';setTimeout(function(){t.className='toast'},ms||3000)}
 
 function getBootHistory(){try{var r=localStorage.getItem(BOOT_HISTORY_KEY);if(r){var a=JSON.parse(r);if(Array.isArray(a))return a;}}catch(e){}return [];}
 function recordBootTime(ms){
@@ -272,7 +275,13 @@ function buildLinks(){
       a.classList.add('server-dependent');
       if(!isOnline)a.classList.add('offline');
       a.addEventListener('click',function(e){
-        if(!isOnline){e.preventDefault();showToast('⚠ Serveur éteint — allume-le d’abord',true);}
+        if(isOnline)return;
+        e.preventDefault();
+        // During an active WoL boot the server is in transition, not "off" —
+        // the generic "allume-le" message is misleading and frustrating
+        // ("but I just did!"). Differentiate the two cases.
+        if(wolSent)showToast('⏳ Serveur en cours de réveil — patiente quelques instants',true);
+        else showToast('⚠ Serveur éteint — allume-le d\'abord',true);
       });
     }
     var icon=document.createElement('div');
@@ -343,7 +352,16 @@ function startApp(){
   probeRelay();
   if(checkInterval)clearInterval(checkInterval);
   checkInterval=setInterval(checkStatus,15000);
-  if(!window.matchMedia('(display-mode:standalone)').matches)setTimeout(function(){document.getElementById('installHint').style.display='block'},3000);
+  // Install hint: Chrome on Android = "menu ⋮ → Ajouter à l'écran d'accueil";
+  // Safari on iOS/iPadOS uses the share sheet. iPad on iPadOS 13+ reports
+  // as "Macintosh" — detect it via touch points to avoid showing the wrong
+  // hint to family members on iPad.
+  if(!window.matchMedia('(display-mode:standalone)').matches)setTimeout(function(){
+    var ua=navigator.userAgent;
+    var isIOS=/iPad|iPhone|iPod/.test(ua)||(/Macintosh/.test(ua)&&navigator.maxTouchPoints>1);
+    if(isIOS)document.getElementById('installHintText').textContent='Partage → « Sur l\'écran d\'accueil »';
+    document.getElementById('installHint').style.display='block';
+  },3000);
 }
 
 function checkStatus(){
@@ -497,7 +515,7 @@ function setOnline(){
       recordBootTime(Date.now()-wolStartTime);
       wolStartTime=0;
     }
-    showToast('✓ Serveur démarré avec succès');
+    showToast('✓ Serveur démarré avec succès',false,5000);
     if(navigator.vibrate)navigator.vibrate([100,50,100]);
     wolSent=false;
   }
@@ -538,7 +556,7 @@ function startCountdown(){
   var tick=function(){
     var diff=Math.round((countdownEndsAt-Date.now())/1000);
     if(isOnline||!wolSent){stopCountdown();return;}
-    if(diff<-30)pl.textContent='Réveil… plus long que d\'habitude';
+    if(diff<-30)pl.textContent='Démarrage un peu plus long — patiente encore';
     else if(diff<=0)pl.textContent='Réveil… presque prêt';
     else pl.textContent='Réveil… environ '+diff+'s';
   };
@@ -576,13 +594,13 @@ function postWol(isRetry){
     wolSent=false;wolStartTime=0;stopCountdown();clearWolPoll();clearWolRetries();
     var msg=(r.status===401||r.status===403)?'Authentification refusée par le relais':'Erreur relais HTTP '+r.status;
     if(navigator.vibrate)navigator.vibrate(300);
-    showToast('⚠ '+msg+' — utilise le réveil manuel ↓',true);
+    showToast('⚠ '+msg+' — utilise le réveil manuel ↓',true,5000);
     setOffline();
   }).catch(function(){
     if(isRetry)return;
     wolSent=false;wolStartTime=0;stopCountdown();clearWolPoll();clearWolRetries();probeRelay();
     if(navigator.vibrate)navigator.vibrate(300);
-    showToast('⚠ Relais injoignable — utilise le réveil manuel ↓',true);
+    showToast('⚠ Relais injoignable — utilise le réveil manuel ↓',true,5000);
     setOffline();
   });
 }
@@ -611,7 +629,7 @@ function setOffline(){
 
 function sendWol(){
   if(isOnline||wolSent||!wolReady())return;
-  if(!relayReachable){showToast('⚠ Relais WoL injoignable — utilise le réveil manuel ↓',true);return;}
+  if(!relayReachable){showToast('⚠ Relais WoL injoignable — utilise le réveil manuel ↓',true,5000);return;}
   if(navigator.vibrate)navigator.vibrate(50);
   wolSent=true;
   wolStartTime=Date.now();
@@ -641,6 +659,10 @@ function sendWol(){
     if(Date.now()-wolStartTime>WOL_TIMEOUT_MS){
       wolSent=false;wolStartTime=0;clearWolPoll();clearWolRetries();stopCountdown();probeRelay();
       if(navigator.vibrate)navigator.vibrate(300);
+      // Surface the timeout — silent failure (vibration + flip to red) used to
+      // leave family members wondering whether the app was broken. Toast tells
+      // them what happened and points to the manual fallback.
+      showToast('⚠ Le serveur n\'a pas démarré — réessaie ou utilise le réveil manuel ↓',true,5000);
       setOffline();
       return;
     }

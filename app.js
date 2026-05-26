@@ -739,6 +739,17 @@ document.getElementById('saveBtn').addEventListener('click',saveConfig);
 document.getElementById('refreshBtn').addEventListener('click',checkStatus);
 document.getElementById('powerBtn').addEventListener('click',sendWol);
 
+// Derive footer version from the active SW cache name (mirrors debug.js
+// pattern — single source of truth in sw.js, no hardcoded version to drift).
+if(window.caches){
+  caches.keys().then(function(names){
+    var ours=names.filter(function(n){return n.indexOf('plex-jqh-omv')===0;});
+    var m=ours[0]&&ours[0].match(/-v(\d+\.\d+)$/);
+    var el=document.getElementById('footerVersion');
+    if(el&&m)el.textContent='v'+m[1];
+  }).catch(function(){});
+}
+
 // Init: URL params > localStorage > settings screen
 if(!readUrlParams())config=loadConfig();
 if(config&&config.host)startApp();

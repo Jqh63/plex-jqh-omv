@@ -1,5 +1,5 @@
 var config=null,isOnline=false,wolSent=false,checking=false,checkInterval=null;
-var relayReachable=true,relayProbing=false,probeFailStreak=0;
+var relayReachable=true,relayProbing=false,probeFailStreak=0,statusFailStreak=0;
 var wolStartTime=0,wolPollTimer=null,wolRetryTimers=[];
 // Cold-radio resume grace window. On Android PWA resume (and on initial
 // load), the first fetch from the foregrounded app often times out while
@@ -271,7 +271,7 @@ function startApp(){
   clearWolPoll();
   clearWolRetries();
   clearResumeRetry();
-  isOnline=false;wolSent=false;checking=false;relayReachable=true;probeFailStreak=0;
+  isOnline=false;wolSent=false;checking=false;relayReachable=true;probeFailStreak=0;statusFailStreak=0;
   openResumeWindow();
   checkStatus();
   probeRelay();
@@ -291,19 +291,29 @@ function checkStatus(){
   // network error). The Chrome PNA noise on redirects is cosmetic-only and
   // doesn't break detection — leaving redirect at its default ('follow').
   fetch('https://'+statusHost(),{mode:'no-cors',cache:'no-store',signal:ctrl.signal})
-    .then(function(){clearTimeout(timer);btn.classList.remove('spinning');checking=false;clearResumeRetry();setOnline();})
+    .then(function(){clearTimeout(timer);btn.classList.remove('spinning');checking=false;statusFailStreak=0;clearResumeRetry();setOnline();})
     .catch(function(){
       clearTimeout(timer);btn.classList.remove('spinning');checking=false;
       if(inResumeWindow()){
         // Defer: keep the "Vérification…" pulsing already on screen, schedule
         // one retry at +5 s. The window stays open until its natural deadline
         // so probeRelay (running in parallel) can also defer its first
-        // failure. If the retry still fails after the window closes, the
-        // KO paint happens honestly via the regular path below.
+        // failure. Window-deferred fails stay out of the streak count.
         clearResumeRetry();
         resumeRetryTimer=setTimeout(checkStatus,5000);
         return;
       }
+      statusFailStreak++;
+      // 2-fail streak (v4.5): mirror of the probeRelay streak. Require 2
+      // consecutive post-window status fails to paint setOffline RED. A
+      // single transient failure (cold-radio Android, network blip past
+      // the 6 s resume window) is absorbed; real outages are detected on
+      // the second consecutive fail at the next 30 s tick. User report
+      // 2026-05-25: 'serveur éteint' for ~1 min on Android PWA before
+      // recovering green — the cold radio was still warming up past the
+      // window + retry boundary. Trade-off: real server-down detection
+      // delayed by ~15 s (was painting at T+15 in v4.4, now at T+30).
+      if(statusFailStreak<2)return;
       setOffline();
     });
   probeRelay();

@@ -62,7 +62,12 @@ def simulate_visibility(page, hidden: bool):
     )
 
 
-def run_scenario(p, name, route_plan, sample_delays_s):
+def run_scenario(p, name, route_plan, sample_delays_s, simulate_resume=True):
+    """If simulate_resume=True (default), the scenario does background→fg
+    after the initial check (legacy resume behavior). If False, samples
+    happen on the first cold-launch cycle without a visibility toggle —
+    exercises the v4.5 status streak against the route_plan's first call
+    indices (n=1 = initial status/probe fired by startApp())."""
     print(f"\n## Scenario: {name}")
     counters = {"status": 0, "probe": 0}
 
@@ -113,9 +118,10 @@ def run_scenario(p, name, route_plan, sample_delays_s):
         f"  T-resume: status={initial['statusLabel']!r} dot={initial['dotClass']!r} green={is_green(initial)}"
     )
 
-    simulate_visibility(page, hidden=True)
-    page.wait_for_timeout(300)
-    simulate_visibility(page, hidden=False)
+    if simulate_resume:
+        simulate_visibility(page, hidden=True)
+        page.wait_for_timeout(300)
+        simulate_visibility(page, hidden=False)
 
     samples = []
     last_t = 0
@@ -186,9 +192,22 @@ def main():
             ),
             sample_delays_s=[3, 6, 14, 20, 36, 40],
         )
+        r5 = run_scenario(
+            p,
+            "v4.5 bug: cold-launch server-up + cold-radio status (user report 2026-05-25)",
+            # Status n=1 (initial), n=2 (in-window retry), n=3 (post-window
+            # retry) all fail — cold radio leaks past window + retry. Status
+            # n=4 (T+30 tick) succeeds (radio warm). Probe always OK.
+            # v4.4 paints RED at T+10 (post-window n=3 fail flips immediately).
+            # v4.5 streak defers n=3 (streak=1), recovers at T+30 → green
+            # at ~T+30 directly. Sample at T+35 confirms green without RED.
+            lambda kind, n: "fail" if (kind == "status" and n <= 3) else "ok",
+            sample_delays_s=[3, 6, 14, 20, 35, 40],
+            simulate_resume=False,
+        )
 
     print("\n" + "=" * 72)
-    print("VERDICT (real browser E2E on live PWA v4.4)")
+    print("VERDICT (real browser E2E on live PWA v4.5)")
     print("=" * 72)
     s1_ok = not r1["red_at"] and not r1["warn_at"] and r1["final_green"]
     print(
@@ -215,6 +234,15 @@ def main():
         f"[{'PASS' if s4_ok else 'FAIL'}] v4.4 server-down + cold probe | "
         f"red_at={r4['red_at']} warn_at={r4['warn_at']} final_green={r4['final_green']} "
         f"(want red, no warn, not green) calls={r4['counters']}"
+    )
+    # v4.5 fix: cold-launch with server actually UP + cold-radio status noise
+    # must NOT produce a setOffline RED paint. Status stays "Vérification..."
+    # during the defer, then flips to green when the T+30 tick succeeds.
+    s5_ok = not r5["red_at"] and not r5["warn_at"] and r5["final_green"]
+    print(
+        f"[{'PASS' if s5_ok else 'FAIL'}] v4.5 cold-launch server-up + cold status | "
+        f"red_at={r5['red_at']} warn_at={r5['warn_at']} final_green={r5['final_green']} "
+        f"(want no red, no warn, green) calls={r5['counters']}"
     )
 
 

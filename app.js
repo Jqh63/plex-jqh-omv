@@ -110,7 +110,10 @@ function macToColon(m){return m.replace(/(.{2})/g,'$1:').slice(0,-1)}
 function validHost(h){return h.length>0&&h.length<255&&/\./.test(h)&&!h.includes('..')&&/^[a-zA-Z0-9][a-zA-Z0-9\-\.]*[a-zA-Z0-9]$/.test(h)}
 function cleanRelay(u){return u.replace(/\/+$/,'')}
 function validRelay(u){return /^https:\/\/[a-zA-Z0-9.\-]+(:\d+)?(\/.*)?$/.test(u)&&u.length<255}
-function showToast(msg,warn){var t=document.getElementById('toast');t.textContent=msg;t.className=warn?'toast warn show':'toast show';setTimeout(function(){t.className='toast'},3000)}
+// ms defaults to 3000 — short ack/validation toasts. Pass 5000 for messages
+// that the user needs time to read (success confirmation after a long wait,
+// explanatory failures with a "use the manual fallback" call to action).
+function showToast(msg,warn,ms){var t=document.getElementById('toast');t.textContent=msg;t.className=warn?'toast warn show':'toast show';setTimeout(function(){t.className='toast'},ms||3000)}
 
 function getBootHistory(){try{var r=localStorage.getItem(BOOT_HISTORY_KEY);if(r){var a=JSON.parse(r);if(Array.isArray(a))return a;}}catch(e){}return [];}
 function recordBootTime(ms){
@@ -512,7 +515,7 @@ function setOnline(){
       recordBootTime(Date.now()-wolStartTime);
       wolStartTime=0;
     }
-    showToast('✓ Serveur démarré avec succès');
+    showToast('✓ Serveur démarré avec succès',false,5000);
     if(navigator.vibrate)navigator.vibrate([100,50,100]);
     wolSent=false;
   }
@@ -591,13 +594,13 @@ function postWol(isRetry){
     wolSent=false;wolStartTime=0;stopCountdown();clearWolPoll();clearWolRetries();
     var msg=(r.status===401||r.status===403)?'Authentification refusée par le relais':'Erreur relais HTTP '+r.status;
     if(navigator.vibrate)navigator.vibrate(300);
-    showToast('⚠ '+msg+' — utilise le réveil manuel ↓',true);
+    showToast('⚠ '+msg+' — utilise le réveil manuel ↓',true,5000);
     setOffline();
   }).catch(function(){
     if(isRetry)return;
     wolSent=false;wolStartTime=0;stopCountdown();clearWolPoll();clearWolRetries();probeRelay();
     if(navigator.vibrate)navigator.vibrate(300);
-    showToast('⚠ Relais injoignable — utilise le réveil manuel ↓',true);
+    showToast('⚠ Relais injoignable — utilise le réveil manuel ↓',true,5000);
     setOffline();
   });
 }
@@ -626,7 +629,7 @@ function setOffline(){
 
 function sendWol(){
   if(isOnline||wolSent||!wolReady())return;
-  if(!relayReachable){showToast('⚠ Relais WoL injoignable — utilise le réveil manuel ↓',true);return;}
+  if(!relayReachable){showToast('⚠ Relais WoL injoignable — utilise le réveil manuel ↓',true,5000);return;}
   if(navigator.vibrate)navigator.vibrate(50);
   wolSent=true;
   wolStartTime=Date.now();
@@ -659,7 +662,7 @@ function sendWol(){
       // Surface the timeout — silent failure (vibration + flip to red) used to
       // leave family members wondering whether the app was broken. Toast tells
       // them what happened and points to the manual fallback.
-      showToast('⚠ Le serveur n\'a pas démarré — réessaie ou utilise le réveil manuel ↓',true);
+      showToast('⚠ Le serveur n\'a pas démarré — réessaie ou utilise le réveil manuel ↓',true,5000);
       setOffline();
       return;
     }

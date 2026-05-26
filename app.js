@@ -556,7 +556,7 @@ function startCountdown(){
   var tick=function(){
     var diff=Math.round((countdownEndsAt-Date.now())/1000);
     if(isOnline||!wolSent){stopCountdown();return;}
-    if(diff<-30)pl.textContent='Réveil… plus long que d\'habitude';
+    if(diff<-30)pl.textContent='Démarrage un peu plus long — patiente encore';
     else if(diff<=0)pl.textContent='Réveil… presque prêt';
     else pl.textContent='Réveil… environ '+diff+'s';
   };

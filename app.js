@@ -343,7 +343,16 @@ function startApp(){
   probeRelay();
   if(checkInterval)clearInterval(checkInterval);
   checkInterval=setInterval(checkStatus,15000);
-  if(!window.matchMedia('(display-mode:standalone)').matches)setTimeout(function(){document.getElementById('installHint').style.display='block'},3000);
+  // Install hint: Chrome on Android = "menu ⋮ → Ajouter à l'écran d'accueil";
+  // Safari on iOS/iPadOS uses the share sheet. iPad on iPadOS 13+ reports
+  // as "Macintosh" — detect it via touch points to avoid showing the wrong
+  // hint to family members on iPad.
+  if(!window.matchMedia('(display-mode:standalone)').matches)setTimeout(function(){
+    var ua=navigator.userAgent;
+    var isIOS=/iPad|iPhone|iPod/.test(ua)||(/Macintosh/.test(ua)&&navigator.maxTouchPoints>1);
+    if(isIOS)document.getElementById('installHintText').textContent='Partage → « Sur l\'écran d\'accueil »';
+    document.getElementById('installHint').style.display='block';
+  },3000);
 }
 
 function checkStatus(){

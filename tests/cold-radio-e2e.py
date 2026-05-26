@@ -62,12 +62,17 @@ def simulate_visibility(page, hidden: bool):
     )
 
 
-def run_scenario(p, name, route_plan, sample_delays_s, simulate_resume=True):
+def run_scenario(p, name, route_plan, sample_delays_s, simulate_resume=True, preseed_cache=None):
     """If simulate_resume=True (default), the scenario does background→fg
     after the initial check (legacy resume behavior). If False, samples
     happen on the first cold-launch cycle without a visibility toggle —
     exercises the v4.5 status streak against the route_plan's first call
-    indices (n=1 = initial status/probe fired by startApp())."""
+    indices (n=1 = initial status/probe fired by startApp()).
+
+    preseed_cache (v5.0): if set, injects a localStorage entry under
+    the v5.0 state cache key BEFORE page navigation, so startApp() loads
+    it via loadCachedState() and paints the cached state immediately.
+    Pass {'isOnline': True/False, 'relayReachable': True/False}."""
     print(f"\n## Scenario: {name}")
     counters = {"status": 0, "probe": 0}
 
@@ -107,6 +112,22 @@ def run_scenario(p, name, route_plan, sample_delays_s, simulate_resume=True):
 
     b = p.chromium.launch()
     ctx = b.new_context(viewport={"width": 390, "height": 844})
+    if preseed_cache is not None:
+        # add_init_script runs before any page script — including app.js's
+        # var initialization — so localStorage already has our entry when
+        # loadCachedState() runs in startApp().
+        import json
+        payload = json.dumps({
+            "isOnline": bool(preseed_cache.get("isOnline")),
+            "relayReachable": bool(preseed_cache.get("relayReachable", True)),
+            # Recent timestamp so the TTL check (5 min) passes.
+            "savedAt": None,  # filled at runtime by Date.now()
+        })
+        ctx.add_init_script(
+            f"try{{var p={payload};p.savedAt=Date.now();"
+            f"localStorage.setItem('plex-jqh-omv-state',JSON.stringify(p));}}"
+            f"catch(e){{}}"
+        )
     page = ctx.new_page()
     page.route("**/*", handle)
     page.goto(PWA_URL, wait_until="load")
@@ -143,12 +164,14 @@ def run_scenario(p, name, route_plan, sample_delays_s, simulate_resume=True):
 
     red_at = [t for t, s in samples if is_red(s)]
     warn_at = [t for t, s in samples if is_warn(s)]
+    green_at = [t for t, s in samples if is_green(s)]
     final_green = is_green(samples[-1][1])
     b.close()
     return {
         "name": name,
         "red_at": red_at,
         "warn_at": warn_at,
+        "green_at": green_at,
         "final_green": final_green,
         "counters": dict(counters),
     }
@@ -205,9 +228,34 @@ def main():
             sample_delays_s=[3, 6, 14, 20, 35, 40],
             simulate_resume=False,
         )
+        r6 = run_scenario(
+            p,
+            "v5.0 A: cold-launch with cached online state, server still up",
+            # Cache says online + truth is online. v5.0 paints "En ligne"
+            # immediately from cache, no orange flash. Subsequent checks
+            # confirm — no visible change. Sample at T+1 (immediately after
+            # navigation) MUST already be green.
+            lambda kind, n: "ok",
+            sample_delays_s=[1, 3, 6, 14, 36],
+            simulate_resume=False,
+            preseed_cache={"isOnline": True, "relayReachable": True},
+        )
+        r7 = run_scenario(
+            p,
+            "v5.0 A: cold-launch with stale cached online, server now down",
+            # Cache says online, but truth is server down (all status fails).
+            # v5.0 paints "En ligne" immediately from cache (T+1 green),
+            # then streak + adaptive tick eventually flip to RED around T+30
+            # when fresh checks confirm. The orange "Vérification..." flash
+            # is avoided thanks to cache hit. RED IS expected eventually.
+            lambda kind, n: "ok" if kind == "probe" else "fail",
+            sample_delays_s=[1, 3, 6, 14, 25, 36, 40],
+            simulate_resume=False,
+            preseed_cache={"isOnline": True, "relayReachable": True},
+        )
 
     print("\n" + "=" * 72)
-    print("VERDICT (real browser E2E on live PWA v4.5)")
+    print("VERDICT (real browser E2E on live PWA v5.0)")
     print("=" * 72)
     s1_ok = not r1["red_at"] and not r1["warn_at"] and r1["final_green"]
     print(
@@ -243,6 +291,23 @@ def main():
         f"[{'PASS' if s5_ok else 'FAIL'}] v4.5 cold-launch server-up + cold status | "
         f"red_at={r5['red_at']} warn_at={r5['warn_at']} final_green={r5['final_green']} "
         f"(want no red, no warn, green) calls={r5['counters']}"
+    )
+    # v5.0 A: cached online + server still up. Must be green from the
+    # very first sample (T+1) — no orange "Vérification..." flash.
+    s6_ok = not r6["red_at"] and not r6["warn_at"] and r6["green_at"] and r6["green_at"][0] <= 3
+    print(
+        f"[{'PASS' if s6_ok else 'FAIL'}] v5.0 cached online still-up | "
+        f"red_at={r6['red_at']} green_at={r6['green_at']} final_green={r6['final_green']} "
+        f"(want green at T<=3 from cache) calls={r6['counters']}"
+    )
+    # v5.0 A: stale cached online + server now down. Must be green
+    # initially (T+1, from cache), then RED eventually (T~25-30) once
+    # streak + adaptive tick reveal truth.
+    s7_ok = bool(r7["green_at"]) and r7["green_at"][0] <= 3 and bool(r7["red_at"]) and not r7["final_green"]
+    print(
+        f"[{'PASS' if s7_ok else 'FAIL'}] v5.0 cached online stale (now down) | "
+        f"green_at={r7['green_at']} red_at={r7['red_at']} final_green={r7['final_green']} "
+        f"(want green early from cache, red late from truth) calls={r7['counters']}"
     )
 
 

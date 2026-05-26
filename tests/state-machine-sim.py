@@ -9,11 +9,13 @@ useful for tight iteration on timing logic. The browser E2E
 (`cold-radio-e2e.py`) is the source of truth — this sim is a
 lightweight first line of defence.
 
-Four implementations side-by-side:
+Five implementations side-by-side:
   - BuggyApp: pre-v4.3 logic (justResumed flag, checkStatus retry only)
   - V43App:   v4.3 logic (resumeUntil window, both handlers defer once)
   - V44App:   v4.4 logic (v4.3 + 2-fail probe streak)
-  - FixedApp: v4.5 logic (v4.4 + 2-fail status streak — same pattern)
+  - V45App:   v4.5 logic (v4.4 + 2-fail status streak)
+  - FixedApp: v5.0 logic (v4.5 + cached-state paint on startup + adaptive
+              tick at +10 s after defer instead of waiting 30 s tick)
 
 For each scenario we feed sequences of (latency, ok) outcomes for the
 status and probe fetches. latency=None means the fetch times out at
@@ -38,7 +40,11 @@ STATUS_TIMEOUT = 5.0
 PROBE_TIMEOUT = 2.5
 CHECK_INTERVAL = 30.0
 RESUME_RETRY = 5.0
-RESUME_WINDOW = 6.0  # seconds — must match RESUME_GRACE_MS / 1000 in app.js
+RESUME_WINDOW = 6.0   # seconds — must match RESUME_GRACE_MS / 1000 in app.js
+ADAPTIVE_TICK = 10.0  # v5.0 — schedule a follow-up status check this many
+                      # seconds after a defer instead of waiting for the
+                      # regular 30 s tick (must match app.js setTimeout in the
+                      # checkStatus catch path).
 
 
 @dataclass
@@ -54,10 +60,18 @@ class Scenario:
     status_outcomes: List[FetchOutcome] = field(default_factory=list)
     probe_outcomes: List[FetchOutcome] = field(default_factory=list)
     resume_at: float = 0.0   # 0 = cold start, >0 = background→foreground at that time
+    # v5.0 — if set, app starts with isOnline/relayReachable from the cache
+    # and hasConfirmedState=True (so fire_status won't paint "checking").
+    # Mirrors what loadCachedState() returns on cold launch.
+    cached_state: Optional[dict] = None
     expect_final_online: bool = True
     expect_final_relay_reachable: bool = True
     forbid_red_flash: bool = True
     forbid_warn_flash: bool = True
+    # v5.0 — when True, fail if a "checking" paint event was recorded.
+    # Use for cached-state scenarios where the prior state should stay
+    # visible (no orange "Vérification..." flash).
+    forbid_checking_paint: bool = False
     horizon: float = 40.0
 
 
@@ -85,6 +99,13 @@ class Clock:
 class App:
     """Base — subclasses define on_status_fail / on_probe_fail / window logic."""
 
+    # v5.0 — flip True in FixedApp only. When False, fire_status always
+    # paints "checking" regardless of has_confirmed_state (pre-v5.0 behavior).
+    SKIP_CHECKING_PAINT_WHEN_CONFIRMED = False
+    # v5.0 — flip True in FixedApp only. When False, start_app ignores any
+    # cached_state in the scenario (pre-v5.0 didn't persist state).
+    LOAD_CACHED_STATE = False
+
     def __init__(self, clock, scenario):
         self.clock = clock
         self.scenario = scenario
@@ -95,8 +116,12 @@ class App:
         self.relay_probing = False
         self.check_interval_id = None
         self.just_resumed = False        # BuggyApp flag
-        self.resume_until = 0.0          # FixedApp timestamp
+        self.resume_until = 0.0          # V43App+ timestamp
         self.resume_retry_id = None
+        # v5.0 — set True once setOnline/setOffline has fired. While False,
+        # fire_status paints "checking"; while True, fire_status leaves the
+        # prior visual alone and only records "spinning" (sub-text only).
+        self.has_confirmed_state = False
         self._status_i = 0
         self._probe_i = 0
         self.paints = []
@@ -122,7 +147,13 @@ class App:
         if self.checking or not self.config:
             return
         self.checking = True
-        self.paint("checking")
+        # v5.0 (FixedApp only): only paint the orange "checking" card when
+        # we don't have a known state yet. Otherwise just spin the refresh
+        # icon silently. Older implementations always paint "checking" —
+        # the class-level flag preserves that behavior for side-by-side
+        # comparison.
+        if not (self.SKIP_CHECKING_PAINT_WHEN_CONFIRMED and self.has_confirmed_state):
+            self.paint("checking")
         out = self._next_status()
         if out.latency is None or out.latency >= STATUS_TIMEOUT:
             self.clock.after(STATUS_TIMEOUT, lambda: self._status_done(False))
@@ -156,10 +187,12 @@ class App:
 
     def on_status_ok(self):
         self.is_online = True
+        self.has_confirmed_state = True
         self.paint("online")
 
     def on_status_fail(self):
         self.is_online = False
+        self.has_confirmed_state = True
         self.paint("offline")
 
     def on_probe_ok(self):
@@ -185,8 +218,20 @@ class App:
         self.is_online = False
         self.relay_reachable = True
         self.checking = False
+        self.has_confirmed_state = False
         self.just_resumed = True
         self.resume_until = self.clock.now + RESUME_WINDOW
+        # v5.0 — if cache loading is enabled (FixedApp only) and the
+        # scenario provides a cached state, mirror what app.js does after
+        # loadCachedState(): set in-memory state + call setOnline/setOffline
+        # (which paints + sets has_confirmed_state).
+        if self.LOAD_CACHED_STATE and self.scenario.cached_state is not None:
+            self.is_online = bool(self.scenario.cached_state.get("is_online"))
+            self.relay_reachable = bool(self.scenario.cached_state.get("relay_reachable", True))
+            if self.is_online:
+                self.on_status_ok()
+            else:
+                self.on_status_fail()
         self.fire_status()
         self.check_interval_id = "tick"
         self._schedule_next_tick()
@@ -305,18 +350,13 @@ class V44App(App):
                 self.paint("offline-relay-promoted")
 
 
-class FixedApp(App):
+class V45App(App):
     """v4.5 logic — v4.4 + symmetric 2-fail status streak.
 
-    Same pattern as the v4.4 probe streak, applied to the status fetch.
-    Single post-window status failure is more often cold-radio noise than
-    a real server-down event (the 6 s window + the retry's 5 s window can
-    still leave the radio cold on slow Android setups — user report
-    2026-05-25: 'serveur éteint' for ~1 min before recovering green).
-
-    Trade-off: real server-down detection delayed by ~15 s (caught at the
-    next 30 s tick after the first post-window status fail). The
-    'Vérification…' pulsing dot stays on screen during the defer.
+    Fixes the post-v4.4 server-up false-positive (cold-radio status leaks
+    past the window + retry). Still has the 'Vérification...' UX problem
+    on cold launches: up to ~30 s of orange pulsing before the next tick
+    resolves the state — user complaint addressed by v5.0.
     """
 
     def __init__(self, clock, scenario):
@@ -337,17 +377,10 @@ class FixedApp(App):
             self.clock.after(RESUME_RETRY, lambda: self.fire_status())
             return
         self.status_fail_streak += 1
-        # 2-fail streak (v4.5, universal): require 2 consecutive post-window
-        # status fails to paint setOffline RED. Single transient fails
-        # (cold-radio Android, network blip) are absorbed; real outages are
-        # detected on the second consecutive fail at the next 30 s tick.
-        # Mirror of the v4.4 probe streak — applied universally regardless
-        # of prior isOnline state (cold launches start with isOnline=false
-        # from startApp() but the user hasn't yet been informed visually,
-        # so deferring the paint avoids the false-positive RED flash too).
         if self.status_fail_streak < 2:
             return
         self.is_online = False
+        self.has_confirmed_state = True
         self.paint("offline")
 
     def on_probe_ok(self):
@@ -369,6 +402,55 @@ class FixedApp(App):
                 self.paint("offline-relay-promoted")
 
 
+class FixedApp(V45App):
+    """v5.0 logic — V45App + cached-state paint on startup + adaptive tick.
+
+    Two changes over v4.5:
+
+      A. On cold launch, if a recent state is cached (localStorage TTL
+         5 min), paint it immediately and skip the orange "Vérification..."
+         card. Background re-verify silently. The user sees the prior
+         state instead of an orange flash.
+
+      B. After a deferred status fail (streak=1), schedule a follow-up
+         check at +10 s instead of waiting up to 30 s for the next regular
+         tick. Worst-case "Vérification..." duration on cold launch
+         without cache drops from ~30 s to ~15 s.
+    """
+
+    SKIP_CHECKING_PAINT_WHEN_CONFIRMED = True
+    LOAD_CACHED_STATE = True
+
+    def __init__(self, clock, scenario):
+        super().__init__(clock, scenario)
+        self.adaptive_tick_id = None
+
+    def _clear_adaptive_tick(self):
+        # We can't actually cancel scheduled events in our simple Clock;
+        # fire_status's `if self.checking` guard prevents double-runs.
+        self.adaptive_tick_id = None
+
+    def on_status_ok(self):
+        super().on_status_ok()
+        self._clear_adaptive_tick()
+
+    def on_status_fail(self):
+        if self._in_resume_window():
+            self.clock.after(RESUME_RETRY, lambda: self.fire_status())
+            return
+        self.status_fail_streak += 1
+        if self.status_fail_streak < 2:
+            # Adaptive tick (v5.0 B): schedule a follow-up check at +10 s
+            # instead of waiting for the regular 30 s tick.
+            self._clear_adaptive_tick()
+            self.adaptive_tick_id = "scheduled"
+            self.clock.after(ADAPTIVE_TICK, lambda: self.fire_status())
+            return
+        self.is_online = False
+        self.has_confirmed_state = True
+        self.paint("offline")
+
+
 def run(scenario, app_class):
     clock = Clock()
     app = app_class(clock, scenario)
@@ -387,6 +469,8 @@ def evaluate(app):
         # link (server down) come from the same probe-fail flip. From the user's
         # POV they're both "the relay says it's off" — same false-positive risk.
         "warn": [p for p in app.paints if p[1] in ("warn-relay", "offline-relay-promoted")],
+        # v5.0 — "checking" paints we want to avoid on cached-state cold launches.
+        "checking": [p for p in app.paints if p[1] == "checking"],
         "final_online": app.is_online,
         "final_relay": app.relay_reachable,
     }
@@ -483,7 +567,7 @@ SCENARIOS = [
         status_outcomes=[
             FetchOutcome(None, False),  # T+5 cold-radio fail — window defers
             FetchOutcome(None, False),  # T+15 retry status — post-window, v4.4 BUG
-            FetchOutcome(0.3, True),    # T+30+ tick — radio warm, recovers
+            FetchOutcome(0.3, True),    # T+25 (v5.0 adaptive) or T+30 (v4.5 tick) — recovers
             FetchOutcome(0.3, True),
             FetchOutcome(0.3, True),
         ],
@@ -495,6 +579,61 @@ SCENARIOS = [
         forbid_warn_flash=True,
         horizon=60.0,
     ),
+    Scenario(
+        # v5.0 A: cold launch with cached online state, server still up.
+        # Cache loaded → "online" painted directly, no orange flash. Status
+        # checks confirm — no visible change to the user.
+        name="v5-cold-launch-cached-online-server-still-up",
+        status_outcomes=[FetchOutcome(0.3, True)] * 5,
+        probe_outcomes=[FetchOutcome(0.4, True)] * 5,
+        cached_state={"is_online": True, "relay_reachable": True},
+        resume_at=0,
+        expect_final_online=True,
+        expect_final_relay_reachable=True,
+        forbid_red_flash=True,
+        forbid_warn_flash=True,
+        forbid_checking_paint=True,         # cached state means NO orange flash
+        horizon=40.0,
+    ),
+    Scenario(
+        # v5.0 A: cold launch with stale cached online, server actually down.
+        # Cache loaded → "online" briefly visible, but status fails reveal
+        # truth. With v5.0 streak + adaptive tick, "offline" paint lands at
+        # T+25 (defer at T+15, adaptive tick at T+25). RED IS expected here
+        # (server is really down), but the cached state still saved the user
+        # from the orange flash on opening.
+        name="v5-cold-launch-cached-online-server-now-down",
+        status_outcomes=[FetchOutcome(None, False)] * 5,
+        probe_outcomes=[FetchOutcome(0.4, True)] * 5,
+        cached_state={"is_online": True, "relay_reachable": True},
+        resume_at=0,
+        expect_final_online=False,          # truth wins eventually
+        expect_final_relay_reachable=True,
+        forbid_red_flash=False,             # red IS expected — server really down
+        forbid_warn_flash=True,
+        forbid_checking_paint=True,         # no orange flash thanks to cache
+        horizon=60.0,
+    ),
+    Scenario(
+        # v5.0 B: cold launch without cache, server up with cold-radio
+        # noise on status #1 and #2 (same as v4.5 scenario above). v5.0
+        # adaptive tick fires status #3 at T+25 instead of T+30, so the
+        # "Vérification..." duration drops from ~30 s to ~25 s. Same final
+        # state, just faster recovery from defer.
+        name="v5-cold-launch-no-cache-adaptive-tick-faster-recovery",
+        status_outcomes=[
+            FetchOutcome(None, False),
+            FetchOutcome(None, False),
+            FetchOutcome(0.3, True),
+        ],
+        probe_outcomes=[FetchOutcome(0.4, True)] * 5,
+        cached_state=None,                  # no cache → "Vérification..." OK
+        resume_at=0,
+        expect_final_online=True,
+        forbid_red_flash=True,
+        forbid_warn_flash=True,
+        horizon=40.0,
+    ),
 ]
 
 
@@ -504,18 +643,19 @@ def fmt_paints(paints):
 
 def main():
     print("=" * 72)
-    print("PWA state-machine simulation — Buggy/V43/V44/Fixed(v4.5)")
+    print("PWA state-machine simulation — Buggy/V43/V44/V45/Fixed(v5.0)")
     print("=" * 72)
     overall_pass = True
     for scenario in SCENARIOS:
         print(f"\n## {scenario.name}")
-        for cls in (BuggyApp, V43App, V44App, FixedApp):
+        for cls in (BuggyApp, V43App, V44App, V45App, FixedApp):
             res = evaluate(run(scenario, cls))
             ok_red = not res["red"] if scenario.forbid_red_flash else True
             ok_warn = not res["warn"] if scenario.forbid_warn_flash else True
+            ok_checking = not res["checking"] if scenario.forbid_checking_paint else True
             ok_online = res["final_online"] == scenario.expect_final_online
             ok_relay = res["final_relay"] == scenario.expect_final_relay_reachable
-            verdict = "PASS" if (ok_red and ok_warn and ok_online and ok_relay) else "FAIL"
+            verdict = "PASS" if (ok_red and ok_warn and ok_checking and ok_online and ok_relay) else "FAIL"
             if cls is FixedApp and verdict != "PASS":
                 overall_pass = False
             issues = []
@@ -523,6 +663,8 @@ def main():
                 issues.append(f"unexpected RED at {[p[0] for p in res['red']]}")
             if not ok_warn:
                 issues.append(f"unexpected WARN at {[p[0] for p in res['warn']]}")
+            if not ok_checking:
+                issues.append(f"unexpected CHECKING paint at {[p[0] for p in res['checking']]}")
             if not ok_online:
                 issues.append(f"final online={res['final_online']} vs expected {scenario.expect_final_online}")
             if not ok_relay:
@@ -531,7 +673,7 @@ def main():
             if issues:
                 print(f"               issues: {'; '.join(issues)}")
     print("\n" + "=" * 72)
-    print(f"FixedApp (v4.5): {'all scenarios PASS' if overall_pass else 'AT LEAST ONE FAIL'}")
+    print(f"FixedApp (v5.0): {'all scenarios PASS' if overall_pass else 'AT LEAST ONE FAIL'}")
     return 0 if overall_pass else 1
 
 

@@ -1,6 +1,42 @@
 var config=null,isOnline=false,wolSent=false,checking=false,checkInterval=null;
 var relayReachable=true,relayProbing=false,probeFailStreak=0,statusFailStreak=0;
 var wolStartTime=0,wolPollTimer=null,wolRetryTimers=[];
+// True once setOnline or setOffline has been called this session. Cached
+// state from localStorage counts too (paintCachedState → setOnline/setOffline).
+// While false: checkStatus paints the orange "Vérification..." card. While
+// true: checkStatus keeps the prior visual and only spins the refresh icon
+// + updates sub to "vérification…" — avoids the disorienting flash on every
+// 30 s tick when we already have a known state. See v5.0 design notes.
+var hasConfirmedState=false;
+// Adaptive polling timer (v5.0 B). Scheduled at +10 s when a post-window
+// status fail is deferred by the streak. Cuts worst-case "Vérification..."
+// duration from ~30 s (next 30 s tick) to ~15 s without losing the
+// cold-radio false-positive protection.
+var adaptiveTickTimer=null;
+function clearAdaptiveTick(){if(adaptiveTickTimer){clearTimeout(adaptiveTickTimer);adaptiveTickTimer=null;}}
+// Last-known-state cache (v5.0 A). Persisted to localStorage on every
+// confirmed setOnline / setOffline / probe flip; loaded on startApp() so
+// the user sees the prior state immediately instead of an orange
+// "Vérification..." card. TTL chosen short enough to avoid showing a stale
+// state for too long: 5 min covers the common "open the PWA, close it,
+// reopen it 30 s later" flow but expires before the user is likely to
+// trust a cached green that's hours old.
+var STATE_CACHE_KEY='plex-jqh-omv-state', STATE_CACHE_TTL_MS=300000;
+function saveState(){
+  if(!hasConfirmedState)return;  // never persist unconfirmed state
+  try{localStorage.setItem(STATE_CACHE_KEY,JSON.stringify({
+    isOnline:isOnline,relayReachable:relayReachable,savedAt:Date.now()
+  }))}catch(e){}
+}
+function loadCachedState(){
+  try{
+    var raw=localStorage.getItem(STATE_CACHE_KEY);if(!raw)return null;
+    var d=JSON.parse(raw);
+    if(typeof d!=='object'||d===null)return null;
+    if(typeof d.savedAt!=='number'||Date.now()-d.savedAt>STATE_CACHE_TTL_MS)return null;
+    return {isOnline:!!d.isOnline,relayReachable:!!d.relayReachable};
+  }catch(e){return null;}
+}
 // Cold-radio resume grace window. On Android PWA resume (and on initial
 // load), the first fetch from the foregrounded app often times out while
 // the mobile radio is still warming up. Without a defer, the user sees a
@@ -271,8 +307,21 @@ function startApp(){
   clearWolPoll();
   clearWolRetries();
   clearResumeRetry();
-  isOnline=false;wolSent=false;checking=false;relayReachable=true;probeFailStreak=0;statusFailStreak=0;
+  clearAdaptiveTick();
+  isOnline=false;wolSent=false;checking=false;relayReachable=true;probeFailStreak=0;statusFailStreak=0;hasConfirmedState=false;
   openResumeWindow();
+  // Paint the last-known state from localStorage if recent — avoids the
+  // disorienting orange "Vérification..." flash on cold launch when we
+  // already have a known state from a previous session. setOnline /
+  // setOffline both flip hasConfirmedState=true, so the subsequent
+  // checkStatus() / probeRelay() will run in background-reverify mode
+  // (keep visual, just spin the refresh icon + update sub).
+  var cached=loadCachedState();
+  if(cached){
+    isOnline=cached.isOnline;
+    relayReachable=cached.relayReachable;
+    if(isOnline)setOnline();else setOffline();
+  }
   checkStatus();
   probeRelay();
   if(checkInterval)clearInterval(checkInterval);
@@ -284,7 +333,16 @@ function checkStatus(){
   if(checking||!config)return;checking=true;
   var dot=document.getElementById('statusDot'),label=document.getElementById('statusLabel'),sub=document.getElementById('statusSub'),card=document.getElementById('statusCard'),btn=document.getElementById('refreshBtn');
   btn.classList.add('spinning');
-  dot.className='status-dot checking';card.className='status-card';label.textContent='Vérification...';sub.textContent='ping en cours';
+  // v5.0 A: when we already have a confirmed state (cached from previous
+  // session OR confirmed by an earlier check), skip the orange
+  // "Vérification..." card flash. Keep the prior dot/card/label visual
+  // and just update sub + spin the refresh icon — the user sees "the app
+  // is re-verifying" without losing the actual state they care about.
+  if(hasConfirmedState){
+    sub.textContent='vérification…';
+  }else{
+    dot.className='status-dot checking';card.className='status-card';label.textContent='Vérification...';sub.textContent='ping en cours';
+  }
   var ctrl=new AbortController(),timer=setTimeout(function(){ctrl.abort()},5000);
   // no-cors keeps the response opaque (we only care that the server answered),
   // and per Fetch spec is incompatible with redirect:'manual' (returns a
@@ -308,12 +366,17 @@ function checkStatus(){
       // consecutive post-window status fails to paint setOffline RED. A
       // single transient failure (cold-radio Android, network blip past
       // the 6 s resume window) is absorbed; real outages are detected on
-      // the second consecutive fail at the next 30 s tick. User report
-      // 2026-05-25: 'serveur éteint' for ~1 min on Android PWA before
-      // recovering green — the cold radio was still warming up past the
-      // window + retry boundary. Trade-off: real server-down detection
-      // delayed by ~15 s (was painting at T+15 in v4.4, now at T+30).
-      if(statusFailStreak<2)return;
+      // the second consecutive fail at the next adaptive tick.
+      if(statusFailStreak<2){
+        // Adaptive polling (v5.0 B): instead of waiting up to 30 s for
+        // the next regular tick, schedule a faster follow-up at +10 s.
+        // Cuts worst-case "Vérification..." duration from ~30 s to ~15 s
+        // when we don't have a cached state to paint instead. Cleared on
+        // success or on background.
+        clearAdaptiveTick();
+        adaptiveTickTimer=setTimeout(checkStatus,10000);
+        return;
+      }
       setOffline();
     });
   probeRelay();
@@ -354,6 +417,7 @@ function probeRelay(){
     if(!changed)return;
     if(!isOnline&&!wolSent)setOffline();
     else setFallbackState();
+    saveState();
   };
   fetch(config.relay+'/health',{cache:'no-store',signal:ctrl.signal})
     .then(function(r){clearTimeout(timer);relayProbing=false;applyFlip(r.ok);})
@@ -390,9 +454,11 @@ function setFallbackState(){
 
 function setOnline(){
   isOnline=true;
+  hasConfirmedState=true;
   stopCountdown();
   clearWolPoll();
   clearWolRetries();
+  clearAdaptiveTick();
   applyLinksState();
   document.getElementById('statusDot').className='status-dot online';
   document.getElementById('statusCard').className='status-card online';
@@ -413,6 +479,7 @@ function setOnline(){
     if(navigator.vibrate)navigator.vibrate([100,50,100]);
     wolSent=false;
   }
+  saveState();
 }
 
 function setStarting(){
@@ -500,9 +567,12 @@ function postWol(isRetry){
 
 function setOffline(){
   isOnline=false;
+  hasConfirmedState=true;
   applyLinksState();
   // While a WoL request is being processed, keep the "starting" state — a red
-  // "offline" card next to the spinning power button is contradictory.
+  // "offline" card next to the spinning power button is contradictory. No
+  // saveState() here either: "starting" is a transient state, not a
+  // confirmed setOffline we want to persist.
   if(wolSent){setStarting();return;}
   document.getElementById('statusDot').className='status-dot offline';
   document.getElementById('statusCard').className='status-card offline';
@@ -514,6 +584,7 @@ function setOffline(){
     else{btn.className='power-btn unavailable';lbl.textContent='Réveil indisponible — utilise le réveil manuel ↓';lbl.className='power-label unavailable';}
     setFallbackState();
   }
+  saveState();
 }
 
 function sendWol(){
@@ -612,6 +683,9 @@ document.addEventListener('visibilitychange',function(){
   if(!config)return;
   if(document.hidden){
     if(checkInterval){clearInterval(checkInterval);checkInterval=null;}
+    // No point keeping the adaptive tick alive while hidden — visibilitychange
+    // resume will fire a fresh checkStatus + openResumeWindow anyway.
+    clearAdaptiveTick();
   } else {
     // A fetch in flight when the screen locked may never resolve (Android
     // suspends network) — its `checking=true` flag would then permanently
@@ -620,6 +694,7 @@ document.addEventListener('visibilitychange',function(){
     checking=false;
     relayProbing=false;
     clearResumeRetry();
+    clearAdaptiveTick();
     openResumeWindow();
     // Always force an immediate check on resume, even if checkInterval still
     // exists — wolPollTimer / checkInterval may have been frozen during the

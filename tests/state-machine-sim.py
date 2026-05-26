@@ -15,7 +15,11 @@ Five implementations side-by-side:
   - V44App:   v4.4 logic (v4.3 + 2-fail probe streak)
   - V45App:   v4.5 logic (v4.4 + 2-fail status streak)
   - FixedApp: v5.0 logic (v4.5 + cached-state paint on startup + adaptive
-              tick at +10 s after defer instead of waiting 30 s tick)
+              tick after defer instead of waiting the regular tick).
+              v5.1 retunes the constants (3 s timeout, 5 s adaptive,
+              15 s tick) so steady-state server-dies-mid-tick detection
+              completes ≤ 26 s — see v51-steady-state-server-dies-mid-tick
+              scenario for the fenced bound.
 
 For each scenario we feed sequences of (latency, ok) outcomes for the
 status and probe fetches. latency=None means the fetch times out at
@@ -36,15 +40,21 @@ import heapq
 from dataclasses import dataclass, field
 from typing import Optional, Callable, List
 
-STATUS_TIMEOUT = 5.0
+STATUS_TIMEOUT = 3.0  # v5.1: 5 s → 3 s. Server fetches that don't answer in
+                      # 3 s are almost certainly down (typical RTT < 500 ms on
+                      # 4G to the home box). The 2-fail streak still absorbs
+                      # transient blips. See server-dies-mid-tick scenario.
 PROBE_TIMEOUT = 2.5
-CHECK_INTERVAL = 30.0
+CHECK_INTERVAL = 15.0  # v5.1: 30 s → 15 s. Halves the "status up while server
+                       # is actually down" worst-case window. Foreground-only
+                       # tick (Android pauses timers in background), so battery
+                       # impact is bound to the user's screen-on time.
 RESUME_RETRY = 5.0
 RESUME_WINDOW = 6.0   # seconds — must match RESUME_GRACE_MS / 1000 in app.js
-ADAPTIVE_TICK = 10.0  # v5.0 — schedule a follow-up status check this many
-                      # seconds after a defer instead of waiting for the
-                      # regular 30 s tick (must match app.js setTimeout in the
-                      # checkStatus catch path).
+ADAPTIVE_TICK = 5.0   # v5.1: 10 s → 5 s. Bridges the gap between a streak=1
+                      # fail and the next regular tick. Must stay > 0 so that
+                      # back-to-back failures can't fire faster than the
+                      # 3 s status timeout allows.
 
 
 @dataclass
@@ -413,9 +423,12 @@ class FixedApp(V45App):
          state instead of an orange flash.
 
       B. After a deferred status fail (streak=1), schedule a follow-up
-         check at +10 s instead of waiting up to 30 s for the next regular
-         tick. Worst-case "Vérification..." duration on cold launch
-         without cache drops from ~30 s to ~15 s.
+         check at +ADAPTIVE_TICK s instead of waiting up to CHECK_INTERVAL
+         for the next regular tick. With v5.1's tighter constants the
+         regular tick (15 s) often beats the adaptive (+5 s) in the cold-
+         radio path; the adaptive's main value is now the steady-state
+         server-dies-mid-tick path where it bridges from streak=1 to
+         streak=2 ~7 s before the next regular tick.
     """
 
     SKIP_CHECKING_PAINT_WHEN_CONFIRMED = True
@@ -440,8 +453,9 @@ class FixedApp(V45App):
             return
         self.status_fail_streak += 1
         if self.status_fail_streak < 2:
-            # Adaptive tick (v5.0 B): schedule a follow-up check at +10 s
-            # instead of waiting for the regular 30 s tick.
+            # Adaptive tick (v5.0 B, v5.1 retuned to +5 s): schedule a
+            # follow-up check ADAPTIVE_TICK seconds out instead of waiting
+            # for the regular CHECK_INTERVAL tick.
             self._clear_adaptive_tick()
             self.adaptive_tick_id = "scheduled"
             self.clock.after(ADAPTIVE_TICK, lambda: self.fire_status())
@@ -514,12 +528,16 @@ SCENARIOS = [
         horizon=75.0,
     ),
     Scenario(
-        # Real relay-down on resume. v4.4's 2-fail streak adds ~30 s on
-        # detection vs v4.3 (warn appears at T+62 ish vs T+32 ish). Real
-        # outages still get caught; transient noise gets absorbed.
+        # Real relay-down on resume. v4.4's 2-fail streak adds ~15-30 s on
+        # detection vs v4.3 (depending on tick rate). Real outages still
+        # get caught; transient noise gets absorbed. v5.1: probe failure
+        # list sized to outlast horizon=80 with the new 15 s tick rate
+        # (probes fire at T≈0/15/20/30/45/60/75 = 7 attempts, so 8 fail
+        # outcomes after the initial success keeps the relay reachable=False
+        # for the whole horizon).
         name="resume-relay-down",
-        status_outcomes=[FetchOutcome(0.2, True)] * 4,
-        probe_outcomes=[FetchOutcome(0.3, True)] + [FetchOutcome(None, False)] * 4,
+        status_outcomes=[FetchOutcome(0.2, True)] * 8,
+        probe_outcomes=[FetchOutcome(0.3, True)] + [FetchOutcome(None, False)] * 8,
         resume_at=20,
         expect_final_relay_reachable=False,
         forbid_warn_flash=False,   # warn IS expected — relay is really down
@@ -616,10 +634,13 @@ SCENARIOS = [
     ),
     Scenario(
         # v5.0 B: cold launch without cache, server up with cold-radio
-        # noise on status #1 and #2 (same as v4.5 scenario above). v5.0
-        # adaptive tick fires status #3 at T+25 instead of T+30, so the
-        # "Vérification..." duration drops from ~30 s to ~25 s. Same final
-        # state, just faster recovery from defer.
+        # noise on status #1 and #2 (same as v4.5 scenario above). The
+        # adaptive tick used to fire status #3 ahead of the next regular
+        # tick (10 s defer vs 30 s tick). With v5.1 (5 s adaptive vs 15 s
+        # tick), the regular tick actually beats the adaptive by 1 s in
+        # this exact case — the adaptive doesn't help here anymore, but
+        # it still matters in the steady-state server-dies-mid-tick path.
+        # Same final state, just faster recovery from defer.
         name="v5-cold-launch-no-cache-adaptive-tick-faster-recovery",
         status_outcomes=[
             FetchOutcome(None, False),
@@ -633,6 +654,31 @@ SCENARIOS = [
         forbid_red_flash=True,
         forbid_warn_flash=True,
         horizon=40.0,
+    ),
+    Scenario(
+        # v5.1 — steady-state detection bound. App was open with a
+        # confirmed-online state (cached), then the server dies right
+        # after the first successful check. The next regular tick at
+        # T=15 fails (timeout at T=18), adaptive fires at T=23 (fail at
+        # T=26), streak=2 → setOffline at T=26. horizon=26.5 fences the
+        # detection: any regression that pushes it past 26.5 s flips the
+        # final state and fails the scenario. User-visible answer to the
+        # "25 s with status up while server is down" complaint pre-v5.1.
+        name="v51-steady-state-server-dies-mid-tick",
+        status_outcomes=[
+            FetchOutcome(0.3, True),    # T=0 cold check — server still up
+            FetchOutcome(None, False),  # T=15 tick — server now down
+            FetchOutcome(None, False),  # T=23 adaptive — confirms
+        ],
+        probe_outcomes=[FetchOutcome(0.4, True)] * 5,
+        cached_state={"is_online": True, "relay_reachable": True},
+        resume_at=0,
+        expect_final_online=False,          # truth wins by T=26
+        expect_final_relay_reachable=True,
+        forbid_red_flash=False,             # red IS expected — server really down
+        forbid_warn_flash=True,
+        forbid_checking_paint=True,         # cached state → no orange flash
+        horizon=26.5,                       # fence: detection must complete here
     ),
 ]
 

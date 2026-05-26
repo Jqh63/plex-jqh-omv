@@ -88,8 +88,8 @@ For each of the 3 scenarios:
   `dispatchEvent(new Event('visibilitychange'))`. The app's listener
   reads `document.hidden`, so the spoof is honored.
 
-- **`route.abort()` is instant**, while the real PWA timeout is 5 s
-  (status) / 2.5 s (probe). For testing failure paths this is fine —
+- **`route.abort()` is instant**, while the real PWA timeout is 3 s
+  (status, v5.1) / 2.5 s (probe). For testing failure paths this is fine —
   the PWA's catch handler runs identically regardless of WHY the fetch
   failed. Just be aware sample delays don't have to wait the full
   timeout when modelling failures.

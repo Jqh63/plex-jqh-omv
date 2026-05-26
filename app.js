@@ -6,12 +6,12 @@ var wolStartTime=0,wolPollTimer=null,wolRetryTimers=[];
 // While false: checkStatus paints the orange "Vérification..." card. While
 // true: checkStatus keeps the prior visual and only spins the refresh icon
 // + updates sub to "vérification…" — avoids the disorienting flash on every
-// 30 s tick when we already have a known state. See v5.0 design notes.
+// 15 s tick (v5.1) when we already have a known state. See v5.0 design notes.
 var hasConfirmedState=false;
-// Adaptive polling timer (v5.0 B). Scheduled at +10 s when a post-window
-// status fail is deferred by the streak. Cuts worst-case "Vérification..."
-// duration from ~30 s (next 30 s tick) to ~15 s without losing the
-// cold-radio false-positive protection.
+// Adaptive polling timer (v5.0 B, retuned v5.1). Scheduled at +5 s when a
+// post-window status fail is deferred by the streak. Bridges the gap to
+// the next regular 15 s tick when the streak=1 fail lands just after a
+// tick — without losing the cold-radio false-positive protection.
 var adaptiveTickTimer=null;
 function clearAdaptiveTick(){if(adaptiveTickTimer){clearTimeout(adaptiveTickTimer);adaptiveTickTimer=null;}}
 // Last-known-state cache (v5.0 A). Persisted to localStorage on every
@@ -46,7 +46,7 @@ function loadCachedState(){
 // (no KO paint, one quick retry scheduled at +5 s) and the first failure
 // of probeRelay is deferred (relayReachable is not flipped to false). The
 // 6 s deadline covers both handlers' first attempts and lets the natural
-// 30 s tick resolve real outages. PR #19 covered checkStatus only; the
+// 15 s tick resolve real outages. PR #19 covered checkStatus only; the
 // probe was still flipping and painting "⚠ Relais injoignable" before
 // the radio was warm.
 var resumeUntil=0,resumeRetryTimer=null;
@@ -325,7 +325,7 @@ function startApp(){
   checkStatus();
   probeRelay();
   if(checkInterval)clearInterval(checkInterval);
-  checkInterval=setInterval(checkStatus,30000);
+  checkInterval=setInterval(checkStatus,15000);
   if(!window.matchMedia('(display-mode:standalone)').matches)setTimeout(function(){document.getElementById('installHint').style.display='block'},3000);
 }
 
@@ -343,7 +343,10 @@ function checkStatus(){
   }else{
     dot.className='status-dot checking';card.className='status-card';label.textContent='Vérification...';sub.textContent='ping en cours';
   }
-  var ctrl=new AbortController(),timer=setTimeout(function(){ctrl.abort()},5000);
+  // v5.1: 5 s → 3 s timeout. Home server typical RTT is <500 ms on 4G/WG;
+  // a 3 s no-answer is essentially "down". The 2-fail streak still absorbs
+  // transient blips that happen to fall in the 0.5–3 s slow-RTT range.
+  var ctrl=new AbortController(),timer=setTimeout(function(){ctrl.abort()},3000);
   // no-cors keeps the response opaque (we only care that the server answered),
   // and per Fetch spec is incompatible with redirect:'manual' (returns a
   // network error). The Chrome PNA noise on redirects is cosmetic-only and
@@ -368,13 +371,13 @@ function checkStatus(){
       // the 6 s resume window) is absorbed; real outages are detected on
       // the second consecutive fail at the next adaptive tick.
       if(statusFailStreak<2){
-        // Adaptive polling (v5.0 B): instead of waiting up to 30 s for
-        // the next regular tick, schedule a faster follow-up at +10 s.
-        // Cuts worst-case "Vérification..." duration from ~30 s to ~15 s
-        // when we don't have a cached state to paint instead. Cleared on
-        // success or on background.
+        // Adaptive polling (v5.0 B, retuned v5.1): instead of waiting up
+        // to 15 s for the next regular tick, schedule a faster follow-up
+        // at +5 s. Pinned to the steady-state server-dies-mid-tick bound
+        // of ~26 s (15 s next tick + 3 s timeout + 5 s adaptive + 3 s
+        // timeout). Cleared on success or on background.
         clearAdaptiveTick();
-        adaptiveTickTimer=setTimeout(checkStatus,10000);
+        adaptiveTickTimer=setTimeout(checkStatus,5000);
         return;
       }
       setOffline();
@@ -701,7 +704,7 @@ document.addEventListener('visibilitychange',function(){
     // background phase and the next scheduled tick could be seconds or
     // minutes away. The user just looked at the screen; give them fresh data.
     checkStatus();
-    if(!checkInterval)checkInterval=setInterval(checkStatus,30000);
+    if(!checkInterval)checkInterval=setInterval(checkStatus,15000);
     // Countdown text self-corrects from Date.now() on the next tick, but the
     // CSS progress bar transition does NOT — it was started once with a
     // duration of etaMs and is frozen-then-resumed by the suspend, so on

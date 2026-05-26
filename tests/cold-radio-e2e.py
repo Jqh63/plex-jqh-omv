@@ -168,12 +168,27 @@ def main():
         r3 = run_scenario(
             p,
             "resume - relay really down",
+            # Probe n=1 ok (initial), then all probe fail. v4.4 needs 2
+            # consecutive post-window fails to flip — warn lands at ~T+62.
             lambda kind, n: "fail" if (kind == "probe" and n >= 2) else "ok",
-            sample_delays_s=[3, 6, 11, 14, 36, 40],
+            sample_delays_s=[3, 6, 14, 36, 65, 70],
+        )
+        r4 = run_scenario(
+            p,
+            "v4.4 bug: server down + cold-radio probe (user report 2026-05-25)",
+            # Status fails from n=1 (server down from the start). Probe n=1
+            # (window-deferred) and n=2 (post-window) both fail to simulate
+            # cold-radio noise across the window+retry boundary, then n=3
+            # succeeds (radio warm). MUST NOT produce a relay-down paint.
+            lambda kind, n: (
+                "fail" if kind == "status" else
+                ("fail" if (kind == "probe" and n <= 2) else "ok")
+            ),
+            sample_delays_s=[3, 6, 14, 20, 36, 40],
         )
 
     print("\n" + "=" * 72)
-    print("VERDICT (real browser E2E on live PWA v4.3)")
+    print("VERDICT (real browser E2E on live PWA v4.4)")
     print("=" * 72)
     s1_ok = not r1["red_at"] and not r1["warn_at"] and r1["final_green"]
     print(
@@ -192,6 +207,14 @@ def main():
         f"[{'PASS' if s3_ok else 'FAIL'}] relay really down     | "
         f"warn_at={r3['warn_at']} final_green={r3['final_green']} (want warn, still green) "
         f"calls={r3['counters']}"
+    )
+    # v4.4 fix: server-down + cold-radio probe noise must NOT produce warn
+    # paint. Server is correctly red, but the relay banner must stay clean.
+    s4_ok = bool(r4["red_at"]) and not r4["warn_at"] and not r4["final_green"]
+    print(
+        f"[{'PASS' if s4_ok else 'FAIL'}] v4.4 server-down + cold probe | "
+        f"red_at={r4['red_at']} warn_at={r4['warn_at']} final_green={r4['final_green']} "
+        f"(want red, no warn, not green) calls={r4['counters']}"
     )
 
 

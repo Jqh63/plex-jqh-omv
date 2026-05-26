@@ -272,7 +272,13 @@ function buildLinks(){
       a.classList.add('server-dependent');
       if(!isOnline)a.classList.add('offline');
       a.addEventListener('click',function(e){
-        if(!isOnline){e.preventDefault();showToast('⚠ Serveur éteint — allume-le d’abord',true);}
+        if(isOnline)return;
+        e.preventDefault();
+        // During an active WoL boot the server is in transition, not "off" —
+        // the generic "allume-le" message is misleading and frustrating
+        // ("but I just did!"). Differentiate the two cases.
+        if(wolSent)showToast('⏳ Serveur en cours de réveil — patiente quelques instants',true);
+        else showToast('⚠ Serveur éteint — allume-le d\'abord',true);
       });
     }
     var icon=document.createElement('div');

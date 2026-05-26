@@ -1,5 +1,5 @@
 var config=null,isOnline=false,wolSent=false,checking=false,checkInterval=null;
-var relayReachable=true,relayProbing=false;
+var relayReachable=true,relayProbing=false,probeFailStreak=0;
 var wolStartTime=0,wolPollTimer=null,wolRetryTimers=[];
 // Cold-radio resume grace window. On Android PWA resume (and on initial
 // load), the first fetch from the foregrounded app often times out while
@@ -271,7 +271,7 @@ function startApp(){
   clearWolPoll();
   clearWolRetries();
   clearResumeRetry();
-  isOnline=false;wolSent=false;checking=false;relayReachable=true;
+  isOnline=false;wolSent=false;checking=false;relayReachable=true;probeFailStreak=0;
   openResumeWindow();
   checkStatus();
   probeRelay();
@@ -322,13 +322,23 @@ function probeRelay(){
   relayProbing=true;
   var ctrl=new AbortController(),timer=setTimeout(function(){ctrl.abort()},2500);
   var applyFlip=function(ok){
-    // Cold-radio defer mirroring checkStatus (see resumeUntil comment):
-    // during the resume window, the first relay probe failure is treated
-    // as likely radio-warmup noise. Keep relayReachable as-is; the next
-    // checkStatus tick (or the in-flight checkStatus retry) will tell the
-    // truth a few seconds later. Without this, the "⚠ Relais injoignable"
-    // banner flashes for ~5 s on every PWA foreground return.
+    // Cold-radio defer (v4.3, see resumeUntil comment): during the resume
+    // window the first probe failure is treated as radio-warmup noise.
+    // Stays out of the streak count entirely.
     if(!ok&&relayReachable&&inResumeWindow())return;
+    if(ok){probeFailStreak=0;}
+    else{probeFailStreak++;}
+    // 2-fail streak (v4.4): a single post-window probe failure is more
+    // often transient (radio still cold past the 6 s window, single packet
+    // loss to GCP, micro-burst on the relay) than a real outage. Require 2
+    // consecutive fails to flip relayReachable → false. Without this, the
+    // server-down + cold-radio scenario shows a false-positive "Réveil
+    // indisponible" red paint at T+12 ish (window has closed by then, but
+    // the retry's probe is still in cold-radio territory). Trade-off: real
+    // relay-down detection delayed by ~30 s (caught at the next tick after
+    // the first post-window fail) — acceptable because the WoL click path
+    // surfaces relay errors immediately via the postWol() catch toast.
+    if(!ok&&relayReachable&&probeFailStreak<2)return;
     var changed=(ok!==relayReachable);
     relayReachable=ok;
     if(!changed)return;

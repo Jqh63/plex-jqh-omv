@@ -51,6 +51,17 @@ function flagCopyFail(el) {
   }, 3000);
 }
 
+// Derive footer version from the active SW cache name. Single source
+// of truth (sw.js) — mirrors the pattern in app.js and debug.js.
+if(window.caches){
+  caches.keys().then(function(names){
+    var ours=names.filter(function(n){return n.indexOf('plex-jqh-omv')===0;});
+    var m=ours[0]&&ours[0].match(/-v(\d+\.\d+)$/);
+    var el=document.getElementById('footerVersion');
+    if(el&&m)el.textContent='v'+m[1];
+  }).catch(function(){});
+}
+
 document.querySelectorAll('.param code').forEach(function(el) {
   el.addEventListener('click', function() {
     var value = el.dataset.copy;

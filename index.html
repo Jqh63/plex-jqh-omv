@@ -2,6 +2,15 @@
 <html lang="fr">
 <head>
 <meta charset="UTF-8">
+<!-- connect-src is intentionally permissive (any https): the user
+     configures their own home server domain + relay URL at runtime
+     via the settings screen, both stored in localStorage. Pinning to
+     specific hosts would require a build step per fork. script-src
+     stays strict ('self' only) so XSS via inline/external script is
+     still blocked — the only realistic exfiltration vector requires
+     a script-src bypass, which CSP elsewhere closes. debug.html and
+     fallback.html use connect-src 'self' because they don't fetch
+     anything off-origin. -->
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; frame-src 'none'; connect-src https:; manifest-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">

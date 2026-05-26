@@ -1,4 +1,4 @@
-var CACHE = 'plex-jqh-omv-v5.3';
+var CACHE = 'plex-jqh-omv-v5.4';
 var FILES = ['./', './app.js', './fallback.html', './fallback.js', './debug.html', './debug.js', './manifest.json', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', function(e) {

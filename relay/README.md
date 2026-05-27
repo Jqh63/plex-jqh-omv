@@ -1,7 +1,7 @@
-# relay — self-hosted HTTP→UDP Wake-on-LAN backend
+# relay — self-hosted HTTP→UDP Wake-on-LAN backend + status oracle
 
 > Status: stable
-> Last update: 2026-05-25
+> Last update: 2026-05-27
 
 ## Purpose
 
@@ -12,6 +12,13 @@ relay is intentionally minimal (~80 lines of Python) and self-hosted
 on a free-tier VM (e.g. GCP `e2-micro` Always Free).
 
 PWA ↔ relay contract is defined in the [root README](../README.md#api-contract).
+
+Since v7.0 (May 2026), the relay also exposes a `GET /status` endpoint:
+the PWA fetches it once on open and gets back `{up, stale, age_s}`,
+removing the need for a parallel direct-to-home probe (cf. ADR
+`2026-05-27-pwa-plex-jqh-omv-relay-as-oracle` in the operator's private
+knowledge base). The relay polls the home via HEAD on a configurable
+`STATUS_TARGET_URL`, with a 5 s fresh / 60 s stale in-memory cache.
 
 ## Files in this folder
 
@@ -35,7 +42,10 @@ and FastAPI process read them at runtime from two env files on the VM,
 each owned by the relevant service user:
 
 - `/etc/wol-relay.env` (mode `0640 root:wol`) — FastAPI variables:
-  `ALLOWED_MAC`, `WOL_TOKEN`, `TARGET_HOST`, `TARGET_PORT`.
+  `ALLOWED_MAC`, `WOL_TOKEN`, `TARGET_HOST`, `TARGET_PORT`. Optional:
+  `STATUS_TARGET_URL` (enables `/status`),
+  `STATUS_POLL_TIMEOUT_S`/`STATUS_CACHE_FRESH_S`/`STATUS_CACHE_STALE_S`
+  (tuning).
 - `/etc/caddy/wol-relay.env` (mode `0640 root:caddy`) — Caddy
   variables referenced in the Caddyfile as `{$VAR}`: `LE_EMAIL`,
   `RELAY_DOMAIN`, `CORS_ORIGIN`.
@@ -220,7 +230,7 @@ sudo useradd -r -s /usr/sbin/nologin -d /opt/wol-relay -m wol || true
 sudo chown -R wol:wol /opt/wol-relay
 sudo -u wol python3 -m venv /opt/wol-relay/venv
 sudo -u wol /opt/wol-relay/venv/bin/pip install --upgrade pip wheel
-sudo -u wol /opt/wol-relay/venv/bin/pip install fastapi 'uvicorn[standard]'
+sudo -u wol /opt/wol-relay/venv/bin/pip install fastapi 'uvicorn[standard]' 'httpx[http2]'
 
 # Optional UFW (defense in depth; cloud firewall is primary)
 sudo ufw default deny incoming && sudo ufw default allow outgoing
@@ -234,6 +244,53 @@ From this point, follow *GitOps deploy channel → One-shot bootstrap*
 above. The bootstrap script installs the drop-in, seeds the env
 templates and posts the dispatcher.
 
+## Status oracle (`GET /status`)
+
+`/status` is the PWA's single source of truth for "is the home server
+up?". The PWA does one `fetch` to the relay and gets a decisive answer
+in <1 s in nominal conditions.
+
+### Response shape
+
+```json
+{"up": true, "stale": false, "age_s": 3}
+```
+
+- `up`: last verified state of the target (`true` if a recent HEAD got
+  `<500`, `false` otherwise or if no successful probe in `>60 s`).
+- `stale`: `true` if the verdict comes from a successful probe between
+  5 s and 60 s old (PWA may want to show a subtle "Vérification…"
+  indicator while the relay re-polls in background on the next call).
+- `age_s`: seconds since the last successful probe (`null` if expired).
+
+### Polling model
+
+- Per-request, on-demand: no background timer, no per-tenant state.
+- Cache fresh window (`STATUS_CACHE_FRESH_S=5`): cached verdict reused
+  without hitting the home.
+- Cache stale window (`5..STATUS_CACHE_STALE_S=60`): cached verdict
+  returned to the client AND a fresh poll fires (under a single
+  `asyncio.Lock` to dedupe concurrent callers).
+- Expired (`>STATUS_CACHE_STALE_S`): verdict expires, response degrades
+  to `{up: false, stale: false, age_s: null}` until a successful poll.
+
+### Target requirements
+
+`STATUS_TARGET_URL` must point at a URL that returns an HTTP response
+(any `<500`) when the home is reachable. The DuckDNS wildcard cert
+covers `*.jqh.duckdns.org` but **not** the apex — so the bare
+`https://jqh.duckdns.org` triggers a TLS SAN mismatch and isn't a valid
+target. Use an existing subdomain instead (see
+[`wol-relay.env.example`](wol-relay.env.example) for working examples).
+
+### Disabled mode (env var unset)
+
+If `STATUS_TARGET_URL` is unset, `/status` returns `503 "status target
+not configured"`. The PWA treats this exactly like a network failure
+and falls back to a direct HEAD against the home — same UX as a GCP
+outage. This means deploying the v7.0 backend before configuring the
+env var is safe (no `/wol` regression).
+
 ## Hardening notes
 
 | Measure | Why |
@@ -245,6 +302,7 @@ templates and posts the dispatcher.
 | uvicorn `--no-access-log` | The token never ends up in a log |
 | Sliding-window rate limit on `/wol` (10 req/min/IP, in-memory) | Caps scan / brute force velocity before any other check; refuses with 429 |
 | Audit log on `/wol` (`journalctl -u wol-relay`) | Every attempt is logged with source IP + status (200/401/403/429/502). Token and MAC are **never** logged. Lets you spot unauthorized scans |
+| `/status` is unauthenticated, returns no MAC/token, fixed shape | Public-readable: an attacker only learns the up/down of the configured target (which they can also infer with a TCP probe). No new exposure surface |
 | systemd `NoNewPrivileges` + `ProtectSystem=strict` + `PrivateTmp` | Limits the blast radius of a hypothetical RCE in FastAPI |
 | user `wol` (non-priv, no shell) | uvicorn doesn't run as root |
 | `EnvironmentFile` mode `0640 root:<service-user>` | Tokens readable only by root and the service user |

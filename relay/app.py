@@ -44,7 +44,13 @@ TARGET_PORT = int(os.environ.get("TARGET_PORT", "9"))
 # Cf. ADR `2026-05-27-pwa-plex-jqh-omv-relay-as-oracle` in the private
 # knowledge-base repo.
 STATUS_TARGET_URL = os.environ.get("STATUS_TARGET_URL")
-STATUS_POLL_TIMEOUT_S = float(os.environ.get("STATUS_POLL_TIMEOUT_S", "2.0"))
+# 1.5 s default (was 2.0): family test on an Android cold open observed
+# a ~3 s "down" verdict, dominated by 2 × 2.0 s timeout when the home is
+# unreachable (NAT box silently drops packets without TCP RST). 1.5 s is
+# still 10 × the typical GCP-to-home RTT, leaves headroom for Plex
+# restarts (~500-1500 ms), and keeps the same retry budget. Override
+# via env var on links with unusually long latencies.
+STATUS_POLL_TIMEOUT_S = float(os.environ.get("STATUS_POLL_TIMEOUT_S", "1.5"))
 STATUS_CACHE_FRESH_S = int(os.environ.get("STATUS_CACHE_FRESH_S", "5"))
 STATUS_CACHE_STALE_S = int(os.environ.get("STATUS_CACHE_STALE_S", "60"))
 

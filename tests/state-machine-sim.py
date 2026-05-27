@@ -579,7 +579,10 @@ class LiveApp(FixedApp):
         self.paint("offline")
 
 
-STATUS_FETCH_TIMEOUT = 3.0  # v7.0 — single relay /status fetch budget
+STATUS_FETCH_TIMEOUT = 5.0  # v7.1 — single relay /status fetch budget.
+                            # Bumped from 3.0 to absorb cold-radio TLS handshake
+                            # variance on Android 4G (family test reported a
+                            # ~3 s cold open right at the v7.0 boundary).
 STATUS_LOCAL_TTL = 60.0     # v7.0 — localStorage paint TTL
 
 
@@ -1026,6 +1029,8 @@ SCENARIOS = [
     Scenario(
         # Relay timeout twice → fallback to direct home (which succeeds) →
         # green with relay-down warn banner. Detection survives a GCP outage.
+        # Worst-case latency: STATUS_FETCH_TIMEOUT × 2 (relay attempts) +
+        # home response. With v7.1's 5 s timeout that's ~10.1 s.
         name="v7-relay-timeout-fallback-home-up",
         oracle_outcomes=[FetchOutcome(None, False), FetchOutcome(None, False)],
         home_fallback_outcomes=[FetchOutcome(0.3, True)],
@@ -1034,11 +1039,11 @@ SCENARIOS = [
         expect_final_relay_reachable=False,   # relay is down — warn banner expected
         forbid_red_flash=True,                # home is up, no red
         forbid_warn_flash=False,              # warn IS expected (relay down)
-        horizon=10.0,
+        horizon=12.0,
     ),
     Scenario(
         # Both relay and home down → red + warn. Full outage from the
-        # PWA's POV; both paints expected.
+        # PWA's POV; both paints expected. Worst-case: 3 × timeout = 15 s.
         name="v7-relay-timeout-fallback-home-down",
         oracle_outcomes=[FetchOutcome(None, False), FetchOutcome(None, False)],
         home_fallback_outcomes=[FetchOutcome(None, False)],
@@ -1047,7 +1052,7 @@ SCENARIOS = [
         expect_final_relay_reachable=False,
         forbid_red_flash=False,               # home really down — red expected
         forbid_warn_flash=False,              # relay also down — warn expected
-        horizon=12.0,
+        horizon=16.0,
     ),
     Scenario(
         # localStorage cache <60 s + server still up → instant green paint,

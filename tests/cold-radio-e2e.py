@@ -193,19 +193,18 @@ def main():
             p,
             "v7-relay-timeout-fallback-home-up",
             # Two relay failures triggers fallback; home then answers ok.
+            # v7.1 timeout = 5 s × 2 attempts + home call → settle ~T+10.1.
             relay_plan=lambda n: "fail",
             home_plan=lambda n: "ok",
-            # Relay timeout is 3 s with 1 retry → fallback starts ~6.x s.
-            # Home no-cors fetch is fast on success. Sample after the
-            # fallback should settle (~T+8) and after the next tick (~T+22).
-            sample_delays_s=[3, 8, 14, 22],
+            sample_delays_s=[3, 12, 18, 24],
         )
         r4 = run_scenario(
             p,
             "v7-relay-timeout-fallback-home-down",
+            # All three legs time out → setOffline at ~T+15.
             relay_plan=lambda n: "fail",
             home_plan=lambda n: "fail",
-            sample_delays_s=[3, 10, 14, 22],
+            sample_delays_s=[3, 12, 18, 24],
         )
         r5 = run_scenario(
             p,

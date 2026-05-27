@@ -1,62 +1,28 @@
 var config=null,isOnline=false,wolSent=false,checking=false,checkInterval=null;
-var relayReachable=true,relayProbing=false,probeFailStreak=0,statusFailStreak=0;
+var relayReachable=true;
 var wolStartTime=0,wolPollTimer=null,wolRetryTimers=[];
-// True once setOnline or setOffline has been called this session.
-// While false: checkStatus paints the orange "Vérification..." card. While
-// true: checkStatus keeps the prior visual and only spins the refresh icon
-// + updates sub to "vérification…" — avoids the disorienting flash on every
-// 15 s tick when we already have a known state. See v5.0 design notes.
+// True once setOnline / setOffline has fired this session. Gates the
+// orange "Vérification…" card so we don't strobe orange on every 15 s
+// tick when the prior state is already on screen.
 var hasConfirmedState=false;
-// v6.0 — radio-warm bypass. True once probeRelay has succeeded since the
-// last startApp/onResume. Combined with awaitingInitialConvergence below,
-// lets a single status fail flip to red during cold-launch / resume — the
-// user is waiting for a definite answer and a probe success means the
-// network is up, so a status fail is high-confidence a real server outage.
-var radioWarm=false;
-// v6.0 — true from startApp / on_resume until the FIRST setOnline or
-// setOffline fires. Gates the radio-warm bypass to the initial convergence
-// phase only; steady-state ticks keep the 2-fail streak (absorbs transient
-// blips while the user isn't actively waiting on an answer).
-var awaitingInitialConvergence=false;
-// Adaptive polling timer (v5.0 B, retuned v5.1). Scheduled at +5 s when a
-// post-window status fail is deferred by the streak. Bridges the gap to
-// the next regular 15 s tick when the streak=1 fail lands just after a
-// tick — without losing the cold-radio false-positive protection.
-var adaptiveTickTimer=null;
-function clearAdaptiveTick(){if(adaptiveTickTimer){clearTimeout(adaptiveTickTimer);adaptiveTickTimer=null;}}
-// Cold-radio resume grace window. On Android PWA resume (and on initial
-// load), the first fetch from the foregrounded app often times out while
-// the mobile radio is still warming up. Without a defer, the user sees a
-// 5-7 s false-positive cycle: green → "Vérification…" → ⚠ "Relais
-// injoignable" → red "Hors ligne" → back to green once the radio is up.
-// While inResumeWindow(), the first failure of checkStatus is deferred
-// (no KO paint, one quick retry scheduled at +5 s) and the first failure
-// of probeRelay is deferred (relayReachable is not flipped to false). The
-// 6 s deadline covers both handlers' first attempts and lets the natural
-// 15 s tick resolve real outages. PR #19 covered checkStatus only; the
-// probe was still flipping and painting "⚠ Relais injoignable" before
-// the radio was warm.
-var resumeUntil=0,resumeRetryTimer=null;
-var RESUME_GRACE_MS=6000;
-function inResumeWindow(){return resumeUntil>0&&Date.now()<resumeUntil;}
-function openResumeWindow(){resumeUntil=Date.now()+RESUME_GRACE_MS;}
-// v6.0 — called by probeRelay() on success: the radio is up, so any
-// subsequent status fail in this convergence cycle is high-confidence
-// "server down" and shouldn't be auto-deferred.
-function closeResumeWindow(){resumeUntil=0;}
-function clearResumeRetry(){if(resumeRetryTimer){clearTimeout(resumeRetryTimer);resumeRetryTimer=null;}}
+// v7.0 — single-fetch model. The PWA now asks the relay one question
+// (GET /status → {up, stale, age_s}) instead of running a probe + a
+// direct home check in parallel. One cold-radio window instead of two,
+// no races, no defensive layers. ADR `2026-05-27-pwa-plex-jqh-omv-
+// relay-as-oracle` in the operator's private knowledge-base has the
+// full design (alternatives + critères d'acceptance + plan).
+var STATUS_FETCH_TIMEOUT_MS=3000;
+// Mini-cache for back-to-back reopens (closing then reopening the PWA
+// within a minute). Kept short on purpose — beyond a minute the user
+// expects a fresh check, and we already learned (v6.0 drop-cache fix)
+// that a longer cache lies confidently when the server has flipped
+// state in the meantime.
+var STATUS_LOCAL_TTL_MS=60000,STATUS_LOCAL_KEY='plex-jqh-omv-status';
 // v5.3: 15 s → 5 s. The "Démarrage…" state hung up to 15 s past the
 // actual server-up moment because the next poll hadn't fired yet —
 // a manual refresh would flip to green immediately. 5 s caps the
-// post-up delay; with STATUS_TIMEOUT_MS=2 s, each poll is a tight
-// ping (≤ 2 s response or timeout), so we get 12 polls/min during boot.
+// post-up delay.
 var WOL_POLL_MS=5000, WOL_TIMEOUT_MS=300000;
-// v5.4 (hygiene): match the sim's constant naming. STATUS_TIMEOUT_MS
-// caps the status fetch (home server). PROBE_TIMEOUT_MS caps the relay
-// /health probe — tighter because the GCP relay is HTTPS with proper
-// CORS, so a successful response lands quickly and a hang is more
-// often a dead-relay signal than a slow-network one.
-var STATUS_TIMEOUT_MS=2000, PROBE_TIMEOUT_MS=2500;
 // Resend the POST at these offsets after the initial fire (server-side
 // already sends 3 packets per POST). 4 POSTs × 3 packets = 15 magic
 // packets over 90 s. The 15 s first retry is tuned for the ARP-cache
@@ -315,15 +281,20 @@ function startApp(){
     document.getElementById('fallbackLinkA').href=fbUrl;
   }
   buildLinks();
+  ensureRelayPreconnect();
   clearWolPoll();
   clearWolRetries();
-  clearResumeRetry();
-  clearAdaptiveTick();
-  isOnline=false;wolSent=false;checking=false;relayReachable=true;probeFailStreak=0;statusFailStreak=0;hasConfirmedState=false;
-  radioWarm=false;awaitingInitialConvergence=true;
-  openResumeWindow();
+  isOnline=false;wolSent=false;checking=false;relayReachable=true;hasConfirmedState=false;
+  // Paint the localStorage cache (<60 s) immediately so back-to-back
+  // reopens don't strobe orange. The background checkStatus() below
+  // confirms or corrects.
+  var cached=readLocalStatus();
+  if(cached){
+    relayReachable=cached.relayOk!==false;
+    if(cached.up)setOnline();
+    else setOffline();
+  }
   checkStatus();
-  probeRelay();
   if(checkInterval)clearInterval(checkInterval);
   checkInterval=setInterval(checkStatus,15000);
   // Install hint: Chrome on Android = "menu ⋮ → Ajouter à l'écran d'accueil";
@@ -338,118 +309,109 @@ function startApp(){
   },3000);
 }
 
+// v7.0 — relay-as-oracle. One fetch to the relay's /status answers both
+// "is the relay reachable?" and "is the home server up?". On relay
+// timeout we retry once; if both fail we fall back to a direct no-cors
+// fetch against the home so up/down detection survives a GCP outage.
+function readLocalStatus(){
+  try{
+    var raw=localStorage.getItem(STATUS_LOCAL_KEY);if(!raw)return null;
+    var d=JSON.parse(raw);
+    if(!d||typeof d!=='object'||typeof d.t!=='number')return null;
+    if(Date.now()-d.t>STATUS_LOCAL_TTL_MS)return null;
+    return d;
+  }catch(e){return null;}
+}
+function writeLocalStatus(up,relayOk){
+  try{localStorage.setItem(STATUS_LOCAL_KEY,JSON.stringify({up:!!up,relayOk:relayOk!==false,t:Date.now()}));}catch(e){}
+}
+
+function fetchOnce(url,opts){
+  var ctrl=new AbortController(),timer=setTimeout(function(){ctrl.abort();},STATUS_FETCH_TIMEOUT_MS);
+  var init=Object.assign({cache:'no-store',signal:ctrl.signal},opts||{});
+  return fetch(url,init).finally(function(){clearTimeout(timer);});
+}
+
+function fetchStatusFromRelay(){
+  // Single shape we trust: HTTP 200 with a JSON body that has an "up"
+  // boolean. Anything else (5xx, 503 "status target not configured",
+  // network error) is treated as a relay failure and triggers the
+  // fallback path.
+  return fetchOnce(config.relay+'/status').then(function(r){
+    if(!r.ok)return Promise.reject(new Error('HTTP '+r.status));
+    return r.json();
+  }).then(function(j){
+    if(!j||typeof j.up!=='boolean')return Promise.reject(new Error('bad shape'));
+    return j;
+  });
+}
+
+function fetchHomeDirectly(){
+  // no-cors: response is opaque but a fulfilled promise still tells us
+  // the home accepted the TCP/TLS handshake and returned *something*.
+  // That's enough to flip the up/down state when the relay is dead.
+  return fetchOnce('https://'+statusHost(),{mode:'no-cors'});
+}
+
 function checkStatus(){
   if(checking||!config)return;checking=true;
-  var dot=document.getElementById('statusDot'),label=document.getElementById('statusLabel'),sub=document.getElementById('statusSub'),card=document.getElementById('statusCard'),btn=document.getElementById('refreshBtn');
+  var label=document.getElementById('statusLabel'),sub=document.getElementById('statusSub'),btn=document.getElementById('refreshBtn');
   btn.classList.add('spinning');
-  // v5.0 A: when we already have a confirmed state (cached from previous
-  // session OR confirmed by an earlier check), skip the orange
-  // "Vérification..." card flash. Keep the prior dot/card/label visual
-  // and just update sub + spin the refresh icon — the user sees "the app
-  // is re-verifying" without losing the actual state they care about.
+  // Keep the prior visual when we already have a confirmed (or cached)
+  // state; orange "Vérification…" only appears on the very first paint.
   if(hasConfirmedState){
     sub.textContent='vérification…';
   }else{
-    dot.className='status-dot checking';card.className='status-card';label.textContent='Vérification...';sub.textContent='ping en cours';
+    document.getElementById('statusDot').className='status-dot checking';
+    document.getElementById('statusCard').className='status-card';
+    label.textContent='Vérification...';sub.textContent='ping en cours';
   }
-  // v5.3: 3 s → 2 s timeout (STATUS_TIMEOUT_MS). Home server typical
-  // RTT is <500 ms on 4G/WG; 2 s no-answer is essentially "down".
-  // Caps the orange "Vérification..." card on cold launch without
-  // cache. The 2-fail streak still absorbs cold-radio blips.
-  var ctrl=new AbortController(),timer=setTimeout(function(){ctrl.abort()},STATUS_TIMEOUT_MS);
-  // no-cors keeps the response opaque (we only care that the server answered),
-  // and per Fetch spec is incompatible with redirect:'manual' (returns a
-  // network error). The Chrome PNA noise on redirects is cosmetic-only and
-  // doesn't break detection — leaving redirect at its default ('follow').
-  fetch('https://'+statusHost(),{mode:'no-cors',cache:'no-store',signal:ctrl.signal})
-    .then(function(){clearTimeout(timer);btn.classList.remove('spinning');checking=false;statusFailStreak=0;clearResumeRetry();setOnline();})
+
+  var finish=function(){checking=false;btn.classList.remove('spinning');};
+
+  if(!config.relay){
+    // No relay configured → straight to direct-home detection. Relay
+    // warnings are silenced (no relay = no relay-down state to show).
+    relayReachable=true;
+    fetchHomeDirectly()
+      .then(function(){finish();writeLocalStatus(true,true);setOnline();})
+      .catch(function(){finish();writeLocalStatus(false,true);setOffline();});
+    return;
+  }
+
+  fetchStatusFromRelay()
+    .catch(function(){return fetchStatusFromRelay();})   // 1 retry on transient failures
+    .then(function(j){
+      // Happy path: relay answered, trust its verdict.
+      finish();
+      relayReachable=true;
+      writeLocalStatus(j.up,true);
+      if(j.up)setOnline();else setOffline();
+    })
     .catch(function(){
-      clearTimeout(timer);btn.classList.remove('spinning');checking=false;
-      if(inResumeWindow()){
-        // Defer: keep the "Vérification…" pulsing already on screen, schedule
-        // one retry at +5 s. The window stays open until its natural deadline
-        // so probeRelay (running in parallel) can also defer its first
-        // failure. Window-deferred fails stay out of the streak count.
-        clearResumeRetry();
-        resumeRetryTimer=setTimeout(checkStatus,5000);
-        return;
-      }
-      // v6.0 — radio-warm bypass: during the initial convergence phase
-      // (cold launch / resume, before the first state is confirmed), if
-      // probeRelay has already succeeded, the network is up and a status
-      // fail is high-confidence "server down". 1 fail is enough — the
-      // 2-fail streak is designed for steady-state blips, not for the
-      // user's "is the server up?" wait.
-      if(awaitingInitialConvergence&&radioWarm){
-        clearAdaptiveTick();
-        setOffline();
-        return;
-      }
-      statusFailStreak++;
-      // 2-fail streak (v4.5): mirror of the probeRelay streak. Require 2
-      // consecutive post-window status fails to paint setOffline RED. A
-      // single transient failure (cold-radio Android, network blip past
-      // the 6 s resume window) is absorbed; real outages are detected on
-      // the second consecutive fail at the next adaptive tick.
-      if(statusFailStreak<2){
-        // Adaptive polling (v5.0 B, retuned v5.1, v5.3): instead of
-        // waiting up to 15 s for the next regular tick, schedule a
-        // faster follow-up at +5 s. Pinned to the steady-state
-        // server-dies-mid-tick bound of ~24 s (15 s next tick + 2 s
-        // timeout + 5 s adaptive + 2 s timeout). Cleared on success
-        // or on background.
-        clearAdaptiveTick();
-        adaptiveTickTimer=setTimeout(checkStatus,5000);
-        return;
-      }
-      setOffline();
+      // Relay failed twice → fall back to direct home. Mark the relay
+      // as unreachable so the UI surfaces "Réveil indisponible" even
+      // when the home itself is up.
+      relayReachable=false;
+      fetchHomeDirectly()
+        .then(function(){finish();writeLocalStatus(true,false);setOnline();})
+        .catch(function(){finish();writeLocalStatus(false,false);setOffline();});
     });
-  probeRelay();
 }
 
-// Probe self-hosted relay reachability via GET /health (returns 200 + JSON).
-// The relay sets CORS for this origin so a normal fetch can read the status
-// code — unlike the previous depicus probe which had to use no-cors and was
-// blind to Cloudflare 522s. Here a true non-OK response is detected directly.
-// On every relayReachable flip, repaint UI even when the server is online —
-// setOnline() reads relayReachable once at call time, so a later probe that
-// flips it from false→true while isOnline=true would otherwise leave the
-// "⚠ Relais injoignable" banner stuck until the next 15 s status tick.
-function probeRelay(){
-  if(relayProbing||!wolReady())return;
-  relayProbing=true;
-  var ctrl=new AbortController(),timer=setTimeout(function(){ctrl.abort()},PROBE_TIMEOUT_MS);
-  var applyFlip=function(ok){
-    // v6.0 — probe success ⇒ radio is up. Mark radioWarm and close the
-    // resume window early so subsequent status fails inside the initial
-    // convergence path can flip to red on 1 fail (see checkStatus()).
-    if(ok&&!radioWarm){radioWarm=true;closeResumeWindow();}
-    // Cold-radio defer (v4.3, see resumeUntil comment): during the resume
-    // window the first probe failure is treated as radio-warmup noise.
-    // Stays out of the streak count entirely.
-    if(!ok&&relayReachable&&inResumeWindow())return;
-    if(ok){probeFailStreak=0;}
-    else{probeFailStreak++;}
-    // 2-fail streak (v4.4): a single post-window probe failure is more
-    // often transient (radio still cold past the 6 s window, single packet
-    // loss to GCP, micro-burst on the relay) than a real outage. Require 2
-    // consecutive fails to flip relayReachable → false. Without this, the
-    // server-down + cold-radio scenario shows a false-positive "Réveil
-    // indisponible" red paint at T+12 ish (window has closed by then, but
-    // the retry's probe is still in cold-radio territory). Trade-off: real
-    // relay-down detection delayed by ~30 s (caught at the next tick after
-    // the first post-window fail) — acceptable because the WoL click path
-    // surfaces relay errors immediately via the postWol() catch toast.
-    if(!ok&&relayReachable&&probeFailStreak<2)return;
-    var changed=(ok!==relayReachable);
-    relayReachable=ok;
-    if(!changed)return;
-    if(!isOnline&&!wolSent)setOffline();
-    else setFallbackState();
-  };
-  fetch(config.relay+'/health',{cache:'no-store',signal:ctrl.signal})
-    .then(function(r){clearTimeout(timer);relayProbing=false;applyFlip(r.ok);})
-    .catch(function(){clearTimeout(timer);relayProbing=false;applyFlip(false);});
+// Inject a <link rel="preconnect"> for the configured relay URL as soon
+// as we know it. Saves ~50-150 ms on the first /status fetch by warming
+// the TCP+TLS handshake in parallel with the page paint.
+function ensureRelayPreconnect(){
+  if(!config||!config.relay)return;
+  if(document.querySelector('link[data-relay-preconnect]'))return;
+  try{
+    var origin=new URL(config.relay).origin;
+    var l=document.createElement('link');
+    l.rel='preconnect';l.href=origin;l.crossOrigin='anonymous';
+    l.setAttribute('data-relay-preconnect','');
+    document.head.appendChild(l);
+  }catch(e){}
 }
 
 function applyLinksState(){
@@ -483,11 +445,9 @@ function setFallbackState(){
 function setOnline(){
   isOnline=true;
   hasConfirmedState=true;
-  awaitingInitialConvergence=false;
   stopCountdown();
   clearWolPoll();
   clearWolRetries();
-  clearAdaptiveTick();
   applyLinksState();
   document.getElementById('statusDot').className='status-dot online';
   document.getElementById('statusCard').className='status-card online';
@@ -586,7 +546,10 @@ function postWol(isRetry){
     setOffline();
   }).catch(function(){
     if(isRetry)return;
-    wolSent=false;wolStartTime=0;stopCountdown();clearWolPoll();clearWolRetries();probeRelay();
+    wolSent=false;wolStartTime=0;stopCountdown();clearWolPoll();clearWolRetries();
+    // Flip relayReachable manually — a checkStatus() right now would race
+    // the WoL POST, and we already know the relay just failed.
+    relayReachable=false;
     if(navigator.vibrate)navigator.vibrate(300);
     showToast('⚠ Relais injoignable — utilise le réveil manuel ↓',true,5000);
     setOffline();
@@ -596,7 +559,6 @@ function postWol(isRetry){
 function setOffline(){
   isOnline=false;
   hasConfirmedState=true;
-  awaitingInitialConvergence=false;
   applyLinksState();
   // While a WoL request is being processed, keep the "starting" state — a red
   // "offline" card next to the spinning power button is contradictory.
@@ -643,7 +605,7 @@ function sendWol(){
   wolPollTimer=setInterval(function(){
     if(!wolSent||isOnline){clearWolPoll();return;}
     if(Date.now()-wolStartTime>WOL_TIMEOUT_MS){
-      wolSent=false;wolStartTime=0;clearWolPoll();clearWolRetries();stopCountdown();probeRelay();
+      wolSent=false;wolStartTime=0;clearWolPoll();clearWolRetries();stopCountdown();checkStatus();
       if(navigator.vibrate)navigator.vibrate(300);
       // Surface the timeout — silent failure (vibration + flip to red) used to
       // leave family members wondering whether the app was broken. Toast tells
@@ -706,36 +668,26 @@ if('serviceWorker' in navigator){
   });
 })();
 
-// Pause the 30s status polling while the PWA is hidden (background tab,
+// Pause the 15s status polling while the PWA is hidden (background tab,
 // app switcher, screen off). Resume immediately on return with a fresh
-// check so the user sees a current state without waiting up to 30s.
+// check so the user sees a current state without waiting for the tick.
 document.addEventListener('visibilitychange',function(){
   if(!config)return;
   if(document.hidden){
     if(checkInterval){clearInterval(checkInterval);checkInterval=null;}
-    // No point keeping the adaptive tick alive while hidden — visibilitychange
-    // resume will fire a fresh checkStatus + openResumeWindow anyway.
-    clearAdaptiveTick();
   } else {
     // A fetch in flight when the screen locked may never resolve (Android
     // suspends network) — its `checking=true` flag would then permanently
     // block subsequent checks. Reset it on resume so the next checkStatus()
     // runs unhindered.
     checking=false;
-    relayProbing=false;
-    clearResumeRetry();
-    clearAdaptiveTick();
-    // v6.0 — re-arm radio-warm bypass for this resume cycle: the radio
-    // may have gone cold during background, and the user is again waiting
-    // on a definite answer. Probe-success during the new window will
-    // close it + flip radioWarm=true → 1-fail status flip enabled.
-    radioWarm=false;
-    awaitingInitialConvergence=true;
-    openResumeWindow();
-    // Always force an immediate check on resume, even if checkInterval still
-    // exists — wolPollTimer / checkInterval may have been frozen during the
-    // background phase and the next scheduled tick could be seconds or
-    // minutes away. The user just looked at the screen; give them fresh data.
+    // The local cache (<60 s) gives an instant paint on rapid reopens; the
+    // background checkStatus() below confirms or corrects within ~1 s.
+    var cached=readLocalStatus();
+    if(cached){
+      relayReachable=cached.relayOk!==false;
+      if(cached.up)setOnline();else setOffline();
+    }
     checkStatus();
     if(!checkInterval)checkInterval=setInterval(checkStatus,15000);
     // Countdown text self-corrects from Date.now() on the next tick, but the

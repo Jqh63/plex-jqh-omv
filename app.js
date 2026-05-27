@@ -11,7 +11,12 @@ var hasConfirmedState=false;
 // no races, no defensive layers. ADR `2026-05-27-pwa-plex-jqh-omv-
 // relay-as-oracle` in the operator's private knowledge-base has the
 // full design (alternatives + critères d'acceptance + plan).
-var STATUS_FETCH_TIMEOUT_MS=3000;
+// v7.1 (2026-05-27) bumped 3000 → 5000: family test reported a ~3 s
+// cold open on Android over 4G, right at the timeout boundary. 5 s
+// gives 2 s of headroom for the TCP+TLS handshake on a cold mobile
+// radio without changing UX on the warm path (timeout only fires when
+// the request really hangs).
+var STATUS_FETCH_TIMEOUT_MS=5000;
 // Mini-cache for back-to-back reopens (closing then reopening the PWA
 // within a minute). Kept short on purpose — beyond a minute the user
 // expects a fresh check, and we already learned (v6.0 drop-cache fix)
@@ -281,7 +286,6 @@ function startApp(){
     document.getElementById('fallbackLinkA').href=fbUrl;
   }
   buildLinks();
-  ensureRelayPreconnect();
   clearWolPoll();
   clearWolRetries();
   isOnline=false;wolSent=false;checking=false;relayReachable=true;hasConfirmedState=false;
@@ -399,20 +403,11 @@ function checkStatus(){
     });
 }
 
-// Inject a <link rel="preconnect"> for the configured relay URL as soon
-// as we know it. Saves ~50-150 ms on the first /status fetch by warming
-// the TCP+TLS handshake in parallel with the page paint.
-function ensureRelayPreconnect(){
-  if(!config||!config.relay)return;
-  if(document.querySelector('link[data-relay-preconnect]'))return;
-  try{
-    var origin=new URL(config.relay).origin;
-    var l=document.createElement('link');
-    l.rel='preconnect';l.href=origin;l.crossOrigin='anonymous';
-    l.setAttribute('data-relay-preconnect','');
-    document.head.appendChild(l);
-  }catch(e){}
-}
+// Note: relay preconnect lives in preconnect.js (loaded BEFORE app.js).
+// Running it from here was a no-op for the very first /status fetch —
+// the <link> is added at the same tick as the fetch starts. Moved to
+// a static pre-script in v7.1 so the TCP+TLS handshake begins ~100-
+// 200 ms ahead of fetch() instead of racing it.
 
 function applyLinksState(){
   var off=!isOnline;

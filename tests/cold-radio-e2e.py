@@ -230,32 +230,43 @@ def main():
         )
         r6 = run_scenario(
             p,
-            "v5.0 A: cold-launch with cached online state, server still up",
-            # Cache says online + truth is online. v5.0 paints "En ligne"
-            # immediately from cache, no orange flash. Subsequent checks
-            # confirm — no visible change. Sample at T+1 (immediately after
-            # navigation) MUST already be green.
+            "v6.0: cold-launch server-up converges to green in ~3 s",
+            # No cache (v6.0 dropped it). Server up + probe up. Initial
+            # paint is orange "Vérification..." but both probe and status
+            # succeed fast → green by T+3. Confirms the orange flash is
+            # brief enough to be acceptable as the cache replacement.
             lambda kind, n: "ok",
             sample_delays_s=[1, 3, 6, 14, 36],
             simulate_resume=False,
-            preseed_cache={"isOnline": True, "relayReachable": True},
         )
         r7 = run_scenario(
             p,
-            "v5.0 A: cold-launch with stale cached online, server now down",
-            # Cache says online, but truth is server down (all status fails).
-            # v5.0 paints "En ligne" immediately from cache (T+1 green),
-            # then streak + adaptive tick eventually flip to RED around T+30
-            # when fresh checks confirm. The orange "Vérification..." flash
-            # is avoided thanks to cache hit. RED IS expected eventually.
+            "v6.0 user scenario 1: stale cache ignored, server off → red in ~3 s",
+            # Preseed the LEGACY cache key (v6.0 ignores it). Server is off
+            # (all status fail), relay up (probe ok). v6.0 path: probe ok
+            # closes resume window + radioWarm=true → status fail at T+2
+            # bypasses streak → setOffline IMMEDIATELY. User sees orange
+            # for ~2 s then red, never the misleading green from cache.
+            # Compare with the old behavior: green from cache at T+1, then
+            # ~14 s of stale paint before flipping to red.
             lambda kind, n: "ok" if kind == "probe" else "fail",
-            sample_delays_s=[1, 3, 6, 14, 25, 36, 40],
+            sample_delays_s=[1, 3, 6, 14, 25],
             simulate_resume=False,
             preseed_cache={"isOnline": True, "relayReachable": True},
         )
+        r8 = run_scenario(
+            p,
+            "v6.0 user scenario 2: no cache, server off → red in ~3 s",
+            # Cache expired (no preseed). Server off, relay up. Same fast
+            # convergence path as r7 — the user's "30 min later re-open"
+            # case (cache TTL expired).
+            lambda kind, n: "ok" if kind == "probe" else "fail",
+            sample_delays_s=[1, 3, 6, 14, 25],
+            simulate_resume=False,
+        )
 
     print("\n" + "=" * 72)
-    print("VERDICT (real browser E2E on live PWA v5.0)")
+    print("VERDICT (real browser E2E on live PWA v6.0)")
     print("=" * 72)
     s1_ok = not r1["red_at"] and not r1["warn_at"] and r1["final_green"]
     print(
@@ -283,31 +294,46 @@ def main():
         f"red_at={r4['red_at']} warn_at={r4['warn_at']} final_green={r4['final_green']} "
         f"(want red, no warn, not green) calls={r4['counters']}"
     )
-    # v4.5 fix: cold-launch with server actually UP + cold-radio status noise
-    # must NOT produce a setOffline RED paint. Status stays "Vérification..."
-    # during the defer, then flips to green when the T+30 tick succeeds.
-    s5_ok = not r5["red_at"] and not r5["warn_at"] and r5["final_green"]
+    # v4.5 fix relaxed for v6.0: cold-launch with server actually UP +
+    # cold-radio status noise. v6.0 explicitly trades a brief red flash
+    # here (probe ok → radioWarm bypass on first status fail) for fast
+    # convergence on the realistic server-off user scenarios. The
+    # original v4.5 bug was 'serveur éteint' for ~1 min — v6.0 caps it
+    # to recovery by T+25 once the regular tick re-checks with the (by
+    # now) warm radio. So we keep the assertion light: final green, no
+    # warn, and any red must clear by T+25.
+    red_lingers = bool(r5["red_at"]) and r5["red_at"][-1] > 25
+    s5_ok = not red_lingers and not r5["warn_at"] and r5["final_green"]
     print(
-        f"[{'PASS' if s5_ok else 'FAIL'}] v4.5 cold-launch server-up + cold status | "
+        f"[{'PASS' if s5_ok else 'FAIL'}] v6.0 cold-launch server-up + cold status | "
         f"red_at={r5['red_at']} warn_at={r5['warn_at']} final_green={r5['final_green']} "
-        f"(want no red, no warn, green) calls={r5['counters']}"
+        f"(want final green, no warn, red cleared by T+25) calls={r5['counters']}"
     )
-    # v5.0 A: cached online + server still up. Must be green from the
-    # very first sample (T+1) — no orange "Vérification..." flash.
+    # v6.0: cold-launch server-up converges to green fast (no cache).
+    # The orange "Vérification..." may show at T+1 but green MUST land
+    # by T+3 (probe + status both succeed within a second).
     s6_ok = not r6["red_at"] and not r6["warn_at"] and r6["green_at"] and r6["green_at"][0] <= 3
     print(
-        f"[{'PASS' if s6_ok else 'FAIL'}] v5.0 cached online still-up | "
+        f"[{'PASS' if s6_ok else 'FAIL'}] v6.0 cold-launch server-up | "
         f"red_at={r6['red_at']} green_at={r6['green_at']} final_green={r6['final_green']} "
-        f"(want green at T<=3 from cache) calls={r6['counters']}"
+        f"(want green at T<=3, no red, no warn) calls={r6['counters']}"
     )
-    # v5.0 A: stale cached online + server now down. Must be green
-    # initially (T+1, from cache), then RED eventually (T~25-30) once
-    # streak + adaptive tick reveal truth.
-    s7_ok = bool(r7["green_at"]) and r7["green_at"][0] <= 3 and bool(r7["red_at"]) and not r7["final_green"]
+    # v6.0 user scenario 1: stale cache MUST be ignored. Server is off,
+    # relay up — convergence to red at T~3 via probe-success bypass.
+    # NEVER green (cache mustn't paint a stale online). RED by T+3.
+    s7_ok = not r7["green_at"] and bool(r7["red_at"]) and r7["red_at"][0] <= 3 and not r7["final_green"]
     print(
-        f"[{'PASS' if s7_ok else 'FAIL'}] v5.0 cached online stale (now down) | "
+        f"[{'PASS' if s7_ok else 'FAIL'}] v6.0 user1 stale-cache ignored, server off | "
         f"green_at={r7['green_at']} red_at={r7['red_at']} final_green={r7['final_green']} "
-        f"(want green early from cache, red late from truth) calls={r7['counters']}"
+        f"(want NO green, red at T<=3) calls={r7['counters']}"
+    )
+    # v6.0 user scenario 2: no cache, server off — same fast convergence
+    # to red via probe-success bypass. RED by T+3.
+    s8_ok = not r8["green_at"] and bool(r8["red_at"]) and r8["red_at"][0] <= 3 and not r8["final_green"]
+    print(
+        f"[{'PASS' if s8_ok else 'FAIL'}] v6.0 user2 no-cache, server off | "
+        f"green_at={r8['green_at']} red_at={r8['red_at']} final_green={r8['final_green']} "
+        f"(want NO green, red at T<=3) calls={r8['counters']}"
     )
 
 

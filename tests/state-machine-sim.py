@@ -69,6 +69,9 @@ class FetchOutcome:
     """latency=None means the fetch times out at the caller-defined timeout."""
     latency: Optional[float]
     ok: bool = True
+    # v7.0 — when this FetchOutcome describes a relay /status response, `up`
+    # carries the JSON body's `up` boolean. Pre-v7 apps ignore it.
+    up: bool = True
 
 
 @dataclass
@@ -76,11 +79,20 @@ class Scenario:
     name: str
     status_outcomes: List[FetchOutcome] = field(default_factory=list)
     probe_outcomes: List[FetchOutcome] = field(default_factory=list)
+    # v7.0 — outcomes for the relay's GET /status (single PWA fetch). When
+    # populated, OracleApp runs the scenario; pre-v7 apps are skipped.
+    oracle_outcomes: List[FetchOutcome] = field(default_factory=list)
+    # v7.0 — outcomes for the direct-home fallback fetch (no-cors). Only
+    # consumed by OracleApp after oracle_outcomes are exhausted with failures.
+    home_fallback_outcomes: List[FetchOutcome] = field(default_factory=list)
     resume_at: float = 0.0   # 0 = cold start, >0 = background→foreground at that time
     # v5.0 — if set, app starts with isOnline/relayReachable from the cache
     # and hasConfirmedState=True (so fire_status won't paint "checking").
     # Mirrors what loadCachedState() returns on cold launch.
     cached_state: Optional[dict] = None
+    # v7.0 — localStorage status cache (<60 s window). OracleApp pre-paints
+    # this on cold launch before firing /status.
+    oracle_cache: Optional[dict] = None
     expect_final_online: bool = True
     expect_final_relay_reachable: bool = True
     forbid_red_flash: bool = True
@@ -567,6 +579,151 @@ class LiveApp(FixedApp):
         self.paint("offline")
 
 
+STATUS_FETCH_TIMEOUT = 3.0  # v7.0 — single relay /status fetch budget
+STATUS_LOCAL_TTL = 60.0     # v7.0 — localStorage paint TTL
+
+
+class OracleApp:
+    """v7.0 — relay-as-oracle. One question per cycle, no parallel probes.
+
+    The PWA calls GET /status on the relay and gets back {up, stale, age_s}.
+    1 retry on transient failure. If the relay still fails after the retry,
+    fall back to a no-cors HEAD against the home (loses the relay-up signal
+    but preserves home up/down detection). On cold launch / resume, paint
+    a localStorage cache value if it's < 60 s old, then refresh in the
+    background.
+
+    Compared to LiveApp (v6.0): no probe path, no resume window, no streaks,
+    no adaptive tick, no radio-warm gating. The architectural change (one
+    fetch instead of two) eliminates the race that v4-v6 spent ~150 lines
+    of defensive code patching. See ADR `2026-05-27-pwa-plex-jqh-omv-relay-
+    as-oracle` (operator's private knowledge-base).
+    """
+
+    def __init__(self, clock, scenario):
+        self.clock = clock
+        self.scenario = scenario
+        self.config = True
+        self.is_online = False
+        self.relay_reachable = True
+        self.checking = False
+        self.has_confirmed_state = False
+        self._oracle_i = 0
+        self._fallback_i = 0
+        self.paints = []
+        self.check_interval_id = None
+
+    def paint(self, kind):
+        self.paints.append((round(self.clock.now, 2), kind))
+
+    def _next_oracle(self):
+        if self._oracle_i >= len(self.scenario.oracle_outcomes):
+            # Default: relay says up. Lets short scenarios run out without
+            # the sim hanging on missing outcomes.
+            return FetchOutcome(latency=0.1, ok=True, up=True)
+        out = self.scenario.oracle_outcomes[self._oracle_i]
+        self._oracle_i += 1
+        return out
+
+    def _next_fallback(self):
+        if self._fallback_i >= len(self.scenario.home_fallback_outcomes):
+            return FetchOutcome(latency=0.1, ok=True)
+        out = self.scenario.home_fallback_outcomes[self._fallback_i]
+        self._fallback_i += 1
+        return out
+
+    def _settle(self, up, relay_ok):
+        self.checking = False
+        self.relay_reachable = relay_ok
+        self.has_confirmed_state = True
+        if up:
+            self.is_online = True
+            self.paint("online")
+        else:
+            self.is_online = False
+            self.paint("offline")
+        if not relay_ok:
+            # Mirrors setFallbackState in app.js — "Réveil indisponible" surfaces
+            # whether the home is up (warn) or down (offline-relay-promoted).
+            self.paint("warn-relay" if up else "offline-relay-promoted")
+
+    def fire_status(self):
+        if self.checking or not self.config:
+            return
+        self.checking = True
+        if not self.has_confirmed_state:
+            self.paint("checking")
+        self._try_relay(attempt=0)
+
+    def _try_relay(self, attempt):
+        out = self._next_oracle()
+        if out.latency is None or out.latency >= STATUS_FETCH_TIMEOUT:
+            # Treat as a relay failure: timeout fires at the budget.
+            delay = STATUS_FETCH_TIMEOUT
+            self.clock.after(delay, lambda: self._relay_done(attempt, ok=False, up=None))
+        else:
+            self.clock.after(out.latency, lambda: self._relay_done(attempt, ok=out.ok, up=out.up))
+
+    def _relay_done(self, attempt, ok, up):
+        if ok:
+            self._settle(up=up, relay_ok=True)
+            return
+        if attempt == 0:
+            # 1 retry on transient failure — exactly what the PWA does.
+            self._try_relay(attempt=1)
+            return
+        # 2nd failure → fall back to direct home fetch.
+        out = self._next_fallback()
+        if out.latency is None or out.latency >= STATUS_FETCH_TIMEOUT:
+            self.clock.after(STATUS_FETCH_TIMEOUT, lambda: self._settle(up=False, relay_ok=False))
+        else:
+            self.clock.after(out.latency, lambda: self._settle(up=out.ok, relay_ok=False))
+
+    def start_app(self):
+        # Mirror app.js startApp(): hydrate from localStorage if recent enough.
+        cache = self.scenario.oracle_cache
+        if cache is not None:
+            self.relay_reachable = bool(cache.get("relay_ok", True))
+            if cache.get("up"):
+                self.is_online = True
+                self.has_confirmed_state = True
+                self.paint("online")
+            else:
+                self.is_online = False
+                self.has_confirmed_state = True
+                self.paint("offline")
+        self.fire_status()
+        self.check_interval_id = "tick"
+        self._schedule_next_tick()
+
+    def _schedule_next_tick(self):
+        def tick():
+            if self.check_interval_id != "tick":
+                return
+            self.fire_status()
+            self._schedule_next_tick()
+        self.clock.after(CHECK_INTERVAL, tick)
+
+    def on_resume(self):
+        # The local cache covers back-to-back reopens; same flow as cold launch.
+        self.checking = False
+        if self.scenario.oracle_cache is not None:
+            cache = self.scenario.oracle_cache
+            self.relay_reachable = bool(cache.get("relay_ok", True))
+            if cache.get("up"):
+                self.is_online = True
+                self.has_confirmed_state = True
+                self.paint("online")
+            else:
+                self.is_online = False
+                self.has_confirmed_state = True
+                self.paint("offline")
+        self.fire_status()
+        if self.check_interval_id != "tick":
+            self.check_interval_id = "tick"
+            self._schedule_next_tick()
+
+
 def run(scenario, app_class):
     clock = Clock()
     app = app_class(clock, scenario)
@@ -835,6 +992,89 @@ SCENARIOS = [
         forbid_warn_flash=True,
         horizon=3.5,                        # fence: LiveApp must converge here
     ),
+
+    # ============================================================
+    # v7.0 — OracleApp scenarios.
+    #
+    # Each one populates `oracle_outcomes` (and optionally
+    # `home_fallback_outcomes` / `oracle_cache`). Pre-v7 apps don't run
+    # on these — see main(). The criteria mirror the ADR's "Critères
+    # d'acceptance Phase 2".
+    # ============================================================
+    Scenario(
+        # Happy path: relay says home is up; settle green in <500 ms.
+        name="v7-cold-launch-server-up-fast",
+        oracle_outcomes=[FetchOutcome(0.3, True, up=True)],
+        resume_at=0,
+        expect_final_online=True,
+        expect_final_relay_reachable=True,
+        forbid_red_flash=True,
+        forbid_warn_flash=True,
+        horizon=1.0,
+    ),
+    Scenario(
+        # Relay says home is down; settle red in <500 ms (RED is expected).
+        name="v7-cold-launch-server-off-fast",
+        oracle_outcomes=[FetchOutcome(0.3, True, up=False)],
+        resume_at=0,
+        expect_final_online=False,
+        expect_final_relay_reachable=True,
+        forbid_red_flash=False,             # red IS expected
+        forbid_warn_flash=True,
+        horizon=1.0,
+    ),
+    Scenario(
+        # Relay timeout twice → fallback to direct home (which succeeds) →
+        # green with relay-down warn banner. Detection survives a GCP outage.
+        name="v7-relay-timeout-fallback-home-up",
+        oracle_outcomes=[FetchOutcome(None, False), FetchOutcome(None, False)],
+        home_fallback_outcomes=[FetchOutcome(0.3, True)],
+        resume_at=0,
+        expect_final_online=True,
+        expect_final_relay_reachable=False,   # relay is down — warn banner expected
+        forbid_red_flash=True,                # home is up, no red
+        forbid_warn_flash=False,              # warn IS expected (relay down)
+        horizon=10.0,
+    ),
+    Scenario(
+        # Both relay and home down → red + warn. Full outage from the
+        # PWA's POV; both paints expected.
+        name="v7-relay-timeout-fallback-home-down",
+        oracle_outcomes=[FetchOutcome(None, False), FetchOutcome(None, False)],
+        home_fallback_outcomes=[FetchOutcome(None, False)],
+        resume_at=0,
+        expect_final_online=False,
+        expect_final_relay_reachable=False,
+        forbid_red_flash=False,               # home really down — red expected
+        forbid_warn_flash=False,              # relay also down — warn expected
+        horizon=12.0,
+    ),
+    Scenario(
+        # localStorage cache <60 s + server still up → instant green paint,
+        # then background refresh confirms. No orange flash.
+        name="v7-stale-cache-paint-then-refresh",
+        oracle_outcomes=[FetchOutcome(0.3, True, up=True)],
+        oracle_cache={"up": True, "relay_ok": True},
+        resume_at=0,
+        expect_final_online=True,
+        expect_final_relay_reachable=True,
+        forbid_red_flash=True,
+        forbid_warn_flash=True,
+        forbid_checking_paint=True,           # cache pre-paint → no orange
+        horizon=1.0,
+    ),
+    Scenario(
+        # First /status fetch fails, retry succeeds → green, no red flash
+        # mid-transition.
+        name="v7-status-with-1-retry",
+        oracle_outcomes=[FetchOutcome(None, False), FetchOutcome(0.3, True, up=True)],
+        resume_at=0,
+        expect_final_online=True,
+        expect_final_relay_reachable=True,
+        forbid_red_flash=True,
+        forbid_warn_flash=True,
+        horizon=6.0,
+    ),
 ]
 
 
@@ -844,12 +1084,22 @@ def fmt_paints(paints):
 
 def main():
     print("=" * 72)
-    print("PWA state-machine simulation — Buggy/V43/V44/V45/Fixed(v5)/Live(v6)")
+    print("PWA state-machine simulation — Buggy/V43/V44/V45/Fixed(v5)/Live(v6)/Oracle(v7)")
     print("=" * 72)
     live_pass = True
+    oracle_pass = True
     for scenario in SCENARIOS:
         print(f"\n## {scenario.name}")
-        for cls in (BuggyApp, V43App, V44App, V45App, FixedApp, LiveApp):
+        # Pre-v7 apps run when the scenario defines status_outcomes; OracleApp
+        # runs when oracle_outcomes is defined. Some legacy scenarios cover
+        # both columns (rare); the split here keeps each class on the data it
+        # understands.
+        classes = []
+        if scenario.status_outcomes:
+            classes += [BuggyApp, V43App, V44App, V45App, FixedApp, LiveApp]
+        if scenario.oracle_outcomes:
+            classes.append(OracleApp)
+        for cls in classes:
             res = evaluate(run(scenario, cls))
             ok_red = not res["red"] if scenario.forbid_red_flash else True
             ok_warn = not res["warn"] if scenario.forbid_warn_flash else True
@@ -857,10 +1107,12 @@ def main():
             ok_online = res["final_online"] == scenario.expect_final_online
             ok_relay = res["final_relay"] == scenario.expect_final_relay_reachable
             verdict = "PASS" if (ok_red and ok_warn and ok_checking and ok_online and ok_relay) else "FAIL"
-            # LiveApp is the current target — track its pass/fail unless
-            # the scenario explicitly opts out (allow_live_to_fail=True).
+            # Track the current targets (LiveApp v6.0 + OracleApp v7.0)
+            # unless the scenario explicitly opts out for the legacy column.
             if cls is LiveApp and verdict != "PASS" and not scenario.allow_live_to_fail:
                 live_pass = False
+            if cls is OracleApp and verdict != "PASS":
+                oracle_pass = False
             issues = []
             if not ok_red:
                 issues.append(f"unexpected RED at {[p[0] for p in res['red']]}")
@@ -876,8 +1128,9 @@ def main():
             if issues:
                 print(f"               issues: {'; '.join(issues)}")
     print("\n" + "=" * 72)
-    print(f"LiveApp (v6.0): {'all required scenarios PASS' if live_pass else 'AT LEAST ONE REQUIRED SCENARIO FAILED'}")
-    return 0 if live_pass else 1
+    print(f"LiveApp   (v6.0): {'all required scenarios PASS' if live_pass else 'AT LEAST ONE REQUIRED SCENARIO FAILED'}")
+    print(f"OracleApp (v7.0): {'all required scenarios PASS' if oracle_pass else 'AT LEAST ONE REQUIRED SCENARIO FAILED'}")
+    return 0 if (live_pass and oracle_pass) else 1
 
 
 if __name__ == "__main__":

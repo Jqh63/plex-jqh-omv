@@ -17,6 +17,7 @@ Security model (defense in depth):
 
 Cf. relay/README.md for the full deploy / hardening procedure.
 """
+import asyncio
 import hmac
 import logging
 import os
@@ -24,7 +25,9 @@ import socket
 import threading
 import time
 from collections import defaultdict, deque
+from dataclasses import dataclass
 
+import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -33,6 +36,17 @@ ALLOWED_MAC = os.environ["ALLOWED_MAC"].lower()
 SHARED_TOKEN = os.environ["WOL_TOKEN"]
 TARGET_HOST = os.environ["TARGET_HOST"]
 TARGET_PORT = int(os.environ.get("TARGET_PORT", "9"))
+
+# Status oracle (v7.0). The relay also answers "is the home server up?" so
+# the PWA needs only a single fetch (vs. v6.0's 2 concurrent probes). When
+# STATUS_TARGET_URL is unset, /status returns 503 — the PWA fallback path
+# (direct HEAD to the home host) keeps up/down detection working.
+# Cf. ADR `2026-05-27-pwa-plex-jqh-omv-relay-as-oracle` in the private
+# knowledge-base repo.
+STATUS_TARGET_URL = os.environ.get("STATUS_TARGET_URL")
+STATUS_POLL_TIMEOUT_S = float(os.environ.get("STATUS_POLL_TIMEOUT_S", "2.0"))
+STATUS_CACHE_FRESH_S = int(os.environ.get("STATUS_CACHE_FRESH_S", "5"))
+STATUS_CACHE_STALE_S = int(os.environ.get("STATUS_CACHE_STALE_S", "60"))
 
 # Send the magic packet multiple times to compensate for UDP drop. Each
 # packet is ~100 bytes so 3 sends = ~300 bytes total, negligible. The
@@ -136,6 +150,100 @@ def health_deep():
     return JSONResponse(
         content={"status": "ok" if overall else "degraded", "checks": checks},
         status_code=200 if overall else 503,
+    )
+
+
+# Persistent HTTP/2 client for /status polls. Keeping the same
+# AsyncClient across requests preserves the TCP+TLS session, so a poll
+# after a few minutes of idle still completes in ~50-100 ms (session
+# resumption) instead of a full TLS handshake (1+ s from us-east1 to
+# the home server).
+_http_client: httpx.AsyncClient | None = None
+
+
+@app.on_event("startup")
+async def _status_startup() -> None:
+    global _http_client
+    _http_client = httpx.AsyncClient(http2=True, timeout=STATUS_POLL_TIMEOUT_S)
+
+
+@app.on_event("shutdown")
+async def _status_shutdown() -> None:
+    global _http_client
+    if _http_client is not None:
+        await _http_client.aclose()
+        _http_client = None
+
+
+@dataclass
+class _StatusCache:
+    last_state: bool | None = None
+    # monotonic timestamp of the latest poll *attempt* (success or fail)
+    last_poll_at: float = 0.0
+    # monotonic timestamp of the latest *successful* poll. Tracked
+    # separately so a streak of failures eventually expires the cached
+    # "up" state past STATUS_CACHE_STALE_S.
+    last_success_at: float = 0.0
+
+
+_status_cache = _StatusCache()
+_status_poll_lock = asyncio.Lock()
+
+
+async def _poll_home() -> bool:
+    # HEAD + 1 retry. Anything <500 counts as "the host is serving" — the
+    # exact status (200, 302, 401, 444) doesn't matter for liveness.
+    for attempt in range(2):
+        try:
+            r = await _http_client.head(STATUS_TARGET_URL)
+            return r.status_code < 500
+        except httpx.HTTPError:
+            if attempt == 1:
+                return False
+    return False
+
+
+@app.get("/status")
+async def status():
+    if not STATUS_TARGET_URL:
+        # Config-missing → degraded mode, surface as 503 so the PWA falls
+        # back to its direct-home check path.
+        raise HTTPException(status_code=503, detail="status target not configured")
+
+    now = time.monotonic()
+    if (now - _status_cache.last_poll_at) >= STATUS_CACHE_FRESH_S:
+        async with _status_poll_lock:
+            # Re-check inside the lock: a concurrent request may have
+            # just polled while we were waiting.
+            if (time.monotonic() - _status_cache.last_poll_at) >= STATUS_CACHE_FRESH_S:
+                ok = await _poll_home()
+                polled_at = time.monotonic()
+                _status_cache.last_poll_at = polled_at
+                if ok:
+                    _status_cache.last_state = True
+                    _status_cache.last_success_at = polled_at
+                elif _status_cache.last_state is None:
+                    # First-ever poll failed → bootstrap with a real verdict
+                    # so the cache isn't stuck on "no opinion".
+                    _status_cache.last_state = False
+                    _status_cache.last_success_at = polled_at
+
+    if _status_cache.last_state is None:
+        body = {"up": False, "stale": False, "age_s": None}
+    else:
+        success_age = time.monotonic() - _status_cache.last_success_at
+        if success_age > STATUS_CACHE_STALE_S:
+            # Lost contact for too long — the cached "up" can't be trusted.
+            body = {"up": False, "stale": False, "age_s": None}
+        else:
+            body = {
+                "up": _status_cache.last_state,
+                "stale": success_age > STATUS_CACHE_FRESH_S,
+                "age_s": int(success_age),
+            }
+    return JSONResponse(
+        content=body,
+        headers={"Cache-Control": "public, max-age=5"},
     )
 
 

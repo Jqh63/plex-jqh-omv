@@ -9,7 +9,7 @@ useful for tight iteration on timing logic. The browser E2E
 (`cold-radio-e2e.py`) is the source of truth — this sim is a
 lightweight first line of defence.
 
-Five implementations side-by-side:
+Six implementations side-by-side:
   - BuggyApp: pre-v4.3 logic (justResumed flag, checkStatus retry only)
   - V43App:   v4.3 logic (resumeUntil window, both handlers defer once)
   - V44App:   v4.4 logic (v4.3 + 2-fail probe streak)
@@ -20,6 +20,13 @@ Five implementations side-by-side:
               the status timeout further (3 s → 2 s) so steady-state
               server-dies-mid-tick detection completes ≤ 24 s — see
               v51-steady-state-server-dies-mid-tick for the fenced bound.
+  - LiveApp:  v6.0 logic (FixedApp − cache + probe-success closes resume
+              window AND bypasses the 2-fail status streak). Targets the
+              two user-reported scenarios (cold open with off server) that
+              took 14-16 s to converge to red — now ~2 s. Trade-off: the
+              "server up + cold radio only on the status path" pessimistic
+              scenario flashes red for ~13 s before recovering (acknowledged
+              via allow_live_to_fail=True).
 
 For each scenario we feed sequences of (latency, ok) outcomes for the
 status and probe fetches. latency=None means the fetch times out at
@@ -82,6 +89,11 @@ class Scenario:
     # Use for cached-state scenarios where the prior state should stay
     # visible (no orange "Vérification..." flash).
     forbid_checking_paint: bool = False
+    # v6.0 — when True, LiveApp is allowed to fail this scenario without
+    # failing the overall sim. Use for the pessimistic "server up + cold
+    # radio only on status path" scenario that LiveApp trades a brief red
+    # flash for fast convergence on the realistic user scenarios.
+    allow_live_to_fail: bool = False
     horizon: float = 40.0
 
 
@@ -465,6 +477,96 @@ class FixedApp(V45App):
         self.paint("offline")
 
 
+class LiveApp(FixedApp):
+    """v6.0 logic — FixedApp minus the cache plus radio-warm bypass.
+
+    Two changes from FixedApp:
+
+      A. No cached state load. The 15 min TTL could show stale green from
+         yesterday when the server is now off, and the 14-16 s convergence
+         to red felt broken to family users ("affiche vert alors que le
+         homelab est off"). The "snappy back-to-back open" benefit is
+         judged not worth the cost of misleading paints.
+
+      B. probeRelay success closes the resume window AND marks the radio
+         as confirmed warm. **During the initial cold-launch / resume
+         convergence phase**, a status failure with radio_warm bypasses
+         the 2-fail streak — 1 fail is enough to setOffline. The phase
+         ends as soon as setOnline or setOffline fires for the first time;
+         subsequent ticks fall back to FixedApp's streak protection.
+
+    Why the gating: outside the convergence phase (steady-state ticks),
+    a single transient status fail shouldn't flip the visible state — the
+    streak absorbs it. Inside the convergence phase, the user is waiting
+    on a definite answer and the probe-success signal is a strong enough
+    correlate of network health that one status fail can be trusted.
+
+    Trade-off: the pessimistic "server up but cold radio only fails the
+    status path" scenario flashes red for ~13 s before recovering. Rare
+    in practice (radio is binary — if probe-to-GCP made it through, status-
+    to-home should too) and the daily "server-off morning open" case
+    dominates the user's perception of correctness.
+    """
+
+    LOAD_CACHED_STATE = False  # drop the cache
+
+    def __init__(self, clock, scenario):
+        super().__init__(clock, scenario)
+        self.radio_warm = False
+        self.awaiting_initial_convergence = False
+
+    def start_app(self):
+        # Open the convergence phase before start_app runs (it may call
+        # on_status_ok/fail synchronously via cache load — but we disabled
+        # the cache, so this is mostly belt-and-braces).
+        self.awaiting_initial_convergence = True
+        super().start_app()
+
+    def on_resume(self):
+        self.awaiting_initial_convergence = True
+        self.radio_warm = False  # re-confirm warmth on each resume
+        super().on_resume()
+
+    def on_probe_ok(self):
+        # Probe to relay succeeded → mobile radio is up. Close the resume
+        # window so subsequent status failures aren't auto-deferred.
+        if not self.radio_warm:
+            self.radio_warm = True
+            self.resume_until = 0
+        super().on_probe_ok()
+
+    def on_status_ok(self):
+        super().on_status_ok()
+        self.awaiting_initial_convergence = False
+
+    def on_status_fail(self):
+        if self._in_resume_window():
+            self.clock.after(RESUME_RETRY, lambda: self.fire_status())
+            return
+        if self.awaiting_initial_convergence and self.radio_warm:
+            # Cold-launch / resume convergence path with confirmed warm
+            # radio — 1 fail is enough. Skip the streak (it's for steady-
+            # state blips, not for the user's "is the server up?" wait).
+            self.is_online = False
+            self.has_confirmed_state = True
+            self.awaiting_initial_convergence = False
+            self._clear_adaptive_tick()
+            self.paint("offline")
+            return
+        # Steady-state OR radio not confirmed warm — keep FixedApp's
+        # 2-fail streak protection.
+        self.status_fail_streak += 1
+        if self.status_fail_streak < 2:
+            self._clear_adaptive_tick()
+            self.adaptive_tick_id = "scheduled"
+            self.clock.after(ADAPTIVE_TICK, lambda: self.fire_status())
+            return
+        self.is_online = False
+        self.has_confirmed_state = True
+        self.awaiting_initial_convergence = False
+        self.paint("offline")
+
+
 def run(scenario, app_class):
     clock = Clock()
     app = app_class(clock, scenario)
@@ -593,8 +695,11 @@ SCENARIOS = [
         resume_at=0,                        # cold launch
         expect_final_online=True,           # server actually up — must end green
         expect_final_relay_reachable=True,
-        forbid_red_flash=True,              # RED false positive is THE BUG
+        forbid_red_flash=True,              # RED false positive is THE BUG (v4.5)
         forbid_warn_flash=True,
+        # v6.0 LiveApp trades a brief red flash here for fast convergence
+        # on the realistic user scenarios — see LiveApp docstring.
+        allow_live_to_fail=True,
         horizon=60.0,
     ),
     Scenario(
@@ -611,6 +716,9 @@ SCENARIOS = [
         forbid_red_flash=True,
         forbid_warn_flash=True,
         forbid_checking_paint=True,         # cached state means NO orange flash
+        # v6.0 LiveApp drops the cache by design — it WILL paint checking
+        # here. Trade-off documented in LiveApp docstring.
+        allow_live_to_fail=True,
         horizon=40.0,
     ),
     Scenario(
@@ -630,6 +738,9 @@ SCENARIOS = [
         forbid_red_flash=False,             # red IS expected — server really down
         forbid_warn_flash=True,
         forbid_checking_paint=True,         # no orange flash thanks to cache
+        # v6.0 LiveApp drops the cache — WILL paint checking. The new
+        # v6-morning-open-* scenario covers the LiveApp variant of this.
+        allow_live_to_fail=True,
         horizon=60.0,
     ),
     Scenario(
@@ -653,6 +764,11 @@ SCENARIOS = [
         expect_final_online=True,
         forbid_red_flash=True,
         forbid_warn_flash=True,
+        # v6.0 LiveApp paints red briefly here (probe ok → status fail #1
+        # flips immediately) before recovering green at T=30. Same trade-off
+        # as cold-start-server-up-with-cold-radio-status-noise — see
+        # LiveApp docstring.
+        allow_live_to_fail=True,
         horizon=40.0,
     ),
     Scenario(
@@ -677,7 +793,47 @@ SCENARIOS = [
         forbid_red_flash=False,             # red IS expected — server really down
         forbid_warn_flash=True,
         forbid_checking_paint=True,         # cached state → no orange flash
+        # v6.0 LiveApp drops the cache — WILL paint checking at T=0. Its
+        # convergence is actually faster here (T=17 vs T=24 for FixedApp)
+        # because probe success bypasses the streak when the tick fires.
+        allow_live_to_fail=True,
         horizon=24.5,                       # fence: detection must complete here
+    ),
+    Scenario(
+        # v6.0 user-reported scenario 1: morning open after server has been
+        # off all night. Cold launch with stale cached "online" from
+        # yesterday — FixedApp paints misleading green, takes 14-16 s to
+        # converge to red ("affiche vert alors que le homelab est off").
+        # LiveApp doesn't load the cache (paints orange briefly) AND uses
+        # probe-success to skip the streak — converges in ~2 s to red.
+        # horizon=3.5 fences LiveApp's convergence; FixedApp will fail
+        # this scenario (still showing cached green at horizon).
+        name="v6-morning-open-stale-cache-server-off-converge-fast",
+        status_outcomes=[FetchOutcome(None, False)] * 5,
+        probe_outcomes=[FetchOutcome(0.4, True)] * 5,
+        cached_state={"is_online": True, "relay_reachable": True},
+        resume_at=0,
+        expect_final_online=False,          # truth wins fast for LiveApp
+        expect_final_relay_reachable=True,
+        forbid_red_flash=False,             # red IS expected — server really off
+        forbid_warn_flash=True,
+        horizon=3.5,                        # fence: LiveApp must converge here
+    ),
+    Scenario(
+        # v6.0 user-reported scenario 2: re-open 30 min later, cache TTL
+        # expired (15 min). FixedApp paints orange "Vérification…" for
+        # ~14 s before flipping to red. LiveApp paints orange but converges
+        # in ~2 s thanks to probe-success + streak bypass.
+        name="v6-thirtymin-reopen-no-cache-server-off-converge-fast",
+        status_outcomes=[FetchOutcome(None, False)] * 5,
+        probe_outcomes=[FetchOutcome(0.4, True)] * 5,
+        cached_state=None,                  # cache expired or absent
+        resume_at=0,
+        expect_final_online=False,          # truth wins fast for LiveApp
+        expect_final_relay_reachable=True,
+        forbid_red_flash=False,             # red IS expected — server really off
+        forbid_warn_flash=True,
+        horizon=3.5,                        # fence: LiveApp must converge here
     ),
 ]
 
@@ -688,12 +844,12 @@ def fmt_paints(paints):
 
 def main():
     print("=" * 72)
-    print("PWA state-machine simulation — Buggy/V43/V44/V45/Fixed(v5.0)")
+    print("PWA state-machine simulation — Buggy/V43/V44/V45/Fixed(v5)/Live(v6)")
     print("=" * 72)
-    overall_pass = True
+    live_pass = True
     for scenario in SCENARIOS:
         print(f"\n## {scenario.name}")
-        for cls in (BuggyApp, V43App, V44App, V45App, FixedApp):
+        for cls in (BuggyApp, V43App, V44App, V45App, FixedApp, LiveApp):
             res = evaluate(run(scenario, cls))
             ok_red = not res["red"] if scenario.forbid_red_flash else True
             ok_warn = not res["warn"] if scenario.forbid_warn_flash else True
@@ -701,8 +857,10 @@ def main():
             ok_online = res["final_online"] == scenario.expect_final_online
             ok_relay = res["final_relay"] == scenario.expect_final_relay_reachable
             verdict = "PASS" if (ok_red and ok_warn and ok_checking and ok_online and ok_relay) else "FAIL"
-            if cls is FixedApp and verdict != "PASS":
-                overall_pass = False
+            # LiveApp is the current target — track its pass/fail unless
+            # the scenario explicitly opts out (allow_live_to_fail=True).
+            if cls is LiveApp and verdict != "PASS" and not scenario.allow_live_to_fail:
+                live_pass = False
             issues = []
             if not ok_red:
                 issues.append(f"unexpected RED at {[p[0] for p in res['red']]}")
@@ -718,8 +876,8 @@ def main():
             if issues:
                 print(f"               issues: {'; '.join(issues)}")
     print("\n" + "=" * 72)
-    print(f"FixedApp (v5.0): {'all scenarios PASS' if overall_pass else 'AT LEAST ONE FAIL'}")
-    return 0 if overall_pass else 1
+    print(f"LiveApp (v6.0): {'all required scenarios PASS' if live_pass else 'AT LEAST ONE REQUIRED SCENARIO FAILED'}")
+    return 0 if live_pass else 1
 
 
 if __name__ == "__main__":

@@ -1,48 +1,29 @@
 var config=null,isOnline=false,wolSent=false,checking=false,checkInterval=null;
 var relayReachable=true,relayProbing=false,probeFailStreak=0,statusFailStreak=0;
 var wolStartTime=0,wolPollTimer=null,wolRetryTimers=[];
-// True once setOnline or setOffline has been called this session. Cached
-// state from localStorage counts too (paintCachedState → setOnline/setOffline).
+// True once setOnline or setOffline has been called this session.
 // While false: checkStatus paints the orange "Vérification..." card. While
 // true: checkStatus keeps the prior visual and only spins the refresh icon
 // + updates sub to "vérification…" — avoids the disorienting flash on every
-// 15 s tick (v5.1) when we already have a known state. See v5.0 design notes.
+// 15 s tick when we already have a known state. See v5.0 design notes.
 var hasConfirmedState=false;
+// v6.0 — radio-warm bypass. True once probeRelay has succeeded since the
+// last startApp/onResume. Combined with awaitingInitialConvergence below,
+// lets a single status fail flip to red during cold-launch / resume — the
+// user is waiting for a definite answer and a probe success means the
+// network is up, so a status fail is high-confidence a real server outage.
+var radioWarm=false;
+// v6.0 — true from startApp / on_resume until the FIRST setOnline or
+// setOffline fires. Gates the radio-warm bypass to the initial convergence
+// phase only; steady-state ticks keep the 2-fail streak (absorbs transient
+// blips while the user isn't actively waiting on an answer).
+var awaitingInitialConvergence=false;
 // Adaptive polling timer (v5.0 B, retuned v5.1). Scheduled at +5 s when a
 // post-window status fail is deferred by the streak. Bridges the gap to
 // the next regular 15 s tick when the streak=1 fail lands just after a
 // tick — without losing the cold-radio false-positive protection.
 var adaptiveTickTimer=null;
 function clearAdaptiveTick(){if(adaptiveTickTimer){clearTimeout(adaptiveTickTimer);adaptiveTickTimer=null;}}
-// Last-known-state cache (v5.0 A). Persisted to localStorage on every
-// confirmed setOnline / setOffline / probe flip; loaded on startApp() so
-// the user sees the prior state immediately instead of an orange
-// "Vérification..." card. TTL chosen short enough to avoid showing a stale
-// state for too long: 15 min covers the common "open the PWA several
-// times during a session" flow but expires before the user is likely
-// to trust a cached green that's hours old.
-// v5.3: 5 min → 15 min. The user's typical pattern is "open the PWA
-// several times within a 30 min window" — extending TTL catches more
-// of those re-opens with a fresh cached green/red, avoiding the orange
-// "Vérification..." flash. Trade-off: a server that flips state
-// between re-opens shows the stale paint for ~24 s (steady-state
-// detection bound) before correcting — acceptable.
-var STATE_CACHE_KEY='plex-jqh-omv-state', STATE_CACHE_TTL_MS=900000;
-function saveState(){
-  if(!hasConfirmedState)return;  // never persist unconfirmed state
-  try{localStorage.setItem(STATE_CACHE_KEY,JSON.stringify({
-    isOnline:isOnline,relayReachable:relayReachable,savedAt:Date.now()
-  }))}catch(e){}
-}
-function loadCachedState(){
-  try{
-    var raw=localStorage.getItem(STATE_CACHE_KEY);if(!raw)return null;
-    var d=JSON.parse(raw);
-    if(typeof d!=='object'||d===null)return null;
-    if(typeof d.savedAt!=='number'||Date.now()-d.savedAt>STATE_CACHE_TTL_MS)return null;
-    return {isOnline:!!d.isOnline,relayReachable:!!d.relayReachable};
-  }catch(e){return null;}
-}
 // Cold-radio resume grace window. On Android PWA resume (and on initial
 // load), the first fetch from the foregrounded app often times out while
 // the mobile radio is still warming up. Without a defer, the user sees a
@@ -59,6 +40,10 @@ var resumeUntil=0,resumeRetryTimer=null;
 var RESUME_GRACE_MS=6000;
 function inResumeWindow(){return resumeUntil>0&&Date.now()<resumeUntil;}
 function openResumeWindow(){resumeUntil=Date.now()+RESUME_GRACE_MS;}
+// v6.0 — called by probeRelay() on success: the radio is up, so any
+// subsequent status fail in this convergence cycle is high-confidence
+// "server down" and shouldn't be auto-deferred.
+function closeResumeWindow(){resumeUntil=0;}
 function clearResumeRetry(){if(resumeRetryTimer){clearTimeout(resumeRetryTimer);resumeRetryTimer=null;}}
 // v5.3: 15 s → 5 s. The "Démarrage…" state hung up to 15 s past the
 // actual server-up moment because the next poll hadn't fired yet —
@@ -335,19 +320,8 @@ function startApp(){
   clearResumeRetry();
   clearAdaptiveTick();
   isOnline=false;wolSent=false;checking=false;relayReachable=true;probeFailStreak=0;statusFailStreak=0;hasConfirmedState=false;
+  radioWarm=false;awaitingInitialConvergence=true;
   openResumeWindow();
-  // Paint the last-known state from localStorage if recent — avoids the
-  // disorienting orange "Vérification..." flash on cold launch when we
-  // already have a known state from a previous session. setOnline /
-  // setOffline both flip hasConfirmedState=true, so the subsequent
-  // checkStatus() / probeRelay() will run in background-reverify mode
-  // (keep visual, just spin the refresh icon + update sub).
-  var cached=loadCachedState();
-  if(cached){
-    isOnline=cached.isOnline;
-    relayReachable=cached.relayReachable;
-    if(isOnline)setOnline();else setOffline();
-  }
   checkStatus();
   probeRelay();
   if(checkInterval)clearInterval(checkInterval);
@@ -400,6 +374,17 @@ function checkStatus(){
         resumeRetryTimer=setTimeout(checkStatus,5000);
         return;
       }
+      // v6.0 — radio-warm bypass: during the initial convergence phase
+      // (cold launch / resume, before the first state is confirmed), if
+      // probeRelay has already succeeded, the network is up and a status
+      // fail is high-confidence "server down". 1 fail is enough — the
+      // 2-fail streak is designed for steady-state blips, not for the
+      // user's "is the server up?" wait.
+      if(awaitingInitialConvergence&&radioWarm){
+        clearAdaptiveTick();
+        setOffline();
+        return;
+      }
       statusFailStreak++;
       // 2-fail streak (v4.5): mirror of the probeRelay streak. Require 2
       // consecutive post-window status fails to paint setOffline RED. A
@@ -435,6 +420,10 @@ function probeRelay(){
   relayProbing=true;
   var ctrl=new AbortController(),timer=setTimeout(function(){ctrl.abort()},PROBE_TIMEOUT_MS);
   var applyFlip=function(ok){
+    // v6.0 — probe success ⇒ radio is up. Mark radioWarm and close the
+    // resume window early so subsequent status fails inside the initial
+    // convergence path can flip to red on 1 fail (see checkStatus()).
+    if(ok&&!radioWarm){radioWarm=true;closeResumeWindow();}
     // Cold-radio defer (v4.3, see resumeUntil comment): during the resume
     // window the first probe failure is treated as radio-warmup noise.
     // Stays out of the streak count entirely.
@@ -457,7 +446,6 @@ function probeRelay(){
     if(!changed)return;
     if(!isOnline&&!wolSent)setOffline();
     else setFallbackState();
-    saveState();
   };
   fetch(config.relay+'/health',{cache:'no-store',signal:ctrl.signal})
     .then(function(r){clearTimeout(timer);relayProbing=false;applyFlip(r.ok);})
@@ -495,6 +483,7 @@ function setFallbackState(){
 function setOnline(){
   isOnline=true;
   hasConfirmedState=true;
+  awaitingInitialConvergence=false;
   stopCountdown();
   clearWolPoll();
   clearWolRetries();
@@ -519,7 +508,6 @@ function setOnline(){
     if(navigator.vibrate)navigator.vibrate([100,50,100]);
     wolSent=false;
   }
-  saveState();
 }
 
 function setStarting(){
@@ -608,11 +596,10 @@ function postWol(isRetry){
 function setOffline(){
   isOnline=false;
   hasConfirmedState=true;
+  awaitingInitialConvergence=false;
   applyLinksState();
   // While a WoL request is being processed, keep the "starting" state — a red
-  // "offline" card next to the spinning power button is contradictory. No
-  // saveState() here either: "starting" is a transient state, not a
-  // confirmed setOffline we want to persist.
+  // "offline" card next to the spinning power button is contradictory.
   if(wolSent){setStarting();return;}
   document.getElementById('statusDot').className='status-dot offline';
   document.getElementById('statusCard').className='status-card offline';
@@ -624,7 +611,6 @@ function setOffline(){
     else{btn.className='power-btn unavailable';lbl.textContent='Réveil indisponible — utilise le réveil manuel ↓';lbl.className='power-label unavailable';}
     setFallbackState();
   }
-  saveState();
 }
 
 function sendWol(){
@@ -739,6 +725,12 @@ document.addEventListener('visibilitychange',function(){
     relayProbing=false;
     clearResumeRetry();
     clearAdaptiveTick();
+    // v6.0 — re-arm radio-warm bypass for this resume cycle: the radio
+    // may have gone cold during background, and the user is again waiting
+    // on a definite answer. Probe-success during the new window will
+    // close it + flip radioWarm=true → 1-fail status flip enabled.
+    radioWarm=false;
+    awaitingInitialConvergence=true;
     openResumeWindow();
     // Always force an immediate check on resume, even if checkInterval still
     // exists — wolPollTimer / checkInterval may have been frozen during the

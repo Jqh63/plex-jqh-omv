@@ -1,7 +1,13 @@
-# Hygiène préventive — patterns secrets à ne jamais lire.
-# Aucun de ces fichiers n'existe aujourd'hui dans le repo (le projet
-# n'utilise aucun secret par construction), mais on les liste pour
-# éviter la lecture accidentelle si un futur contributeur en ajoute.
+# Preventive hygiene — secret patterns to never read. Defense in depth.
+#
+# ⚠️ NOT enforced by the Claude Code harness (verified 2026-05-28). The
+# real read-block lives in `.claude/settings.json` under `permissions.deny`
+# ("Read(...)"). This file is kept as intent documentation + a net for any
+# third-party tool that honors it.
+#
+# None of these files exist in the repo today (no secrets by construction),
+# but they are listed to prevent accidental reads if a future contributor
+# adds one.
 
 # Variables d'environnement
 .env

@@ -46,6 +46,7 @@ Parameters are read on first visit and stored in localStorage. The app works imm
 | `title` | no | `Plex jqh omv` | App title shown in the header |
 | `apps` | no | `seerr,plexweb` | Comma-separated list of app keys (see catalog below) |
 | `status` | no | first subdomain app | Override the host used for the status check |
+| `ip` | no | — | IPv4 address of the server, shown on the manual fallback page as an alternative to the domain. When present, the ready-to-paste PowerShell / `wakeonlan` commands use the IP instead of `host` so they keep working during a DNS outage on the domain. |
 
 #### App catalog
 

@@ -64,6 +64,7 @@ function cleanMac(m){return m.replace(/[:\-\s]/g,'').toLowerCase()}
 function validMac(m){return /^[0-9a-f]{12}$/.test(m)}
 function macToColon(m){return m.replace(/(.{2})/g,'$1:').slice(0,-1)}
 function validHost(h){return h.length>0&&h.length<255&&/\./.test(h)&&!h.includes('..')&&/^[a-zA-Z0-9][a-zA-Z0-9\-\.]*[a-zA-Z0-9]$/.test(h)}
+function validIp(s){return /^(\d{1,3}\.){3}\d{1,3}$/.test(s)}
 function cleanRelay(u){return u.replace(/\/+$/,'')}
 function validRelay(u){return /^https:\/\/[a-zA-Z0-9.\-]+(:\d+)?(\/.*)?$/.test(u)&&u.length<255}
 // ms defaults to 3000 — short ack/validation toasts. Pass 5000 for messages
@@ -121,6 +122,7 @@ function readUrlParams(){
   var title=p.get('title');if(title)config.title=title;
   var apps=p.get('apps');if(apps)config.apps=apps;
   var status=p.get('status');if(status&&validHost(status))config.status=status;
+  var ip=p.get('ip');if(ip&&validIp(ip))config.ip=ip;
   storeConfig(config);
   return true;
 }
@@ -283,6 +285,7 @@ function startApp(){
   document.getElementById('fallbackLink').style.display=config.mac?'block':'none';
   if(config.mac){
     var fbUrl='./fallback.html?mac='+encodeURIComponent(config.mac)+'&host='+encodeURIComponent(config.host)+'&port='+encodeURIComponent(config.port||'9');
+    if(config.ip)fbUrl+='&ip='+encodeURIComponent(config.ip);
     document.getElementById('fallbackLinkA').href=fbUrl;
   }
   buildLinks();

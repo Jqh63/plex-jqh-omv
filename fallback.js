@@ -2,6 +2,8 @@ var p = new URLSearchParams(window.location.search);
 var mac = p.get('mac') || '';
 var host = p.get('host') || '';
 var port = p.get('port') || '9';
+var ip = p.get('ip') || '';
+if (ip && !/^(\d{1,3}\.){3}\d{1,3}$/.test(ip)) ip = '';
 
 function formatMac(m) {
   if (!m || !/^[0-9a-fA-F]{12}$/.test(m)) return m || '—';
@@ -12,6 +14,8 @@ var macFmt = formatMac(mac);
 var macEl = document.getElementById('paramMac');
 var hostEl = document.getElementById('paramHost');
 var portEl = document.getElementById('paramPort');
+var ipEl = document.getElementById('paramIp');
+var ipRow = document.getElementById('paramIpRow');
 
 macEl.textContent = macFmt;
 macEl.dataset.copy = macFmt;
@@ -19,12 +23,22 @@ hostEl.textContent = host || '—';
 hostEl.dataset.copy = host || '';
 portEl.textContent = port;
 portEl.dataset.copy = port;
+if (ip) {
+  ipEl.textContent = ip;
+  ipEl.dataset.copy = ip;
+  ipRow.style.display = '';
+}
+
+// When ?ip= is provided, prefer it in the ready-to-copy commands —
+// the param is intentionally meant for cases where the domain is
+// unreachable (DNS outage), so the commands must work as-pasted.
+var targetHost = ip || host;
 
 // Update the Windows PowerShell command
 var psLine = document.getElementById('psLine');
 if (psLine) {
   var psMac = /^[0-9a-fA-F]{12}$/.test(mac) ? mac.toUpperCase() : 'AABBCCDDEEFF';
-  var psHost = host || 'myserver.example.com';
+  var psHost = targetHost || 'myserver.example.com';
   psLine.textContent = "$mac=[byte[]]-split('" + psMac + "' -replace '..','0x$0 ');"
     + "$u=New-Object Net.Sockets.UdpClient;$u.Connect('" + psHost + "'," + port + ");"
     + "$u.Send(([byte[]](,0xFF*6)+($mac*16)),102)|Out-Null";
@@ -34,7 +48,7 @@ if (psLine) {
 var cmdLine = document.getElementById('cmdLine');
 if (cmdLine) {
   var cmdMac = macFmt && macFmt !== '—' ? macFmt : 'AA:BB:CC:DD:EE:FF';
-  var cmdHost = host || 'myserver.example.com';
+  var cmdHost = targetHost || 'myserver.example.com';
   cmdLine.textContent = 'wakeonlan -i ' + cmdHost + ' -p ' + port + ' ' + cmdMac;
 }
 

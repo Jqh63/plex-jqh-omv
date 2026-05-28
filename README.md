@@ -79,7 +79,7 @@ Another user with Jellyfin, no WoL (read-only mode):
 
 ### Option 2 — Manual configuration
 
-Open the app without parameters. A settings form will appear to enter title, domain, MAC address, WoL port, relay URL, shared token, and apps.
+Open the app without parameters. A settings form will appear to enter title, domain, MAC address, WoL port, server IP (optional, used on the manual fallback page when the domain is unreachable), relay URL, shared token, and apps.
 
 ## Status check logic
 

@@ -36,3 +36,6 @@ Thumbs.db
 
 # Test artifacts
 tests/screenshots/
+
+# Claude Code — personal local allow-list (not versioned)
+.claude/settings.local.json

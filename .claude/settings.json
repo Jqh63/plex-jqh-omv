@@ -17,9 +17,6 @@
       "Read(secrets/**)",
       "Read(**/secrets/**)",
       "Read(.git/config)"
-    ],
-    "ask": [
-      "Bash(*)"
     ]
   },
   "hooks": {

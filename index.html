@@ -166,6 +166,11 @@
     <input type="number" id="cfgPort" placeholder="9" autocomplete="off">
   </div>
   <div class="field">
+    <label for="cfgIp">IP du serveur <span style="font-size:11px;font-weight:400;opacity:.6">(optionnel — utilisée en cas de panne DNS sur le domaine)</span></label>
+    <input type="text" id="cfgIp" placeholder="192.0.2.1" autocomplete="off" autocapitalize="off" inputmode="numeric">
+    <span class="hint">Affichée sur la page de réveil manuel comme alternative au domaine</span>
+  </div>
+  <div class="field">
     <label for="cfgRelay">Relais WoL <span style="font-size:11px;font-weight:400;opacity:.6">(optionnel — URL HTTPS)</span></label>
     <input type="url" id="cfgRelay" placeholder="https://wol.exemple.com" autocomplete="off" autocapitalize="off">
     <span class="hint">URL du relais self-hosted qui envoie le magic packet (laisser vide si pas de WoL)</span>

@@ -136,6 +136,7 @@ function showSettings(){
     document.getElementById('cfgMac').value=config.mac||'';
     document.getElementById('cfgHost').value=config.host||'';
     document.getElementById('cfgPort').value=config.port||'9';
+    document.getElementById('cfgIp').value=config.ip||'';
     document.getElementById('cfgRelay').value=config.relay||'';
     document.getElementById('cfgToken').value=config.token||'';
     document.getElementById('cfgApps').value=config.apps||'';
@@ -154,6 +155,7 @@ function saveConfig(){
   var mac=document.getElementById('cfgMac').value.trim();
   var host=document.getElementById('cfgHost').value.trim();
   var port=document.getElementById('cfgPort').value.trim()||'9';
+  var ip=document.getElementById('cfgIp').value.trim();
   var relay=document.getElementById('cfgRelay').value.trim();
   var token=document.getElementById('cfgToken').value.trim();
   var apps=document.getElementById('cfgApps').value.trim();
@@ -165,8 +167,10 @@ function saveConfig(){
   if(isNaN(portNum)||portNum<1||portNum>65535){showToast('⚠ Port invalide (1-65535)',true);return}
   var cleanedRelay='';
   if(relay){cleanedRelay=cleanRelay(relay);if(!validRelay(cleanedRelay)){showToast('⚠ Relais invalide (URL HTTPS)',true);return}}
+  if(ip&&!validIp(ip)){showToast('⚠ IP invalide (format A.B.C.D)',true);return}
   config={host:host,port:String(portNum)};
   if(cleaned)config.mac=cleaned;
+  if(ip)config.ip=ip;
   if(cleanedRelay)config.relay=cleanedRelay;
   if(token)config.token=token;
   if(title)config.title=title;

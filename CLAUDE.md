@@ -159,6 +159,17 @@ code. Don't undo them without re-bisecting:
   caller. **Any other future backend stays in its own repo** — this
   exception is not a precedent.
 
+## Claude Code tooling (.claude/)
+
+Repo-specific Claude Code skills live under `.claude/skills/`:
+
+- **deploy-relay** — deploy the WoL relay (`relay/`) to the always-free
+  VM via the GitOps channel; use after changing anything under `relay/`.
+- **release-pwa** — bump the visible version marker + service-worker
+  `CACHE` so installed users auto-update; use on every UX release.
+- **test-pwa** — run the two-layer test suite (Python state-machine sim
+  + Playwright E2E); use when changing status/probe timing in `app.js`.
+
 ## When in doubt
 
 Ask the author rather than guessing. The repo is small and context

@@ -43,13 +43,24 @@ TARGET_PORT = int(os.environ.get("TARGET_PORT", "9"))
 # (direct HEAD to the home host) keeps up/down detection working.
 # Cf. ADR `2026-05-27-pwa-plex-jqh-omv-relay-as-oracle`.
 STATUS_TARGET_URL = os.environ.get("STATUS_TARGET_URL")
-# 1.5 s default (was 2.0): family test on an Android cold open observed
-# a ~3 s "down" verdict, dominated by 2 × 2.0 s timeout when the home is
-# unreachable (NAT box silently drops packets without TCP RST). 1.5 s is
-# still 10 × the typical GCP-to-home RTT, leaves headroom for Plex
-# restarts (~500-1500 ms), and keeps the same retry budget. Override
-# via env var on links with unusually long latencies.
-STATUS_POLL_TIMEOUT_S = float(os.environ.get("STATUS_POLL_TIMEOUT_S", "1.5"))
+# Two timeouts because the first poll after long idle (hours) needs more
+# budget than warm polls: the persistent httpx client's TLS session dies
+# past kernel keepalive (~minutes), and the next /status request must
+# re-handshake — typically 1-2 s GCP-to-home cold. A flat 1.5 s left this
+# path failing as a false-negative "down" on PWA reopen after a long
+# background spell (incident 2026-05-30, ~9 h gap → first attempt timed
+# out, retry too tight to recover within the warmed socket window).
+#
+#   FIRST: 3.0 s — fits a full TLS handshake + HEAD response on a cold
+#   socket, while still falling short of the PWA's 5 s STATUS_FETCH_TIMEOUT_MS.
+#
+#   RETRY: 1.5 s — once a connection is up, polls are ~50-150 ms (RTT to
+#   home), so 1.5 s is 10× headroom. Keeps the "home off" verdict snappy
+#   (~4.5 s worst case = FIRST + RETRY) rather than 6 s with a flat 3 s.
+#
+# Override either via env var on links with unusual latencies.
+STATUS_POLL_FIRST_TIMEOUT_S = float(os.environ.get("STATUS_POLL_FIRST_TIMEOUT_S", "3.0"))
+STATUS_POLL_RETRY_TIMEOUT_S = float(os.environ.get("STATUS_POLL_RETRY_TIMEOUT_S", "1.5"))
 STATUS_CACHE_FRESH_S = int(os.environ.get("STATUS_CACHE_FRESH_S", "5"))
 STATUS_CACHE_STALE_S = int(os.environ.get("STATUS_CACHE_STALE_S", "60"))
 
@@ -169,7 +180,9 @@ _http_client: httpx.AsyncClient | None = None
 @app.on_event("startup")
 async def _status_startup() -> None:
     global _http_client
-    _http_client = httpx.AsyncClient(http2=True, timeout=STATUS_POLL_TIMEOUT_S)
+    # The retry timeout is the client default (warm-path budget); _poll_home()
+    # overrides per call to give the first attempt the cold-handshake budget.
+    _http_client = httpx.AsyncClient(http2=True, timeout=STATUS_POLL_RETRY_TIMEOUT_S)
 
 
 @app.on_event("shutdown")
@@ -198,12 +211,16 @@ _status_poll_lock = asyncio.Lock()
 async def _poll_home() -> bool:
     # HEAD + 1 retry. Anything <500 counts as "the host is serving" — the
     # exact status (200, 302, 401, 444) doesn't matter for liveness.
-    for attempt in range(2):
+    # First attempt gets the cold-handshake budget; retry uses the warm
+    # one (by then the TCP+TLS session is up even if the first response
+    # was aborted — the handshake bytes hit the wire before the cancel).
+    timeouts = (STATUS_POLL_FIRST_TIMEOUT_S, STATUS_POLL_RETRY_TIMEOUT_S)
+    for attempt, timeout in enumerate(timeouts):
         try:
-            r = await _http_client.head(STATUS_TARGET_URL)
+            r = await _http_client.head(STATUS_TARGET_URL, timeout=timeout)
             return r.status_code < 500
         except httpx.HTTPError:
-            if attempt == 1:
+            if attempt == len(timeouts) - 1:
                 return False
     return False
 

@@ -44,7 +44,7 @@ each owned by the relevant service user:
 - `/etc/wol-relay.env` (mode `0640 root:wol`) — FastAPI variables:
   `ALLOWED_MAC`, `WOL_TOKEN`, `TARGET_HOST`, `TARGET_PORT`. Optional:
   `STATUS_TARGET_URL` (enables `/status`),
-  `STATUS_POLL_TIMEOUT_S`/`STATUS_CACHE_FRESH_S`/`STATUS_CACHE_STALE_S`
+  `STATUS_POLL_FIRST_TIMEOUT_S`/`STATUS_POLL_RETRY_TIMEOUT_S`/`STATUS_CACHE_FRESH_S`/`STATUS_CACHE_STALE_S`
   (tuning).
 - `/etc/caddy/wol-relay.env` (mode `0640 root:caddy`) — Caddy
   variables referenced in the Caddyfile as `{$VAR}`: `LE_EMAIL`,

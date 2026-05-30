@@ -600,7 +600,7 @@ class OracleApp:
     no adaptive tick, no radio-warm gating. The architectural change (one
     fetch instead of two) eliminates the race that v4-v6 spent ~150 lines
     of defensive code patching. See ADR `2026-05-27-pwa-plex-jqh-omv-relay-
-    as-oracle` (operator's private knowledge-base).
+    as-oracle`.
     """
 
     def __init__(self, clock, scenario):

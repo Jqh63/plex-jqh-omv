@@ -689,6 +689,15 @@ document.addEventListener('visibilitychange',function(){
     if(cached){
       relayReachable=cached.relayOk!==false;
       if(cached.up)setOnline();else setOffline();
+    } else {
+      // Stale cache (> STATUS_LOCAL_TTL_MS in background) — the on-screen
+      // state may no longer reflect reality after a long absence. Reset
+      // hasConfirmedState so the upcoming checkStatus() repaints the
+      // orange "Vérification…" card instead of keeping the stale green/red
+      // visible during the re-probe. Without this, the user returning after
+      // hours sees the prior state until the fetch resolves (3-10 s),
+      // sometimes the opposite of reality.
+      hasConfirmedState=false;
     }
     checkStatus();
     if(!checkInterval)checkInterval=setInterval(checkStatus,15000);

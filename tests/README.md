@@ -38,20 +38,13 @@ python3 tests/state-machine-sim.py
 # expect: FixedApp (v4.3+): all scenarios PASS
 ```
 
-Real-browser E2E — needs Playwright + Chromium (pre-installed in the
-author's code-server sandbox via
-[knowledge-base install-tooling.sh](https://github.com/Jqh63/knowledge-base/blob/main/code-server/init/install-tooling.sh)):
-
-```bash
-python3 tests/cold-radio-e2e.py
-# expect: 3/3 PASS — cold-radio fail-then-OK / server down / relay down
-```
-
-For a fresh clone elsewhere:
+Real-browser E2E — needs Playwright + Chromium:
 
 ```bash
 python3 -m pip install --user playwright
 python3 -m playwright install chromium
+python3 tests/cold-radio-e2e.py
+# expect: 3/3 PASS — cold-radio fail-then-OK / server down / relay down
 ```
 
 ## What the E2E actually does

@@ -9,8 +9,8 @@ var hasConfirmedState=false;
 // (GET /status → {up, stale, age_s}) instead of running a probe + a
 // direct home check in parallel. One cold-radio window instead of two,
 // no races, no defensive layers. ADR `2026-05-27-pwa-plex-jqh-omv-
-// relay-as-oracle` in the operator's private knowledge-base has the
-// full design (alternatives + critères d'acceptance + plan).
+// relay-as-oracle` has the full design (alternatives + critères
+// d'acceptance + plan).
 // v7.1 (2026-05-27) bumped 3000 → 5000: family test reported a ~3 s
 // cold open on Android over 4G, right at the timeout boundary. 5 s
 // gives 2 s of headroom for the TCP+TLS handshake on a cold mobile

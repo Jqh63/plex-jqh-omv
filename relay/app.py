@@ -41,8 +41,7 @@ TARGET_PORT = int(os.environ.get("TARGET_PORT", "9"))
 # the PWA needs only a single fetch (vs. v6.0's 2 concurrent probes). When
 # STATUS_TARGET_URL is unset, /status returns 503 — the PWA fallback path
 # (direct HEAD to the home host) keeps up/down detection working.
-# Cf. ADR `2026-05-27-pwa-plex-jqh-omv-relay-as-oracle` in the private
-# knowledge-base repo.
+# Cf. ADR `2026-05-27-pwa-plex-jqh-omv-relay-as-oracle`.
 STATUS_TARGET_URL = os.environ.get("STATUS_TARGET_URL")
 # 1.5 s default (was 2.0): family test on an Android cold open observed
 # a ~3 s "down" verdict, dominated by 2 × 2.0 s timeout when the home is

@@ -345,14 +345,21 @@ function fetchOnce(url,opts){
 
 function fetchStatusFromRelay(){
   // Single shape we trust: HTTP 200 with a JSON body that has an "up"
-  // boolean. Anything else (5xx, 503 "status target not configured",
-  // network error) is treated as a relay failure and triggers the
-  // fallback path.
+  // boolean. Anything else triggers the fallback path — but we tag *how*
+  // it failed so checkStatus() can tell two very different cases apart:
+  //   - rejection with .answered=true → the relay returned an HTTP response
+  //     (503 "status target not configured", 404 legacy, 5xx, 200-bad-shape).
+  //     The relay process is alive and /wol still works; only the status
+  //     oracle is degraded. Keep the wake button enabled.
+  //   - rejection WITHOUT .answered → transport failure (timeout / network /
+  //     DNS): the relay is genuinely unreachable, /wol would fail too.
+  // See ADR 2026-05-27 (relay-as-oracle) addendum.
+  var answered=function(msg){var e=new Error(msg);e.answered=true;return Promise.reject(e);};
   return fetchOnce(config.relay+'/status').then(function(r){
-    if(!r.ok)return Promise.reject(new Error('HTTP '+r.status));
-    return r.json();
+    if(!r.ok)return answered('HTTP '+r.status);
+    return r.json().catch(function(){return answered('bad json');});
   }).then(function(j){
-    if(!j||typeof j.up!=='boolean')return Promise.reject(new Error('bad shape'));
+    if(!j||typeof j.up!=='boolean')return answered('bad shape');
     return j;
   });
 }
@@ -391,22 +398,30 @@ function checkStatus(){
   }
 
   fetchStatusFromRelay()
-    .catch(function(){return fetchStatusFromRelay();})   // 1 retry on transient failures
+    .catch(function(err){
+      // Retry only transport failures — an HTTP answer (503/404/bad-shape) is
+      // deterministic, retrying it just wastes a round-trip before fallback.
+      if(err&&err.answered)return Promise.reject(err);
+      return fetchStatusFromRelay();
+    })
     .then(function(j){
-      // Happy path: relay answered, trust its verdict.
+      // Happy path: relay answered with a valid verdict, trust it.
       finish();
       relayReachable=true;
       writeLocalStatus(j.up,true);
       if(j.up)setOnline();else setOffline();
     })
-    .catch(function(){
-      // Relay failed twice → fall back to direct home. Mark the relay
-      // as unreachable so the UI surfaces "Réveil indisponible" even
-      // when the home itself is up.
-      relayReachable=false;
+    .catch(function(err){
+      // /status unusable → fall back to a direct home check for up/down.
+      // But only mark the relay UNREACHABLE (→ "Réveil indisponible", wake
+      // button disabled) on a transport failure. If the relay actually
+      // answered (degraded oracle, e.g. STATUS_TARGET_URL unset), it's alive
+      // and /wol still works — keep relayReachable=true so the button stays
+      // enabled; postWol() will surface any real WoL failure on its own.
+      relayReachable=!!(err&&err.answered);
       fetchHomeDirectly()
-        .then(function(){finish();writeLocalStatus(true,false);setOnline();})
-        .catch(function(){finish();writeLocalStatus(false,false);setOffline();});
+        .then(function(){finish();writeLocalStatus(true,relayReachable);setOnline();})
+        .catch(function(){finish();writeLocalStatus(false,relayReachable);setOffline();});
     });
 }
 

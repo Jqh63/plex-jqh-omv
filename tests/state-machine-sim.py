@@ -72,6 +72,14 @@ class FetchOutcome:
     # v7.0 — when this FetchOutcome describes a relay /status response, `up`
     # carries the JSON body's `up` boolean. Pre-v7 apps ignore it.
     up: bool = True
+    # v7.5 — for a FAILED relay /status outcome (ok=False), distinguishes an
+    # *answered* failure (the relay returned an HTTP response: 503/404/5xx/bad
+    # shape → relay alive, /wol still works) from a *transport* failure
+    # (timeout/network → relay unreachable). OracleApp keeps the relay
+    # reachable on an answered failure (wake button stays enabled) and skips
+    # the retry (deterministic). Ignored when ok=True. See ADR 2026-05-27
+    # addendum + app.js fetchStatusFromRelay().
+    answered: bool = False
 
 
 @dataclass
@@ -661,26 +669,36 @@ class OracleApp:
     def _try_relay(self, attempt):
         out = self._next_oracle()
         if out.latency is None or out.latency >= STATUS_FETCH_TIMEOUT:
-            # Treat as a relay failure: timeout fires at the budget.
+            # Timeout = transport failure (answered=False) at the budget.
             delay = STATUS_FETCH_TIMEOUT
-            self.clock.after(delay, lambda: self._relay_done(attempt, ok=False, up=None))
+            self.clock.after(delay, lambda: self._relay_done(attempt, ok=False, up=None, answered=False))
         else:
-            self.clock.after(out.latency, lambda: self._relay_done(attempt, ok=out.ok, up=out.up))
+            self.clock.after(out.latency, lambda: self._relay_done(attempt, ok=out.ok, up=out.up, answered=out.answered))
 
-    def _relay_done(self, attempt, ok, up):
+    def _relay_done(self, attempt, ok, up, answered):
         if ok:
             self._settle(up=up, relay_ok=True)
             return
+        if answered:
+            # v7.5 — the relay returned an HTTP response (degraded oracle, e.g.
+            # 503 STATUS_TARGET_URL unset). It's alive and /wol works: skip the
+            # retry (deterministic) and fall back to the direct-home check while
+            # KEEPING the relay reachable (wake button stays enabled, no warn).
+            self._fallback(relay_ok=True)
+            return
         if attempt == 0:
-            # 1 retry on transient failure — exactly what the PWA does.
+            # 1 retry on a transient TRANSPORT failure — exactly what the PWA does.
             self._try_relay(attempt=1)
             return
-        # 2nd failure → fall back to direct home fetch.
+        # 2nd transport failure → fall back to direct home, relay unreachable.
+        self._fallback(relay_ok=False)
+
+    def _fallback(self, relay_ok):
         out = self._next_fallback()
         if out.latency is None or out.latency >= STATUS_FETCH_TIMEOUT:
-            self.clock.after(STATUS_FETCH_TIMEOUT, lambda: self._settle(up=False, relay_ok=False))
+            self.clock.after(STATUS_FETCH_TIMEOUT, lambda: self._settle(up=False, relay_ok=relay_ok))
         else:
-            self.clock.after(out.latency, lambda: self._settle(up=out.ok, relay_ok=False))
+            self.clock.after(out.latency, lambda: self._settle(up=out.ok, relay_ok=relay_ok))
 
     def start_app(self):
         # Mirror app.js startApp(): hydrate from localStorage if recent enough.
@@ -1079,6 +1097,41 @@ SCENARIOS = [
         forbid_red_flash=True,
         forbid_warn_flash=True,
         horizon=6.0,
+    ),
+    Scenario(
+        # v7.5 A1 fix — the relay ANSWERS /status with a degraded verdict
+        # (503 when STATUS_TARGET_URL is unset, 404 on a legacy relay, …).
+        # The relay is alive and /wol still works, so it must NOT be marked
+        # unreachable: no "Réveil indisponible"/warn banner, wake button stays
+        # enabled. Server is up → the direct-home fallback confirms green.
+        name="v7-relay-answered-degraded-server-up",
+        oracle_outcomes=[FetchOutcome(0.3, ok=False, answered=True),
+                         FetchOutcome(0.3, ok=False, answered=True)],
+        home_fallback_outcomes=[FetchOutcome(0.3, True)],
+        resume_at=0,
+        expect_final_online=True,
+        expect_final_relay_reachable=True,   # KEY: relay answered → still reachable
+        forbid_red_flash=True,
+        forbid_warn_flash=True,              # KEY: no false relay-down warn
+        horizon=2.0,
+    ),
+    Scenario(
+        # v7.5 A1 fix — same degraded /status, but the home server is actually
+        # down. The wake button must stay ENABLED (relay_reachable=True) so the
+        # user can still fire a WoL; red is expected (server down) but NOT the
+        # warn banner (the relay isn't down, only its oracle is). This is the
+        # case the author hit IRL: "red relay + WoL unavailable while it was
+        # actually fine".
+        name="v7-relay-answered-degraded-server-down",
+        oracle_outcomes=[FetchOutcome(0.3, ok=False, answered=True),
+                         FetchOutcome(0.3, ok=False, answered=True)],
+        home_fallback_outcomes=[FetchOutcome(None, False)],
+        resume_at=0,
+        expect_final_online=False,
+        expect_final_relay_reachable=True,   # KEY: relay alive → button stays enabled
+        forbid_red_flash=False,              # server really down → red expected
+        forbid_warn_flash=True,              # KEY: relay isn't down → no warn
+        horizon=7.0,
     ),
 ]
 

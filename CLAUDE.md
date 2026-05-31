@@ -153,11 +153,17 @@ code. Don't undo them without re-bisecting:
   [`relay/`](relay/)). It is the only server-side component the PWA
   strictly depends on, and the wire contract between the two is
   small and stable enough that they evolve together. **No applicative
-  coupling beyond the HTTP contract** — the PWA must keep working
-  against any backend that honours `POST /wol` + `GET /health`, and
-  the relay must keep working without assuming anything about the
-  caller. **Any other future backend stays in its own repo** — this
-  exception is not a precedent.
+  coupling beyond the HTTP contract** — the runtime contract is
+  `POST /wol` + `GET /status` (since v7.0 the status path is the relay
+  oracle; `GET /health` / `/health/deep` are only hit by the settings
+  "Tester le relais" button). A relay that answers `/status` with a
+  degraded verdict (e.g. 503 when `STATUS_TARGET_URL` is unset) must not
+  cost the PWA its wake button: app.js treats an *answered* `/status`
+  failure as "relay alive, oracle degraded" and keeps WoL enabled, vs. a
+  *transport* failure which marks the relay unreachable. The relay must
+  keep working without assuming anything about the caller. **Any other
+  future backend stays in its own repo** — this exception is not a
+  precedent.
 
 ## Claude Code tooling (.claude/)
 

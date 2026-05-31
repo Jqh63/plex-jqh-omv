@@ -45,6 +45,7 @@ def capture_state(page):
         cardClass: document.getElementById('statusCard').className,
         fallbackClass: document.getElementById('fallbackLink') ? document.getElementById('fallbackLink').className : '',
         fallbackText: document.getElementById('fallbackLinkA') ? document.getElementById('fallbackLinkA').innerText : '',
+        powerClass: document.getElementById('powerBtn') ? document.getElementById('powerBtn').className : '',
     })"""
     )
 
@@ -62,6 +63,12 @@ def is_warn(s):
 
 def is_green(s):
     return "online" in s["dotClass"] and "online" in s["cardClass"]
+
+
+def is_wol_disabled(s):
+    # The wake button goes to "power-btn unavailable" only when relayReachable
+    # is false. A1 fix: an *answered* /status failure must keep it enabled.
+    return "unavailable" in s["powerClass"]
 
 
 def run_scenario(p, name, relay_plan, home_plan, sample_delays_s, preseed_cache=None):
@@ -103,6 +110,18 @@ def run_scenario(p, name, relay_plan, home_plan, sample_delays_s, preseed_cache=
                         "Access-Control-Allow-Origin": "*",
                     },
                     body='{"up": false, "stale": false, "age_s": null}',
+                )
+            elif verdict == "degraded":
+                # Relay ANSWERS with a degraded oracle (e.g. STATUS_TARGET_URL
+                # unset → 503). Relay is alive, /wol works — A1 fix: the PWA
+                # must keep it reachable and fall back to direct-home.
+                route.fulfill(
+                    status=503,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Access-Control-Allow-Origin": "*",
+                    },
+                    body='{"detail": "status target not configured"}',
                 )
             else:  # 'fail'
                 route.abort()
@@ -169,6 +188,7 @@ def run_scenario(p, name, relay_plan, home_plan, sample_delays_s, preseed_cache=
         "final_green": is_green(final_state),
         "final_red": is_red(final_state),
         "final_warn": is_warn(final_state),
+        "final_wol_disabled": is_wol_disabled(final_state),
         "counters": dict(counters),
     }
 
@@ -222,6 +242,25 @@ def main():
             home_plan=lambda n: "ok",
             sample_delays_s=[1, 5, 8],
         )
+        r7 = run_scenario(
+            p,
+            "v7-relay-answered-degraded-server-up",
+            # Relay answers 503 (degraded oracle) → fall back to home (up).
+            # A1 fix: green, NO warn banner, wake button stays enabled.
+            relay_plan=lambda n: "degraded",
+            home_plan=lambda n: "ok",
+            sample_delays_s=[1, 3],
+        )
+        r8 = run_scenario(
+            p,
+            "v7-relay-answered-degraded-server-down",
+            # Relay answers 503, home actually down. A1 fix: red (server down)
+            # but NO warn and the wake button stays ENABLED so the user can
+            # still fire a WoL — this is the IRL case that motivated the fix.
+            relay_plan=lambda n: "degraded",
+            home_plan=lambda n: "fail",
+            sample_delays_s=[1, 3],
+        )
 
     print("\n" + "=" * 72)
     print("VERDICT (real browser E2E on live PWA v7.0)")
@@ -268,6 +307,26 @@ def main():
     print(
         f"[{'PASS' if s6_ok else 'FAIL'}] v7-status-with-1-retry | "
         f"green_at={r6['green_at']} red_at={r6['red_at']} (want final green, no red) calls={r6['counters']}"
+    )
+
+    # A1 fix — degraded oracle, home up: green, NO warn, button stays enabled.
+    s7_ok = r7["final_green"] and not r7["warn_at"] and not r7["red_at"] and not r7["final_wol_disabled"]
+    print(
+        f"[{'PASS' if s7_ok else 'FAIL'}] v7-relay-answered-degraded-server-up | "
+        f"green_at={r7['green_at']} warn_at={r7['warn_at']} wol_disabled={r7['final_wol_disabled']} "
+        f"(want green, no warn, WoL enabled) calls={r7['counters']}"
+    )
+
+    # A1 fix — degraded oracle, home down: red but NO warn, button stays
+    # ENABLED (the IRL "red relay + WoL gone while it was fine" case).
+    s8_ok = (
+        r8["final_red"] and not r8["final_warn"] and not r8["warn_at"]
+        and not r8["final_green"] and not r8["final_wol_disabled"]
+    )
+    print(
+        f"[{'PASS' if s8_ok else 'FAIL'}] v7-relay-answered-degraded-server-down | "
+        f"red_at={r8['red_at']} warn_at={r8['warn_at']} wol_disabled={r8['final_wol_disabled']} "
+        f"(want red, no warn, WoL enabled) calls={r8['counters']}"
     )
 
 

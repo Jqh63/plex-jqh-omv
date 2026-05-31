@@ -236,6 +236,50 @@ async def _poll_home() -> bool:
     return False
 
 
+async def _poll_home_and_update() -> None:
+    # Run one poll and fold the verdict into the cache. Shared by the blocking
+    # path (cold/expired cache) and the background SWR refresh. Caller holds
+    # _status_poll_lock.
+    ok = await _poll_home()
+    polled_at = time.monotonic()
+    _status_cache.last_poll_at = polled_at
+    if ok:
+        _status_cache.last_state = True
+        _status_cache.last_success_at = polled_at
+    elif _status_cache.last_state is None:
+        # First-ever poll failed → bootstrap with a real verdict so the cache
+        # isn't stuck on "no opinion".
+        _status_cache.last_state = False
+        _status_cache.last_success_at = polled_at
+
+
+async def _background_refresh() -> None:
+    # SWR refresh: poll under the lock, swallow everything (a failed poll is
+    # already absorbed by _poll_home returning False; we never want a refresh
+    # error to surface as an unhandled task exception).
+    try:
+        async with _status_poll_lock:
+            if (time.monotonic() - _status_cache.last_poll_at) >= STATUS_CACHE_FRESH_S:
+                await _poll_home_and_update()
+    except Exception:
+        logger.exception("status background refresh failed")
+
+
+_bg_refresh_task: "asyncio.Task | None" = None
+
+
+def _maybe_background_refresh() -> None:
+    # Fire-and-forget a single background refresh. Holding the reference keeps
+    # the task alive (an un-referenced task can be GC'd mid-flight) and the
+    # done()/locked() guards stop a second one from stacking under load.
+    global _bg_refresh_task
+    if _bg_refresh_task is not None and not _bg_refresh_task.done():
+        return
+    if _status_poll_lock.locked():
+        return
+    _bg_refresh_task = asyncio.create_task(_background_refresh())
+
+
 @app.get("/status")
 async def status():
     if not STATUS_TARGET_URL:
@@ -244,22 +288,27 @@ async def status():
         raise HTTPException(status_code=503, detail="status target not configured")
 
     now = time.monotonic()
+    have_value = _status_cache.last_state is not None
+    success_age = (now - _status_cache.last_success_at) if have_value else None
+    # "Usable" = a value we can serve without lying: present and not past the
+    # stale ceiling. Past STATUS_CACHE_STALE_S we have no trustworthy value.
+    usable = have_value and success_age is not None and success_age <= STATUS_CACHE_STALE_S
+
     if (now - _status_cache.last_poll_at) >= STATUS_CACHE_FRESH_S:
-        async with _status_poll_lock:
-            # Re-check inside the lock: a concurrent request may have
-            # just polled while we were waiting.
-            if (time.monotonic() - _status_cache.last_poll_at) >= STATUS_CACHE_FRESH_S:
-                ok = await _poll_home()
-                polled_at = time.monotonic()
-                _status_cache.last_poll_at = polled_at
-                if ok:
-                    _status_cache.last_state = True
-                    _status_cache.last_success_at = polled_at
-                elif _status_cache.last_state is None:
-                    # First-ever poll failed → bootstrap with a real verdict
-                    # so the cache isn't stuck on "no opinion".
-                    _status_cache.last_state = False
-                    _status_cache.last_success_at = polled_at
+        if usable:
+            # Stale-while-revalidate: serve the (slightly stale) cached verdict
+            # NOW and refresh in the background. The PWA never waits behind the
+            # home poll — which on a cold relay→home leg can take up to
+            # STATUS_POLL_FIRST_TIMEOUT_S + RETRY (~4.5 s) and push the PWA's own
+            # 5 s fetch into a false-negative timeout (red flash on a server
+            # that's actually up). See ADR 2026-05-27 addendum (2026-05-31).
+            _maybe_background_refresh()
+        else:
+            # Nothing trustworthy to serve (cold start, or contact lost past the
+            # stale ceiling) → block on a fresh poll, coalesced under the lock.
+            async with _status_poll_lock:
+                if (time.monotonic() - _status_cache.last_poll_at) >= STATUS_CACHE_FRESH_S:
+                    await _poll_home_and_update()
 
     if _status_cache.last_state is None:
         body = {"up": False, "stale": False, "age_s": None}

@@ -139,11 +139,11 @@ def health():
 
 @app.get("/health/deep")
 def health_deep():
-    # Verifies the things /wol actually needs at runtime: DNS resolution of
-    # TARGET_HOST and the ability to open a broadcast-capable UDP socket.
-    # The /wol path itself is unauthenticated until the X-Token check, so we
-    # keep this endpoint anonymous too — it never reveals MAC/token values,
-    # only ok/fail per check.
+    # Verifies what the relay needs at runtime: for /wol, DNS resolution of
+    # TARGET_HOST and a broadcast-capable UDP socket; for the /status oracle,
+    # that STATUS_TARGET_URL is configured at all. The /wol path itself is
+    # unauthenticated until the X-Token check, so we keep this endpoint
+    # anonymous too — it never reveals MAC/token values, only ok/fail per check.
     checks = {"uvicorn": "ok"}
     overall = True
 
@@ -161,6 +161,17 @@ def health_deep():
         checks["udp"] = "ok"
     except OSError:
         checks["udp"] = "fail"
+        overall = False
+
+    # status_target is what the /status oracle needs, not /wol. Reporting it
+    # here means "Tester le relais" (and a manual curl /health/deep) surfaces a
+    # missing STATUS_TARGET_URL loudly, instead of /status silently returning
+    # 503 — which the PWA reads as a degraded oracle and falls back on. Unset =>
+    # degraded, so an accidental drop of the env var on redeploy is caught.
+    if STATUS_TARGET_URL:
+        checks["status_target"] = "ok"
+    else:
+        checks["status_target"] = "not_configured"
         overall = False
 
     return JSONResponse(

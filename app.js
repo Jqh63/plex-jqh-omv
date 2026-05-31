@@ -171,6 +171,10 @@ function saveConfig(){
   var relay=document.getElementById('cfgRelay').value.trim();
   var token=document.getElementById('cfgToken').value.trim();
   var apps=document.getElementById('cfgApps').value.trim();
+  // `status` (explicit status-host override) is provisioned via ?status= only —
+  // there's no settings field for it. Carry the existing value across a save so
+  // editing other fields doesn't silently drop it.
+  var prevStatus=(config&&config.status)||'';
   if(!host){showToast('⚠ Domaine requis',true);return}
   if(!validHost(host)){showToast('⚠ Domaine invalide',true);return}
   var cleaned='';
@@ -187,6 +191,7 @@ function saveConfig(){
   if(token)config.token=token;
   if(title)config.title=title;
   if(apps)config.apps=apps;
+  if(prevStatus)config.status=prevStatus;
   storeConfig(config);
   startApp();
 }

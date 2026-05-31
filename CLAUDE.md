@@ -100,8 +100,10 @@ The service worker (`sw.js`) caches the app. **Bump the `CACHE`
 version on every release that changes the UX** to trigger the PWA
 auto-update for installed users:
 
-- `index.html` footer: `vX.Y` (visual marker)
-- `sw.js`: `var CACHE = 'plex-jqh-omv-vX.Y'`
+- `sw.js`: `var CACHE = 'plex-jqh-omv-vX.Y'` — the **only** marker to bump.
+  The visible footer (`index.html`), the debug page and `fallback.html` all
+  derive their `vX.Y` from this cache name at runtime, so there's no second
+  marker to keep in sync.
 
 No staging environment — `main` is production via GitHub Pages. Test
 on the public URL after merge.

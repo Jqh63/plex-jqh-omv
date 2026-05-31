@@ -41,8 +41,9 @@ var STATUS_LOCAL_TTL_MS=60000,STATUS_LOCAL_KEY='plex-jqh-omv-status';
 // post-up delay.
 var WOL_POLL_MS=5000, WOL_TIMEOUT_MS=300000;
 // Resend the POST at these offsets after the initial fire (server-side
-// already sends 3 packets per POST). 4 POSTs × 3 packets = 15 magic
-// packets over 90 s. The 15 s first retry is tuned for the ARP-cache
+// already sends 3 packets per POST). 5 POSTs (1 initial + 4 retries) ×
+// 3 packets = 15 magic packets over 90 s. The 15 s first retry is tuned
+// for the ARP-cache
 // timing on the home router: the initial wake often misses because the
 // router still has a fresh ARP entry pointing at the now-sleeping NIC
 // and unicasts the packet instead of broadcasting. By T+15 s that

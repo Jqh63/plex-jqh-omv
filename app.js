@@ -41,8 +41,9 @@ var STATUS_LOCAL_TTL_MS=60000,STATUS_LOCAL_KEY='plex-jqh-omv-status';
 // post-up delay.
 var WOL_POLL_MS=5000, WOL_TIMEOUT_MS=300000;
 // Resend the POST at these offsets after the initial fire (server-side
-// already sends 3 packets per POST). 4 POSTs × 3 packets = 15 magic
-// packets over 90 s. The 15 s first retry is tuned for the ARP-cache
+// already sends 3 packets per POST). 5 POSTs (1 initial + 4 retries) ×
+// 3 packets = 15 magic packets over 90 s. The 15 s first retry is tuned
+// for the ARP-cache
 // timing on the home router: the initial wake often misses because the
 // router still has a fresh ARP entry pointing at the now-sleeping NIC
 // and unicasts the packet instead of broadcasting. By T+15 s that
@@ -171,6 +172,10 @@ function saveConfig(){
   var relay=document.getElementById('cfgRelay').value.trim();
   var token=document.getElementById('cfgToken').value.trim();
   var apps=document.getElementById('cfgApps').value.trim();
+  // `status` (explicit status-host override) is provisioned via ?status= only —
+  // there's no settings field for it. Carry the existing value across a save so
+  // editing other fields doesn't silently drop it.
+  var prevStatus=(config&&config.status)||'';
   if(!host){showToast('⚠ Domaine requis',true);return}
   if(!validHost(host)){showToast('⚠ Domaine invalide',true);return}
   var cleaned='';
@@ -187,6 +192,7 @@ function saveConfig(){
   if(token)config.token=token;
   if(title)config.title=title;
   if(apps)config.apps=apps;
+  if(prevStatus)config.status=prevStatus;
   storeConfig(config);
   startApp();
 }

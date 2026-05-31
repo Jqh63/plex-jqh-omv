@@ -261,6 +261,18 @@ def main():
             home_plan=lambda n: "fail",
             sample_delays_s=[1, 3],
         )
+        r9 = run_scenario(
+            p,
+            "v7-all-timeout-while-green-holds-not-red",
+            # v7.6 — start green (preseed), then a full all-timeout cycle (relay
+            # ✕✕ + home ✕). Must HOLD green, not flash red. The held re-check
+            # (~+3 s) then sees the relay up → stays green. Kills the IRL FP
+            # (green → red+relais → force-refresh → green).
+            relay_plan=lambda n: "fail" if n <= 2 else "up",
+            home_plan=lambda n: "fail",
+            sample_delays_s=[1, 5, 7],
+            preseed_cache={"up": True, "relayOk": True},
+        )
 
     print("\n" + "=" * 72)
     print("VERDICT (real browser E2E on live PWA v7.0)")
@@ -327,6 +339,14 @@ def main():
         f"[{'PASS' if s8_ok else 'FAIL'}] v7-relay-answered-degraded-server-down | "
         f"red_at={r8['red_at']} warn_at={r8['warn_at']} wol_disabled={r8['final_wol_disabled']} "
         f"(want red, no warn, WoL enabled) calls={r8['counters']}"
+    )
+
+    # A1/v7.6 — all-timeout blip on a green server must hold, never flash red.
+    s9_ok = r9["final_green"] and not r9["red_at"] and not r9["warn_at"]
+    print(
+        f"[{'PASS' if s9_ok else 'FAIL'}] v7-all-timeout-while-green-holds-not-red | "
+        f"green_at={r9['green_at']} red_at={r9['red_at']} warn_at={r9['warn_at']} "
+        f"(want green held, no red, no warn) calls={r9['counters']}"
     )
 
 

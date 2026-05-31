@@ -592,6 +592,9 @@ STATUS_FETCH_TIMEOUT = 5.0  # v7.1 — single relay /status fetch budget.
                             # variance on Android 4G (family test reported a
                             # ~3 s cold open right at the v7.0 boundary).
 STATUS_LOCAL_TTL = 60.0     # v7.0 — localStorage paint TTL
+HOLD_RECHECK = 3.0          # v7.6 — after holding a confirmed-online state
+                            # through one all-timeout cycle, re-check this
+                            # soon instead of waiting the 15 s tick.
 
 
 class OracleApp:
@@ -623,6 +626,7 @@ class OracleApp:
         self._fallback_i = 0
         self.paints = []
         self.check_interval_id = None
+        self.all_timeout_streak = 0   # v7.6 — see _fallback_done
 
     def paint(self, kind):
         self.paints.append((round(self.clock.now, 2), kind))
@@ -677,6 +681,7 @@ class OracleApp:
 
     def _relay_done(self, attempt, ok, up, answered):
         if ok:
+            self.all_timeout_streak = 0
             self._settle(up=up, relay_ok=True)
             return
         if answered:
@@ -696,9 +701,27 @@ class OracleApp:
     def _fallback(self, relay_ok):
         out = self._next_fallback()
         if out.latency is None or out.latency >= STATUS_FETCH_TIMEOUT:
-            self.clock.after(STATUS_FETCH_TIMEOUT, lambda: self._settle(up=False, relay_ok=relay_ok))
+            self.clock.after(STATUS_FETCH_TIMEOUT, lambda: self._fallback_done(home_ok=False, relay_ok=relay_ok))
         else:
-            self.clock.after(out.latency, lambda: self._settle(up=out.ok, relay_ok=relay_ok))
+            self.clock.after(out.latency, lambda: self._fallback_done(home_ok=out.ok, relay_ok=relay_ok))
+
+    def _fallback_done(self, home_ok, relay_ok):
+        if home_ok:
+            self.all_timeout_streak = 0
+            self._settle(up=True, relay_ok=relay_ok)
+            return
+        # Home fallback failed too. relay_ok=False here means the relay didn't
+        # answer (transport) — combined with a failed home check, that's an
+        # all-timeout cycle. v7.6: if we were confirmed-online, hold for one
+        # cycle (no red flash) and re-check sooner instead of overturning to red.
+        if (not relay_ok) and self.is_online and self.has_confirmed_state and self.all_timeout_streak < 1:
+            self.all_timeout_streak += 1
+            self.checking = False
+            self.paint("hold")   # neutral marker: not red, not warn, not checking
+            self.clock.after(HOLD_RECHECK, self.fire_status)
+            return
+        self.all_timeout_streak = 0
+        self._settle(up=False, relay_ok=relay_ok)
 
     def start_app(self):
         # Mirror app.js startApp(): hydrate from localStorage if recent enough.
@@ -1132,6 +1155,26 @@ SCENARIOS = [
         forbid_red_flash=False,              # server really down → red expected
         forbid_warn_flash=True,              # KEY: relay isn't down → no warn
         horizon=7.0,
+    ),
+    Scenario(
+        # v7.6 — all-timeout cycle on a healthy green server (cold-radio blip):
+        # both relay attempts time out AND the direct-home fallback times out.
+        # Must NOT flash red — hold the confirmed-online state for one cycle,
+        # then the held re-check (HOLD_RECHECK) sees the relay up → stays green.
+        # This is the IRL false-positive (green → red+relay → force-refresh →
+        # green) that v7.6 kills.
+        name="v7-all-timeout-while-green-holds-not-red",
+        oracle_cache={"up": True, "relay_ok": True},   # start confirmed-green
+        oracle_outcomes=[FetchOutcome(None, False), FetchOutcome(None, False),  # cycle: relay ✕✕
+                         FetchOutcome(0.3, True, up=True)],                     # held re-check: up
+        home_fallback_outcomes=[FetchOutcome(None, False)],                    # cycle: home ✕ → hold
+        resume_at=0,
+        expect_final_online=True,            # held green, re-check confirms up
+        expect_final_relay_reachable=True,
+        forbid_red_flash=True,               # KEY: no false red on the blip
+        forbid_warn_flash=True,
+        forbid_checking_paint=True,          # cache pre-paint → no orange
+        horizon=20.0,
     ),
 ]
 

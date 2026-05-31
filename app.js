@@ -5,6 +5,18 @@ var wolStartTime=0,wolPollTimer=null,wolRetryTimers=[];
 // orange "Vérification…" card so we don't strobe orange on every 15 s
 // tick when the prior state is already on screen.
 var hasConfirmedState=false;
+// All-timeout guard (v7.6). A single check cycle where the relay didn't
+// answer (transport timeout, both attempts) AND the direct-home fallback
+// ALSO timed out is, on a cold/stalled mobile radio, indistinguishable from
+// a real outage — but far more often it's just the radio (observed IRL on
+// v7.5: a healthy green server flashed red+"relais injoignable", fixed by a
+// manual force-refresh). Don't let ONE such cycle overturn a confirmed-online
+// state to red: hold the prior state for one cycle and re-check sooner. A
+// relay that *answers* (even up:false) is always trusted immediately — this
+// guard only covers the everything-timed-out case. Capped at 1 held cycle so
+// a real outage still surfaces within the ADR's 60 s stale ceiling. See ADR
+// 2026-05-27 addendum.
+var allTimeoutStreak=0,holdRecheckTimer=null,HOLD_RECHECK_MS=3000;
 // v7.0 — single-fetch model. The PWA now asks the relay one question
 // (GET /status → {up, stale, age_s}) instead of running a probe + a
 // direct home check in parallel. One cold-radio window instead of two,
@@ -295,7 +307,8 @@ function startApp(){
   buildLinks();
   clearWolPoll();
   clearWolRetries();
-  isOnline=false;wolSent=false;checking=false;relayReachable=true;hasConfirmedState=false;
+  if(holdRecheckTimer){clearTimeout(holdRecheckTimer);holdRecheckTimer=null;}
+  isOnline=false;wolSent=false;checking=false;relayReachable=true;hasConfirmedState=false;allTimeoutStreak=0;
   // Paint the localStorage cache (<60 s) immediately so back-to-back
   // reopens don't strobe orange. The background checkStatus() below
   // confirms or corrects.
@@ -407,6 +420,7 @@ function checkStatus(){
     .then(function(j){
       // Happy path: relay answered with a valid verdict, trust it.
       finish();
+      allTimeoutStreak=0;
       relayReachable=true;
       writeLocalStatus(j.up,true);
       if(j.up)setOnline();else setOffline();
@@ -418,10 +432,30 @@ function checkStatus(){
       // answered (degraded oracle, e.g. STATUS_TARGET_URL unset), it's alive
       // and /wol still works — keep relayReachable=true so the button stays
       // enabled; postWol() will surface any real WoL failure on its own.
-      relayReachable=!!(err&&err.answered);
+      var answered=!!(err&&err.answered);
+      var priorRelay=relayReachable;
+      relayReachable=answered;
       fetchHomeDirectly()
-        .then(function(){finish();writeLocalStatus(true,relayReachable);setOnline();})
-        .catch(function(){finish();writeLocalStatus(false,relayReachable);setOffline();});
+        .then(function(){finish();allTimeoutStreak=0;writeLocalStatus(true,relayReachable);setOnline();})
+        .catch(function(){
+          finish();
+          // All-timeout cycle: the relay didn't answer AND the direct-home
+          // fallback also failed. If we were in a confirmed-online state, hold
+          // it for one cycle (don't flash red) and re-check sooner — a cold
+          // radio blip shouldn't overturn a known-good state. Restore the prior
+          // relay-reachable value so the held cycle doesn't disable WoL either.
+          if(!answered&&isOnline&&hasConfirmedState&&allTimeoutStreak<1){
+            allTimeoutStreak++;
+            relayReachable=priorRelay;
+            document.getElementById('statusSub').textContent='reconnexion…';
+            if(holdRecheckTimer)clearTimeout(holdRecheckTimer);
+            holdRecheckTimer=setTimeout(checkStatus,HOLD_RECHECK_MS);
+            return;
+          }
+          allTimeoutStreak=0;
+          writeLocalStatus(false,relayReachable);
+          setOffline();
+        });
     });
 }
 

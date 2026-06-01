@@ -94,6 +94,19 @@ class Scenario:
     # consumed by OracleApp after oracle_outcomes are exhausted with failures.
     home_fallback_outcomes: List[FetchOutcome] = field(default_factory=list)
     resume_at: float = 0.0   # 0 = cold start, >0 = background→foreground at that time
+    # v7.7 — resume layered-defence. Model the poll interval being paused while
+    # the PWA is in the background and which event (if any) fires on the way
+    # back to foreground. `resume_at` (above) is the legacy "visibilitychange
+    # fired cleanly" path; these three let a scenario exercise the Android PWA
+    # standalone case where the interval was cleared on background and the
+    # foreground return does NOT carry a visibilitychange.
+    #   background_at:    >0 → app goes hidden at this time (interval pauses)
+    #   foreground_at:    >0 → app returns to foreground at this time
+    #   foreground_event: which event fires on return —
+    #                     "visibilitychange" | "focus" | "none"
+    background_at: float = 0.0
+    foreground_at: float = 0.0
+    foreground_event: str = "visibilitychange"
     # v5.0 — if set, app starts with isOnline/relayReachable from the cache
     # and hasConfirmedState=True (so fire_status won't paint "checking").
     # Mirrors what loadCachedState() returns on cold launch.
@@ -626,6 +639,7 @@ class OracleApp:
         self._fallback_i = 0
         self.paints = []
         self.check_interval_id = None
+        self.hidden = False           # v7.7 — background/foreground gating
         self.all_timeout_streak = 0   # v7.6 — see _fallback_done
 
     def paint(self, kind):
@@ -741,12 +755,32 @@ class OracleApp:
         self._schedule_next_tick()
 
     def _schedule_next_tick(self):
+        # v7.7 — self-healing poll. The timer is NEVER cancelled on background;
+        # its body no-ops while hidden and fires a fresh check on the first
+        # tick after the app is foregrounded again. Mirrors app.js's
+        # `setInterval(function(){if(!document.hidden)checkStatus();},15000)`.
         def tick():
             if self.check_interval_id != "tick":
                 return
-            self.fire_status()
-            self._schedule_next_tick()
+            if not self.hidden:
+                self.fire_status()
+            self._schedule_next_tick()   # keep the timer alive across background
         self.clock.after(CHECK_INTERVAL, tick)
+
+    def on_background(self):
+        # v7.7 — going hidden only flips the flag; the self-healing interval
+        # stays armed (it no-ops while hidden). The pre-fix app cleared the
+        # interval here — see BuggyOracleApp.
+        self.hidden = True
+
+    def on_foreground(self):
+        # v7.7 — fast-path re-probe bound to BOTH focus and visibilitychange.
+        # On "none" (neither event fires — the Android quirk), the self-healing
+        # interval's next tick still re-probes within CHECK_INTERVAL.
+        self.hidden = False
+        if self.scenario.foreground_event in ("focus", "visibilitychange"):
+            self.checking = False
+            self.fire_status()
 
     def on_resume(self):
         # The local cache covers back-to-back reopens; same flow as cold launch.
@@ -768,12 +802,49 @@ class OracleApp:
             self._schedule_next_tick()
 
 
+class BuggyOracleApp(OracleApp):
+    """Pre-v7.7 resume logic — reproduces the IRL frozen-green bug.
+
+    Two pre-fix behaviours combine to freeze the state:
+      1. The poll interval is CLEARED on background (not just paused).
+      2. The status re-probe is bound ONLY to visibilitychange, never to
+         focus.
+
+    So when the app returns to foreground without a visibilitychange event
+    (focus-only, or no event at all — both observed on Android PWA standalone),
+    nothing re-probes and nothing restarts the poll: the last-painted state
+    (e.g. yesterday's green) stays frozen until a second app-switch finally
+    fires visibilitychange. That is exactly the reported symptom.
+    """
+
+    def on_background(self):
+        self.hidden = True
+        self.check_interval_id = None   # pre-fix: the poll was cleared on hidden
+
+    def on_foreground(self):
+        self.hidden = False
+        # Pre-fix: only visibilitychange re-probed + restarted the poll.
+        if self.scenario.foreground_event == "visibilitychange":
+            self.checking = False
+            self.fire_status()
+            if self.check_interval_id != "tick":
+                self.check_interval_id = "tick"
+                self._schedule_next_tick()
+        # focus / none: the status re-probe was not bound here → frozen.
+
+
 def run(scenario, app_class):
     clock = Clock()
     app = app_class(clock, scenario)
     clock.after(0, app.start_app)
     if scenario.resume_at > 0:
         clock.after(scenario.resume_at, app.on_resume)
+    # v7.7 — drive the background/foreground transitions when the scenario
+    # opts into them (only the v7 oracle apps implement these handlers).
+    if scenario.background_at > 0 and hasattr(app, "on_background"):
+        clock.after(scenario.background_at, app.on_background)
+    if scenario.foreground_at > 0 and hasattr(app, "on_foreground"):
+        clock.after(scenario.foreground_at, app.on_foreground)
     clock.run_until(scenario.horizon)
     return app
 
@@ -1176,6 +1247,59 @@ SCENARIOS = [
         forbid_checking_paint=True,          # cache pre-paint → no orange
         horizon=20.0,
     ),
+    Scenario(
+        # v7.7 — the reported bug. A confirmed-green PWA is backgrounded; the
+        # home server goes OFF during the background window; the app returns to
+        # foreground via FOCUS only (no visibilitychange — the Android PWA
+        # standalone quirk). Pre-fix (BuggyOracleApp): the poll was cleared on
+        # background and the status re-probe was bound only to visibilitychange,
+        # so nothing re-probes → the screen stays FROZEN GREEN (final_online
+        # stays True → FAIL). v7.7 (OracleApp): re-probe is also bound to focus
+        # AND the poll is self-healing → converges to red (final_online=False).
+        # background_at=10 lands before the first 15 s tick so no tick consumes
+        # an outcome while the server is still up.
+        name="v7.7-resume-focus-only-no-visibilitychange-converges-to-red",
+        oracle_cache={"up": True, "relay_ok": True},   # confirmed-green before bg
+        oracle_outcomes=[
+            FetchOutcome(0.3, True, up=True),    # T=0 cold check — server up
+            FetchOutcome(0.3, True, up=False),   # post-foreground re-probe — now off
+            FetchOutcome(0.3, True, up=False),
+            FetchOutcome(0.3, True, up=False),
+        ],
+        resume_at=0,
+        background_at=10,
+        foreground_at=40,
+        foreground_event="focus",
+        expect_final_online=False,           # fixed app converges to red
+        expect_final_relay_reachable=True,
+        forbid_red_flash=False,              # red IS correct — server really off
+        forbid_warn_flash=True,
+        horizon=60.0,
+    ),
+    Scenario(
+        # v7.7 — same bug, harsher trigger: the foreground return carries NO
+        # event at all (neither focus nor visibilitychange). Pre-fix: frozen
+        # green forever (FAIL). v7.7: the self-healing interval's first tick
+        # after foreground (T=45) re-probes on its own → red. Proves the safety
+        # net works without ANY foreground event.
+        name="v7.7-resume-no-event-self-healing-interval-converges-to-red",
+        oracle_cache={"up": True, "relay_ok": True},
+        oracle_outcomes=[
+            FetchOutcome(0.3, True, up=True),    # T=0 — server up
+            FetchOutcome(0.3, True, up=False),   # T=45 self-healing tick — now off
+            FetchOutcome(0.3, True, up=False),
+            FetchOutcome(0.3, True, up=False),
+        ],
+        resume_at=0,
+        background_at=10,
+        foreground_at=40,
+        foreground_event="none",
+        expect_final_online=False,
+        expect_final_relay_reachable=True,
+        forbid_red_flash=False,
+        forbid_warn_flash=True,
+        horizon=60.0,
+    ),
 ]
 
 
@@ -1189,8 +1313,10 @@ def main():
     print("=" * 72)
     live_pass = True
     oracle_pass = True
+    contrast_ok = True
     for scenario in SCENARIOS:
         print(f"\n## {scenario.name}")
+        verdicts = {}
         # Pre-v7 apps run when the scenario defines status_outcomes; OracleApp
         # runs when oracle_outcomes is defined. Some legacy scenarios cover
         # both columns (rare); the split here keeps each class on the data it
@@ -1199,6 +1325,10 @@ def main():
         if scenario.status_outcomes:
             classes += [BuggyApp, V43App, V44App, V45App, FixedApp, LiveApp]
         if scenario.oracle_outcomes:
+            # On resume scenarios, run the pre-fix app too so the output shows
+            # the contrast (BuggyOracleApp freezes, OracleApp converges).
+            if scenario.background_at > 0:
+                classes.append(BuggyOracleApp)
             classes.append(OracleApp)
         for cls in classes:
             res = evaluate(run(scenario, cls))
@@ -1214,6 +1344,7 @@ def main():
                 live_pass = False
             if cls is OracleApp and verdict != "PASS":
                 oracle_pass = False
+            verdicts[cls.__name__] = verdict
             issues = []
             if not ok_red:
                 issues.append(f"unexpected RED at {[p[0] for p in res['red']]}")
@@ -1225,13 +1356,22 @@ def main():
                 issues.append(f"final online={res['final_online']} vs expected {scenario.expect_final_online}")
             if not ok_relay:
                 issues.append(f"final relay={res['final_relay']} vs expected {scenario.expect_final_relay_reachable}")
-            print(f"  [{cls.__name__:9}] {verdict}  paints: {fmt_paints(res['paints'])}")
+            print(f"  [{cls.__name__:13}] {verdict}  paints: {fmt_paints(res['paints'])}")
             if issues:
-                print(f"               issues: {'; '.join(issues)}")
+                print(f"                   issues: {'; '.join(issues)}")
+        # Regression contrast (v7.7): a resume scenario only proves the fix if
+        # it FAILS the pre-fix app and PASSES the fixed one. If the pre-fix app
+        # accidentally passes, the scenario isn't exercising the bug.
+        if scenario.background_at > 0:
+            if verdicts.get("BuggyOracleApp") != "FAIL" or verdicts.get("OracleApp") != "PASS":
+                contrast_ok = False
+                print(f"  [contrast]      FAIL  expected BuggyOracleApp=FAIL & OracleApp=PASS, "
+                      f"got Buggy={verdicts.get('BuggyOracleApp')} Oracle={verdicts.get('OracleApp')}")
     print("\n" + "=" * 72)
     print(f"LiveApp   (v6.0): {'all required scenarios PASS' if live_pass else 'AT LEAST ONE REQUIRED SCENARIO FAILED'}")
     print(f"OracleApp (v7.0): {'all required scenarios PASS' if oracle_pass else 'AT LEAST ONE REQUIRED SCENARIO FAILED'}")
-    return 0 if (live_pass and oracle_pass) else 1
+    print(f"Resume contrast (v7.7): {'pre-fix FAILS & fixed PASSES on every resume scenario' if contrast_ok else 'CONTRAST BROKEN — see [contrast] lines above'}")
+    return 0 if (live_pass and oracle_pass and contrast_ok) else 1
 
 
 if __name__ == "__main__":

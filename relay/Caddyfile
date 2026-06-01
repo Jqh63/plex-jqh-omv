@@ -25,7 +25,17 @@
 		respond "" 204
 	}
 
-	reverse_proxy localhost:8000
+	# Sanitize the client IP before it reaches uvicorn. Caddy APPENDS the
+	# peer IP to any client-supplied X-Forwarded-For, so the leftmost value
+	# is attacker-controlled. Strip inbound XFF and set X-Real-IP from
+	# Caddy's own view of the connecting peer ({remote_host}) — the only
+	# value an external client cannot forge. app.py reads X-Real-IP for the
+	# rate limiter + audit log. Without this, a rotating spoofed XFF bypasses
+	# the per-IP /wol rate limit and poisons the audit log.
+	reverse_proxy localhost:8000 {
+		header_up -X-Forwarded-For
+		header_up X-Real-IP {remote_host}
+	}
 
 	header {
 		Strict-Transport-Security "max-age=31536000"

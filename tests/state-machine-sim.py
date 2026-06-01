@@ -726,9 +726,15 @@ class OracleApp:
             return
         # Home fallback failed too. relay_ok=False here means the relay didn't
         # answer (transport) — combined with a failed home check, that's an
-        # all-timeout cycle. v7.6: if we were confirmed-online, hold for one
-        # cycle (no red flash) and re-check sooner instead of overturning to red.
-        if (not relay_ok) and self.is_online and self.has_confirmed_state and self.all_timeout_streak < 1:
+        # all-timeout cycle. On a cold mobile radio this is indistinguishable
+        # from a real outage but far more often it's just the radio warming up.
+        # v7.6 held one such cycle (no red flash) ONLY when already confirmed-
+        # online. v7.8 widens it to the cold-launch / no-cache case too: a fresh
+        # reopen after the 60 s TTL had the same cold radio paint an instant
+        # false RED ("rouge direct alors que le homelab est ON"). Hold one cycle
+        # as neutral "connexion…" and re-check sooner; still capped at one held
+        # cycle so a genuine outage surfaces on the next cycle.
+        if (not relay_ok) and self.all_timeout_streak < 1:
             self.all_timeout_streak += 1
             self.checking = False
             self.paint("hold")   # neutral marker: not red, not warn, not checking
@@ -1154,17 +1160,23 @@ SCENARIOS = [
         horizon=12.0,
     ),
     Scenario(
-        # Both relay and home down → red + warn. Full outage from the
-        # PWA's POV; both paints expected. Worst-case: 3 × timeout = 15 s.
+        # Both relay and home down → red + warn. Full outage from the PWA's POV;
+        # both paints expected. v7.8: the all-timeout HOLD now also covers the
+        # cold-launch case, so a genuine full outage holds ONE neutral cycle
+        # before painting red — two all-timeout cycles instead of one. Worst-case
+        # when everything truly *times out* (5 s each): cycle1 3×5 s = 15 s →
+        # hold 3 s → cycle2 3×5 s ends at ~33 s. (Real GCP/home-down usually
+        # fails fast rather than timing out, so this ceiling is rarely hit.)
         name="v7-relay-timeout-fallback-home-down",
-        oracle_outcomes=[FetchOutcome(None, False), FetchOutcome(None, False)],
-        home_fallback_outcomes=[FetchOutcome(None, False)],
+        oracle_outcomes=[FetchOutcome(None, False), FetchOutcome(None, False),
+                         FetchOutcome(None, False), FetchOutcome(None, False)],
+        home_fallback_outcomes=[FetchOutcome(None, False), FetchOutcome(None, False)],
         resume_at=0,
         expect_final_online=False,
         expect_final_relay_reachable=False,
         forbid_red_flash=False,               # home really down — red expected
         forbid_warn_flash=False,              # relay also down — warn expected
-        horizon=16.0,
+        horizon=35.0,
     ),
     Scenario(
         # localStorage cache <60 s + server still up → instant green paint,
@@ -1299,6 +1311,32 @@ SCENARIOS = [
         forbid_red_flash=False,
         forbid_warn_flash=True,
         horizon=60.0,
+    ),
+    Scenario(
+        # v7.8 — the reported bug. COLD reopen after the 60 s localStorage TTL
+        # expired (app killed, reopened minutes later), home server actually UP,
+        # but the first cycle all-times-out on a cold mobile radio (both relay
+        # attempts + the direct-home fallback). Pre-v7.8 the all-timeout HOLD
+        # guard required is_online && has_confirmed_state (only the already-green
+        # case), so a fresh launch with no cache fell straight through to RED —
+        # then recovered green on the next tick (~15-25 s). That's the "rouge
+        # direct alors que le homelab est ON, ~25 s pour le vert" report. The fix
+        # widens the hold to cover the no-confirmed-state cold launch: hold one
+        # cycle (neutral "connexion…") and re-check sooner instead of flashing red.
+        name="v7.8-cold-reopen-no-cache-all-timeout-server-up-no-red-flash",
+        oracle_cache=None,                   # TTL expired → no pre-paint
+        oracle_outcomes=[
+            FetchOutcome(None, False),       # cycle 1: relay attempt 0 — timeout
+            FetchOutcome(None, False),       # cycle 1: relay attempt 1 — timeout
+            FetchOutcome(0.3, True, up=True),# held re-check: relay up (radio warm)
+        ],
+        home_fallback_outcomes=[FetchOutcome(None, False)],  # cycle 1: home fallback — timeout
+        resume_at=0,
+        expect_final_online=True,            # server is up — must end green
+        expect_final_relay_reachable=True,
+        forbid_red_flash=True,               # KEY: no false red on cold reopen
+        forbid_warn_flash=True,
+        horizon=25.0,
     ),
 ]
 

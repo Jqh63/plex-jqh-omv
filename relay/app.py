@@ -78,6 +78,12 @@ PACKET_GAP_S = 0.5
 # coherent; threading.Lock guards concurrent requests within that worker.
 RATE_LIMIT_WINDOW_S = 60
 RATE_LIMIT_MAX_REQ = 10
+# Hard cap on tracked source IPs. With X-Real-IP (Caddy-set, unforgeable) the
+# key space is bounded by real clients, but a one-shot visitor still leaves an
+# entry that's never revisited (the per-call prune only fires when the SAME ip
+# returns). Cap the dict and sweep fully-drained entries when exceeded so memory
+# can't creep over a long uptime. Defense-in-depth tied to the XFF fix.
+MAX_TRACKED_IPS = 4096
 _rate_lock = threading.Lock()
 _rate_state: dict[str, deque] = defaultdict(deque)
 
@@ -107,11 +113,15 @@ def magic_packet(mac: str) -> bytes:
 
 
 def client_ip(request: Request) -> str:
-    # uvicorn binds 127.0.0.1 only, Caddy is the sole ingress and sets
-    # X-Forwarded-For by default — so the header is trustworthy here.
-    xff = request.headers.get("x-forwarded-for")
-    if xff:
-        return xff.split(",")[0].strip()
+    # Caddy (the sole ingress, on localhost) strips any client-supplied
+    # X-Forwarded-For and sets X-Real-IP to the real connecting peer it sees
+    # ({remote_host} — see Caddyfile). That header is the only IP value an
+    # external client cannot forge, so the rate limiter + audit log key on it.
+    # NB: do NOT read X-Forwarded-For here — Caddy *appends* to it, so its
+    # leftmost element is attacker-controlled (rate-limit bypass + log poison).
+    real = request.headers.get("x-real-ip")
+    if real:
+        return real.strip()
     return request.client.host if request.client else "unknown"
 
 
@@ -129,6 +139,11 @@ def rate_limited(ip: str) -> bool:
         if len(dq) >= RATE_LIMIT_MAX_REQ:
             return True
         dq.append(now)
+        if len(_rate_state) > MAX_TRACKED_IPS:
+            # Bound memory: drop entries whose window has fully drained.
+            stale = [k for k, d in _rate_state.items() if not d or d[-1] < cutoff]
+            for k in stale:
+                _rate_state.pop(k, None)
     return False
 
 

@@ -4,7 +4,7 @@
 # Pipes the 3 files (app.py, Caddyfile, wol-relay.service) over stdin
 # to the VM-side dispatch.sh, then triggers apply + health.
 #
-# Prerequisites (one-shot, see relay/README.md § *Automation*):
+# Prerequisites (one-shot, see relay/README.md § *GitOps deploy channel → One-shot bootstrap*):
 #   - SSH key `id_ed25519_wol_relay_deploy` present on the deploying host
 #   - Alias `wol-relay-deploy` in your SSH config:
 #       Host wol-relay-deploy

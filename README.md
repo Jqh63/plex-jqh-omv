@@ -14,13 +14,13 @@ This repo bundles **two components**:
 
 ## Features
 
-- **Server status** — checks every 15s via HTTPS fetch (steady-state offline detection within ~24s of the actual outage)
+- **Server status** — checks every 15s by fetching the relay's `GET /status` oracle (steady-state offline detection within ~24s of the actual outage)
 - **Wake-on-LAN** — sends magic packet via a self-hosted HTTP→UDP relay (browsers cannot send UDP directly — see [Relay](#relay-required-for-wol) below)
 - **Auto-retry** — re-sends the WoL POST at +15/30/60/90s and polls every 5s post-WoL until the server answers or 5 min timeout
 - **Dynamic app links** — configurable via URL parameter, built from a catalog of known apps
 - **Read-only mode** — works without a MAC address (status monitoring only, no WoL button)
 - **Installable PWA** — works on PC, Android (Chrome) and iOS (Safari)
-- **Auto-update** — new service worker triggers a toast notification
+- **Auto-update** — a new service worker is detected (on focus / visibility / periodic poll) and the page silently auto-reloads to pick it up
 
 ## Setup
 
@@ -83,9 +83,11 @@ Open the app without parameters. A settings form will appear to enter title, dom
 
 ## Status check logic
 
-The app pings `https://{statusHost}` with `mode: 'no-cors'`. Any HTTP response = server up, network error = server down.
+Since **v7.0 (relay-as-oracle)** the primary status check is a single `fetch GET {relay}/status` — done once on open and at every 15s tick. The relay polls the home server itself (HEAD on a configurable `STATUS_TARGET_URL`, 5s fresh / 60s stale cache) and returns `{up, stale, age_s}`, so one fetch answers both *is the home server up* and *is the relay reachable*. See [Relay](#relay-required-for-wol).
 
-`statusHost` resolves as: explicit `?status=` param → first subdomain app from the apps list → base `host`.
+**Fallback** — if no relay is configured, or if `/status` is unusable (timeout / non-200 / unexpected shape), the app falls back to a direct `fetch https://{statusHost}` with `mode: 'no-cors'`: any fulfilled response = server up, network error = server down.
+
+`statusHost` (used by the fallback) resolves as: explicit `?status=` param → first subdomain app from the apps list → base `host`.
 
 Example: `host=myserver.example.com` + `apps=seerr,plexweb` → pings `seerr.myserver.example.com`. Useful when the root domain lacks a valid SSL cert (e.g. DuckDNS wildcard certs cover `*.domain` but not the bare root).
 
@@ -159,8 +161,15 @@ backend that honours it is interchangeable with the reference.
 ### API contract
 
 ```
+GET /status
+  → 200 {"up":bool, "stale":bool, "age_s":int}   (the PWA's steady-state oracle —
+        relay polls the home server itself and caches the verdict; one fetch tells
+        the app both "home up?" and "relay reachable?")
+  → 503 if the relay has no STATUS_TARGET_URL configured
+
 GET /health
-  → 200 {"status":"ok"}        (used by the PWA reachability probe)
+  → 200 {"status":"ok"}        (relay liveness; hit only by the settings
+        "Tester le relais" button — /health/deep with /health legacy fallback)
 
 POST /wol
   Headers: Content-Type: application/json
@@ -194,7 +203,7 @@ Any small VM with UDP egress and a public HTTPS endpoint works. Some always-free
 
 ## Fallback — manual Wake-on-LAN if the relay fails
 
-The app probes `GET <relay>/health` on load and at every status tick (every 15 s). When the probe fails, the power button is visually disabled and labelled "Réveil indisponible — utilise le réveil manuel ↓" so users get explicit feedback instead of a silent click. A small permanent "Réveil manuel" link sits under the power button — it covers cases the probe can miss (relay up but `/wol` broken, network blip mid-dispatch) and the residual SPOF inherent to any single relay.
+The app probes `GET <relay>/status` on load and at every status tick (every 15 s); relay reachability is derived from that same fetch. When the fetch fails at transport level (timeout / network / DNS), the relay is treated as unreachable, the power button is visually disabled and labelled "Réveil indisponible — utilise le réveil manuel ↓" so users get explicit feedback instead of a silent click. (An *answered* but degraded `/status` keeps the button enabled, since `POST /wol` still works.) A small permanent "Réveil manuel" link sits under the power button — it covers cases the probe can miss (relay up but `/wol` broken, network blip mid-dispatch) and the residual SPOF inherent to any single relay.
 
 That link points to a dedicated **French user-friendly fallback page** served from this same repo (`fallback.html`), with the user's MAC, host and port pre-filled (read from URL query parameters). The page gives a per-OS method (Android: WolOn, iOS: Mocha WOL, Windows: PowerShell), with click-to-copy on the parameter values. The section below remains the canonical developer reference.
 
@@ -237,8 +246,8 @@ $mac=[byte[]]-split('AABBCCDDEEFF' -replace '..','0x$0 ');$u=New-Object Net.Sock
 - Service worker uses `ignoreSearch: true` to match cache with query params
 - `skipWaiting` + `clients.claim` + `controllerchange` listener for seamless updates
 - WoL sent via `fetch POST` to your self-hosted relay (browsers cannot send UDP directly — see [Relay](#relay-required-for-wol))
-- Relay reachability probed with `fetch GET /health` — true status code read (no `no-cors` blind spot)
-- Status check on the media server itself uses `fetch` with `mode: 'no-cors'` — opaque response = server up, network error = server down (no CORS needed since we only care about reachability)
+- Primary status check is `fetch GET <relay>/status` — true JSON verdict `{up,stale,age_s}` read (no `no-cors` blind spot); relay reachability derived from the same fetch (answered vs transport failure). `GET /health` / `/health/deep` are hit only by the settings "Tester le relais" button
+- Fallback status check on the media server itself uses `fetch` with `mode: 'no-cors'` — opaque response = server up, network error = server down (used only when `/status` is unavailable; no CORS needed since we only care about reachability)
 
 ## License
 

@@ -24,13 +24,19 @@ Scenarios (one per ADR `2026-05-27-pwa-plex-jqh-omv-relay-as-oracle`
   6. v7-status-with-1-retry             — /status ✕→✓ → green, no red flash
 """
 
+import os
 from urllib.parse import urlparse
 from playwright.sync_api import sync_playwright, Route
 
 CONFIG_HOST = "test.example.com"
 RELAY_HOST = "r.example.com"
+# PWA_BASE defaults to the live GitHub Pages deploy (the post-merge gate).
+# Override it to validate the working tree BEFORE merge — the PWA is flat
+# HTML/JS so file:// works:
+#   PWA_BASE="file:///config/workspace/plex-jqh-omv/index.html" python3 tests/cold-radio-e2e.py
+PWA_BASE = os.environ.get("PWA_BASE", "https://jqh63.github.io/plex-jqh-omv/")
 PWA_URL = (
-    f"https://jqh63.github.io/plex-jqh-omv/"
+    f"{PWA_BASE}"
     f"?host={CONFIG_HOST}&mac=AABBCCDDEEFF"
     f"&relay=https://{RELAY_HOST}&token=x&apps=seerr,plexweb"
 )
@@ -193,6 +199,107 @@ def run_scenario(p, name, relay_plan, home_plan, sample_delays_s, preseed_cache=
     }
 
 
+def _spoof_visibility(page, hidden, event):
+    """Spoof document.hidden/visibilityState and optionally dispatch an event.
+
+    `event` ∈ {"visibilitychange", "focus", "none"}. The PWA's handlers read
+    document.hidden, so the spoofed getter is honored. "none" flips the flag
+    without dispatching anything — the Android quirk where the foreground
+    return carries no event at all.
+    """
+    page.evaluate(
+        """([hidden, event]) => {
+        Object.defineProperty(document, 'hidden', {configurable: true, get: () => hidden});
+        Object.defineProperty(document, 'visibilityState', {configurable: true, get: () => hidden ? 'hidden' : 'visible'});
+        if (event === 'visibilitychange') document.dispatchEvent(new Event('visibilitychange'));
+        else if (event === 'focus') window.dispatchEvent(new Event('focus'));
+    }""",
+        [hidden, event],
+    )
+
+
+def run_resume_scenario(p, name, relay_plan, home_plan, fg_event,
+                        bg_at_s, fg_at_s, sample_delays_s, preseed_cache):
+    """v7.7 — background → foreground resume test.
+
+    Loads the PWA (preseeded green), backgrounds it at `bg_at_s` (spoof hidden
+    + visibilitychange), then returns to foreground at `fg_at_s` dispatching
+    only `fg_event`. `relay_plan(n)` drives the n-th /status verdict so the
+    server can be "up" before background and "down" after. `sample_delays_s`
+    are offsets RELATIVE TO THE FOREGROUND event. The bug: a focus-only / no-
+    event return leaves the pre-v7.7 PWA frozen on the stale green; v7.7 must
+    converge to red.
+    """
+    print(f"\n## Resume scenario: {name} (fg_event={fg_event})")
+    counters = {"relay": 0, "home": 0}
+
+    def handle(route: Route):
+        url = route.request.url
+        parsed = urlparse(url)
+        host = parsed.netloc
+        if host == RELAY_HOST and parsed.path == "/status":
+            counters["relay"] += 1
+            verdict = relay_plan(counters["relay"])
+            if verdict == "up":
+                route.fulfill(status=200, headers={"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"},
+                              body='{"up": true, "stale": false, "age_s": 0}')
+            elif verdict == "down":
+                route.fulfill(status=200, headers={"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"},
+                              body='{"up": false, "stale": false, "age_s": null}')
+            else:
+                route.abort()
+            return
+        if host == CONFIG_HOST or host.endswith("." + CONFIG_HOST):
+            counters["home"] += 1
+            route.fulfill(status=200, body="") if home_plan(counters["home"]) == "ok" else route.abort()
+            return
+        route.continue_()
+
+    b = p.chromium.launch()
+    ctx = b.new_context(viewport={"width": 390, "height": 844})
+    import json
+    payload = json.dumps({"up": bool(preseed_cache.get("up")), "relayOk": bool(preseed_cache.get("relayOk", True)), "t": None})
+    ctx.add_init_script(
+        f"try{{var p={payload};p.t=Date.now();localStorage.setItem('{STATUS_LOCAL_KEY}',JSON.stringify(p));}}catch(e){{}}"
+    )
+    page = ctx.new_page()
+    page.route("**/*", handle)
+    page.goto(PWA_URL, wait_until="load")
+    page.wait_for_selector("#statusLabel", state="attached", timeout=10000)
+
+    page.wait_for_timeout(int(bg_at_s * 1000))
+    _spoof_visibility(page, hidden=True, event="visibilitychange")   # go background
+    page.wait_for_timeout(int((fg_at_s - bg_at_s) * 1000))
+    _spoof_visibility(page, hidden=False, event=fg_event)            # return to foreground
+
+    samples = []
+    last_t = 0
+    for t in sample_delays_s:
+        page.wait_for_timeout(int((t - last_t) * 1000))
+        last_t = t
+        s = capture_state(page)
+        samples.append((t, s))
+        flags = []
+        if is_red(s):
+            flags.append("RED")
+        if is_warn(s):
+            flags.append("WARN")
+        if is_green(s):
+            flags.append("green")
+        print(f"  fg+{t}s: status={s['statusLabel']!r} -> {','.join(flags) or '(neutral)'}")
+
+    final_state = samples[-1][1]
+    b.close()
+    return {
+        "name": name,
+        "red_at": [t for t, s in samples if is_red(s)],
+        "green_at": [t for t, s in samples if is_green(s)],
+        "final_green": is_green(final_state),
+        "final_red": is_red(final_state),
+        "counters": dict(counters),
+    }
+
+
 def main():
     with sync_playwright() as p:
         r1 = run_scenario(
@@ -273,6 +380,31 @@ def main():
             sample_delays_s=[1, 5, 7],
             preseed_cache={"up": True, "relayOk": True},
         )
+        # v7.7 — resume bug. Server up at load (relay call #1), goes off during
+        # background (calls #2+ return "down"). Foreground returns via FOCUS
+        # only — pre-v7.7 stays frozen green; v7.7 re-probes on focus → red.
+        r10 = run_resume_scenario(
+            p,
+            "v7.7-resume-focus-only-converges-to-red",
+            relay_plan=lambda n: "up" if n == 1 else "down",
+            home_plan=lambda n: "ok",
+            fg_event="focus",
+            bg_at_s=3, fg_at_s=6,
+            sample_delays_s=[1, 3],
+            preseed_cache={"up": True, "relayOk": True},
+        )
+        # v7.7 — same, but the foreground return carries NO event at all. Only
+        # the self-healing 15 s interval can rescue it. Sample past one tick.
+        r11 = run_resume_scenario(
+            p,
+            "v7.7-resume-no-event-self-heals-to-red",
+            relay_plan=lambda n: "up" if n == 1 else "down",
+            home_plan=lambda n: "ok",
+            fg_event="none",
+            bg_at_s=3, fg_at_s=6,
+            sample_delays_s=[16, 18],
+            preseed_cache={"up": True, "relayOk": True},
+        )
 
     print("\n" + "=" * 72)
     print("VERDICT (real browser E2E on live PWA v7.0)")
@@ -347,6 +479,22 @@ def main():
         f"[{'PASS' if s9_ok else 'FAIL'}] v7-all-timeout-while-green-holds-not-red | "
         f"green_at={r9['green_at']} red_at={r9['red_at']} warn_at={r9['warn_at']} "
         f"(want green held, no red, no warn) calls={r9['counters']}"
+    )
+
+    # v7.7 — focus-only resume must converge to red (not stay frozen green).
+    s10_ok = r10["final_red"] and not r10["final_green"]
+    print(
+        f"[{'PASS' if s10_ok else 'FAIL'}] v7.7-resume-focus-only-converges-to-red | "
+        f"red_at={r10['red_at']} green_at={r10['green_at']} final_green={r10['final_green']} "
+        f"(want red after focus, NOT frozen green) calls={r10['counters']}"
+    )
+
+    # v7.7 — no-event resume must converge to red via the self-healing interval.
+    s11_ok = r11["final_red"] and not r11["final_green"]
+    print(
+        f"[{'PASS' if s11_ok else 'FAIL'}] v7.7-resume-no-event-self-heals-to-red | "
+        f"red_at={r11['red_at']} green_at={r11['green_at']} final_green={r11['final_green']} "
+        f"(want red via self-healing tick, NOT frozen green) calls={r11['counters']}"
     )
 
 

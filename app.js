@@ -10,8 +10,10 @@ var hasConfirmedState=false;
 // ALSO timed out is, on a cold/stalled mobile radio, indistinguishable from
 // a real outage — but far more often it's just the radio (observed IRL on
 // v7.5: a healthy green server flashed red+"relais injoignable", fixed by a
-// manual force-refresh). Don't let ONE such cycle overturn a confirmed-online
-// state to red: hold the prior state for one cycle and re-check sooner. A
+// manual force-refresh). Don't let ONE such cycle paint red: hold for one
+// cycle and re-check sooner. v7.6 held only an already confirmed-online state;
+// v7.8 widened the hold to the cold-launch / no-cache reopen too (same cold
+// radio otherwise painted an instant false red on reopen). A
 // relay that *answers* (even up:false) is always trusted immediately — this
 // guard only covers the everything-timed-out case. Capped at 1 held cycle so
 // a real outage still surfaces within the ADR's 60 s stale ceiling. See ADR
@@ -229,7 +231,10 @@ function testRelay(btn){
         }).catch(function(){done('warn','⚠ Relais dégradé');});
       }else if(r.status===404){
         // Older relay without /health/deep — fall back to /health for compat.
-        fetch(cleaned+'/health',{cache:'no-store'}).then(function(r2){
+        // fetchOnce (not bare fetch) so this inherits the AbortController +
+        // timeout: a half-open relay socket would otherwise never resolve/reject
+        // and leave the "Tester le relais" button stuck disabled (v7.8 fix).
+        fetchOnce(cleaned+'/health').then(function(r2){
           if(r2.ok)done('ok','✓ Relais OK (legacy /health)');
           else done('fail','✕ Relais répond mais /health KO ('+r2.status+')');
         }).catch(function(){done('fail','✕ Relais injoignable');});
@@ -455,11 +460,16 @@ function checkStatus(){
         .catch(function(){
           finish();
           // All-timeout cycle: the relay didn't answer AND the direct-home
-          // fallback also failed. If we were in a confirmed-online state, hold
-          // it for one cycle (don't flash red) and re-check sooner — a cold
-          // radio blip shouldn't overturn a known-good state. Restore the prior
-          // relay-reachable value so the held cycle doesn't disable WoL either.
-          if(!answered&&isOnline&&hasConfirmedState&&allTimeoutStreak<1){
+          // fallback also failed. On a cold mobile radio this is far more often
+          // the radio warming up than a real outage, so hold ONE such cycle
+          // (neutral "reconnexion…", never red) and re-check sooner. v7.6 held
+          // this only for an already confirmed-online state; v7.8 widens it to
+          // the cold-launch / no-cache reopen too, where the same cold radio
+          // otherwise painted an instant false RED ("rouge direct alors que le
+          // homelab est ON"). Restore the prior relay-reachable value so the
+          // held cycle doesn't disable WoL either. Capped at one held cycle so a
+          // genuine outage still surfaces on the next cycle.
+          if(!answered&&allTimeoutStreak<1){
             allTimeoutStreak++;
             relayReachable=priorRelay;
             document.getElementById('statusSub').textContent='reconnexion…';

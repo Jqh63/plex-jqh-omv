@@ -326,7 +326,16 @@ function startApp(){
   }
   checkStatus();
   if(checkInterval)clearInterval(checkInterval);
-  checkInterval=setInterval(checkStatus,15000);
+  // Self-healing poll (v7.7): the interval is NEVER cleared on background.
+  // Its body no-ops while hidden and fires a fresh check on the first tick
+  // after the app returns to foreground — so the state corrects within 15 s
+  // even if NO focus/visibilitychange event fires on return. This kills the
+  // IRL bug where a backgrounded PWA reopened to a frozen green: the old
+  // code cleared the interval on hidden and only restarted it from the
+  // visibilitychange handler, so when that event didn't fire (Android PWA
+  // standalone quirk) nothing ever re-probed. onForeground() below is the
+  // fast path; this interval is the guaranteed-eventually safety net.
+  checkInterval=setInterval(function(){if(!document.hidden)checkStatus();},15000);
   // Install hint: Chrome on Android = "menu ⋮ → Ajouter à l'écran d'accueil";
   // Safari on iOS/iPadOS uses the share sheet. iPad on iPadOS 13+ reports
   // as "Macintosh" — detect it via touch points to avoid showing the wrong
@@ -725,61 +734,69 @@ if('serviceWorker' in navigator){
   });
 })();
 
-// Pause the 15s status polling while the PWA is hidden (background tab,
-// app switcher, screen off). Resume immediately on return with a fresh
-// check so the user sees a current state without waiting for the tick.
-document.addEventListener('visibilitychange',function(){
-  if(!config)return;
-  if(document.hidden){
-    if(checkInterval){clearInterval(checkInterval);checkInterval=null;}
+// Foreground re-probe (v7.7) — bound to BOTH `focus` and `visibilitychange`.
+// On Android PWA standalone neither event alone is reliable on return from
+// the app switcher: focus often doesn't fire, and visibilitychange usually
+// does — but NOT always (the IRL bug this covers: a backgrounded PWA brought
+// back to foreground stayed on a frozen green because visibilitychange never
+// fired, and only a second app-switch finally triggered the re-probe). Same
+// layered-defence reasoning as the service-worker update triggers above.
+// The self-healing 15 s interval (see startApp) is the guaranteed-eventually
+// safety net; this handler is the fast path that re-probes immediately.
+var lastForegroundMs=0;
+function onForeground(){
+  if(!config||document.hidden)return;
+  // Dedupe focus + visibilitychange both firing on a single foreground
+  // (common on desktop) so we don't double-probe / double-resync.
+  if(Date.now()-lastForegroundMs<1000)return;
+  lastForegroundMs=Date.now();
+  // A fetch in flight when the screen locked may never resolve (Android
+  // suspends network) — its `checking=true` flag would then permanently
+  // block subsequent checks. Reset it on resume so the next checkStatus()
+  // runs unhindered.
+  checking=false;
+  // The local cache (<60 s) gives an instant paint on rapid reopens; the
+  // background checkStatus() below confirms or corrects within ~1 s.
+  var cached=readLocalStatus();
+  if(cached){
+    relayReachable=cached.relayOk!==false;
+    if(cached.up)setOnline();else setOffline();
   } else {
-    // A fetch in flight when the screen locked may never resolve (Android
-    // suspends network) — its `checking=true` flag would then permanently
-    // block subsequent checks. Reset it on resume so the next checkStatus()
-    // runs unhindered.
-    checking=false;
-    // The local cache (<60 s) gives an instant paint on rapid reopens; the
-    // background checkStatus() below confirms or corrects within ~1 s.
-    var cached=readLocalStatus();
-    if(cached){
-      relayReachable=cached.relayOk!==false;
-      if(cached.up)setOnline();else setOffline();
-    } else {
-      // Stale cache (> STATUS_LOCAL_TTL_MS in background) — the on-screen
-      // state may no longer reflect reality after a long absence. Reset
-      // hasConfirmedState so the upcoming checkStatus() repaints the
-      // orange "Vérification…" card instead of keeping the stale green/red
-      // visible during the re-probe. Without this, the user returning after
-      // hours sees the prior state until the fetch resolves (3-10 s),
-      // sometimes the opposite of reality.
-      hasConfirmedState=false;
-    }
-    checkStatus();
-    if(!checkInterval)checkInterval=setInterval(checkStatus,15000);
-    // Countdown text self-corrects from Date.now() on the next tick, but the
-    // CSS progress bar transition does NOT — it was started once with a
-    // duration of etaMs and is frozen-then-resumed by the suspend, so on
-    // unlock the bar fills at the original pace from its frozen position,
-    // ending etaMs+(suspend_duration) later than the text countdown. Resync
-    // it explicitly: snap to the elapsed-ratio position, then re-arm a fresh
-    // transition for the remaining ms.
-    if(wolSent&&countdownTimer&&wolStartTime&&wolEtaMs){
-      var elapsed=Date.now()-wolStartTime;
-      var ratio=Math.min(1,Math.max(0,elapsed/wolEtaMs));
-      var remainingMs=Math.max(0,countdownEndsAt-Date.now());
-      var bar=document.getElementById('powerProgressBar');
-      if(bar){
-        bar.style.transition='none';
-        bar.style.width=(ratio*100)+'%';
-        void bar.offsetWidth;
-        if(remainingMs>0){
-          bar.style.transition='width '+(remainingMs/1000)+'s linear';
-          bar.style.width='100%';
-        }
+    // Stale cache (> STATUS_LOCAL_TTL_MS in background) — the on-screen
+    // state may no longer reflect reality after a long absence. Reset
+    // hasConfirmedState so the upcoming checkStatus() repaints the
+    // orange "Vérification…" card instead of keeping the stale green/red
+    // visible during the re-probe. Without this, the user returning after
+    // hours sees the prior state until the fetch resolves (3-10 s),
+    // sometimes the opposite of reality.
+    hasConfirmedState=false;
+  }
+  checkStatus();
+  // Countdown text self-corrects from Date.now() on the next tick, but the
+  // CSS progress bar transition does NOT — it was started once with a
+  // duration of etaMs and is frozen-then-resumed by the suspend, so on
+  // unlock the bar fills at the original pace from its frozen position,
+  // ending etaMs+(suspend_duration) later than the text countdown. Resync
+  // it explicitly: snap to the elapsed-ratio position, then re-arm a fresh
+  // transition for the remaining ms.
+  if(wolSent&&countdownTimer&&wolStartTime&&wolEtaMs){
+    var elapsed=Date.now()-wolStartTime;
+    var ratio=Math.min(1,Math.max(0,elapsed/wolEtaMs));
+    var remainingMs=Math.max(0,countdownEndsAt-Date.now());
+    var bar=document.getElementById('powerProgressBar');
+    if(bar){
+      bar.style.transition='none';
+      bar.style.width=(ratio*100)+'%';
+      void bar.offsetWidth;
+      if(remainingMs>0){
+        bar.style.transition='width '+(remainingMs/1000)+'s linear';
+        bar.style.width='100%';
       }
     }
   }
-});
+}
+window.addEventListener('focus',onForeground);
+document.addEventListener('visibilitychange',function(){if(!document.hidden)onForeground();});
 
 // Wire up the 5 button handlers (migrated from inline onclick="..." attributes
 // so the CSP can drop 'unsafe-inline' from script-src — see <meta http-equiv

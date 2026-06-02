@@ -807,6 +807,20 @@ function onForeground(){
 }
 window.addEventListener('focus',onForeground);
 document.addEventListener('visibilitychange',function(){if(!document.hidden)onForeground();});
+// v7.9 — fast-path visibility-transition poll (1 s). Reads document.hidden
+// directly and triggers onForeground on a hidden→visible flip. Absolute safety
+// net for the Android PWA standalone case where neither focus nor
+// visibilitychange fires reliably on app-switcher resume — the IRL bug behind
+// "il faut attendre au moins 15 s pour voir le statut passer à rouge". The
+// 15 s self-healing interval is still the eventual catch-up; this poll cuts
+// the worst case from CHECK_INTERVAL_MS (15 s) down to ~1 s without depending
+// on any DOM event firing.
+var lastHiddenAtPoll=document.hidden;
+setInterval(function(){
+  var nowHidden=document.hidden;
+  if(lastHiddenAtPoll&&!nowHidden)onForeground();
+  lastHiddenAtPoll=nowHidden;
+},1000);
 
 // Wire up the 5 button handlers (migrated from inline onclick="..." attributes
 // so the CSP can drop 'unsafe-inline' from script-src — see <meta http-equiv

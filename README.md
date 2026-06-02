@@ -85,6 +85,8 @@ Open the app without parameters. A settings form will appear to enter title, dom
 
 Since **v7.0 (relay-as-oracle)** the primary status check is a single `fetch GET {relay}/status` — done once on open and at every 15s tick. The relay polls the home server itself (HEAD on a configurable `STATUS_TARGET_URL`, 5s fresh / 60s stale cache) and returns `{up, stale, age_s}`, so one fetch answers both *is the home server up* and *is the relay reachable*. See [Relay](#relay-required-for-wol).
 
+**v8.0 (single-probe model)** keeps that contract but rewrites the client state machine. `checkStatus()` runs one probe that resolves exactly once to `{up, relayReachable}`: one relay `/status` fetch with a generous 8s timeout (so a cold mobile radio warms *inside* the attempt) and, on its failure, one direct-home fallback — no retry chain, no fail-streaks, no all-timeout hold. A `probeGen` counter drops a stale in-flight probe that resolves after a resume. This replaced a v4→v7 pile of cold-radio defences that could hold the orange "Vérification…" card for ~33s on reopen; v8's worst case is one PROBE+HOME (~13s, genuine outage only), commonly <3s.
+
 **Fallback** — if no relay is configured, or if `/status` is unusable (timeout / non-200 / unexpected shape), the app falls back to a direct `fetch https://{statusHost}` with `mode: 'no-cors'`: any fulfilled response = server up, network error = server down.
 
 `statusHost` (used by the fallback) resolves as: explicit `?status=` param → first subdomain app from the apps list → base `host`.

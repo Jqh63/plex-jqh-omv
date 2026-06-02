@@ -405,6 +405,23 @@ def main():
             sample_delays_s=[16, 18],
             preseed_cache={"up": True, "relayOk": True},
         )
+        # v7.9 — same no-event resume, but sample within ~3 s of foreground.
+        # Pre-v7.9 the fast path is the 15 s self-healing tick, so a sample
+        # at fg+3 still shows the stale green (final_red=False → FAIL). v7.9
+        # adds a 1 s visibility-transition poll that detects the hidden→visible
+        # flip without any DOM event firing → re-probe inside ~2 s → red.
+        # This is the regression test for the IRL family report
+        # "il faut attendre au moins 15 s pour voir le statut passer à rouge".
+        r12 = run_resume_scenario(
+            p,
+            "v7.9-resume-no-event-fast-path-red-within-3s",
+            relay_plan=lambda n: "up" if n == 1 else "down",
+            home_plan=lambda n: "ok",
+            fg_event="none",
+            bg_at_s=3, fg_at_s=6,
+            sample_delays_s=[3],
+            preseed_cache={"up": True, "relayOk": True},
+        )
 
     print("\n" + "=" * 72)
     print("VERDICT (real browser E2E on live PWA v7.0)")
@@ -495,6 +512,14 @@ def main():
         f"[{'PASS' if s11_ok else 'FAIL'}] v7.7-resume-no-event-self-heals-to-red | "
         f"red_at={r11['red_at']} green_at={r11['green_at']} final_green={r11['final_green']} "
         f"(want red via self-healing tick, NOT frozen green) calls={r11['counters']}"
+    )
+
+    # v7.9 — no-event resume must converge to red WITHIN 3 s (fast-path poll).
+    s12_ok = r12["final_red"] and not r12["final_green"] and r12["red_at"] and r12["red_at"][0] <= 3
+    print(
+        f"[{'PASS' if s12_ok else 'FAIL'}] v7.9-resume-no-event-fast-path-red-within-3s | "
+        f"red_at={r12['red_at']} green_at={r12['green_at']} final_green={r12['final_green']} "
+        f"(want red ≤ fg+3s via 1 s visibility poll) calls={r12['counters']}"
     )
 
 

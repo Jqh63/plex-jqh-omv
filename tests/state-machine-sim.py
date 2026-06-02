@@ -608,6 +608,14 @@ STATUS_LOCAL_TTL = 60.0     # v7.0 — localStorage paint TTL
 HOLD_RECHECK = 3.0          # v7.6 — after holding a confirmed-online state
                             # through one all-timeout cycle, re-check this
                             # soon instead of waiting the 15 s tick.
+VISIBILITY_POLL_INTERVAL = 1.0  # v7.9 — fast-path resume detection. Polls
+                                # document.hidden every 1 s; on a hidden→visible
+                                # transition we treat it as a foreground return
+                                # and re-probe immediately. Covers the Android
+                                # PWA standalone case where neither focus nor
+                                # visibilitychange fires reliably on app-switcher
+                                # resume — the bug behind the IRL "frozen yesterday
+                                # green for up to CHECK_INTERVAL (15 s)" report.
 
 
 class OracleApp:
@@ -627,6 +635,11 @@ class OracleApp:
     as-oracle`.
     """
 
+    # v7.9 — when True, start_app installs the 1 s visibility-transition poll
+    # that catches the Android PWA standalone case where no foreground event
+    # fires. BuggyOracleApp flips this False to preserve the pre-fix contrast.
+    ENABLE_VISIBILITY_POLL = True
+
     def __init__(self, clock, scenario):
         self.clock = clock
         self.scenario = scenario
@@ -641,6 +654,9 @@ class OracleApp:
         self.check_interval_id = None
         self.hidden = False           # v7.7 — background/foreground gating
         self.all_timeout_streak = 0   # v7.6 — see _fallback_done
+        # v7.9 — fast-path resume detection state.
+        self.visibility_poll_id = None
+        self._was_hidden_at_poll = False
 
     def paint(self, kind):
         self.paints.append((round(self.clock.now, 2), kind))
@@ -759,6 +775,12 @@ class OracleApp:
         self.fire_status()
         self.check_interval_id = "tick"
         self._schedule_next_tick()
+        # v7.9 — fast-path visibility-transition detector. See
+        # VISIBILITY_POLL_INTERVAL for rationale.
+        if self.ENABLE_VISIBILITY_POLL:
+            self._was_hidden_at_poll = self.hidden
+            self.visibility_poll_id = "tick"
+            self._schedule_visibility_poll()
 
     def _schedule_next_tick(self):
         # v7.7 — self-healing poll. The timer is NEVER cancelled on background;
@@ -772,6 +794,30 @@ class OracleApp:
                 self.fire_status()
             self._schedule_next_tick()   # keep the timer alive across background
         self.clock.after(CHECK_INTERVAL, tick)
+
+    def _schedule_visibility_poll(self):
+        # v7.9 — every VISIBILITY_POLL_INTERVAL we read document.hidden and
+        # detect a hidden→visible transition. When one fires, we mirror the
+        # onForeground fast path: reset checking, optionally reset
+        # has_confirmed_state so the stale visual flips to "checking…" instead
+        # of staying frozen on yesterday's green, then fire_status. This is the
+        # absolute safety net for the Android PWA standalone case where neither
+        # focus nor visibilitychange fires on app-switcher resume — without it
+        # the user waits up to CHECK_INTERVAL (15 s) before the self-healing
+        # tick catches up.
+        def tick():
+            if self.visibility_poll_id != "tick":
+                return
+            if self._was_hidden_at_poll and not self.hidden:
+                self.checking = False
+                # No fresh cache (or background lasted past the TTL) → drop the
+                # confirmed-state flag so fire_status repaints "checking" instead
+                # of leaving the stale paint visible during the re-probe.
+                self.has_confirmed_state = False
+                self.fire_status()
+            self._was_hidden_at_poll = self.hidden
+            self._schedule_visibility_poll()
+        self.clock.after(VISIBILITY_POLL_INTERVAL, tick)
 
     def on_background(self):
         # v7.7 — going hidden only flips the flag; the self-healing interval
@@ -822,6 +868,9 @@ class BuggyOracleApp(OracleApp):
     (e.g. yesterday's green) stays frozen until a second app-switch finally
     fires visibilitychange. That is exactly the reported symptom.
     """
+
+    # v7.9 — pre-fix doesn't have the visibility poll either.
+    ENABLE_VISIBILITY_POLL = False
 
     def on_background(self):
         self.hidden = True
@@ -1311,6 +1360,33 @@ SCENARIOS = [
         forbid_red_flash=False,
         forbid_warn_flash=True,
         horizon=60.0,
+    ),
+    Scenario(
+        # v7.9 — same shape as the no-event scenario above but the horizon is
+        # tightened to 43 s. Without the v7.9 visibility-transition poll, the
+        # self-healing interval only fires its first post-foreground tick at
+        # T=45 (CHECK_INTERVAL after the last background-elided tick), so the
+        # status would stay frozen on yesterday's green inside the horizon and
+        # final_online=True → FAIL. WITH the poll (sub-second hidden→visible
+        # detection), the re-probe fires at ~T=41 and offline lands at ~T=41.3
+        # → PASS. This is the regression test for the IRL family report
+        # "il faut attendre au moins 15 s pour voir le statut passer à rouge".
+        name="v7.9-resume-no-event-fast-path-converges-within-3s",
+        oracle_cache={"up": True, "relay_ok": True},
+        oracle_outcomes=[
+            FetchOutcome(0.3, True, up=True),    # T=0 cold check — server up
+            FetchOutcome(0.3, True, up=False),   # post-foreground fast-path — now off
+            FetchOutcome(0.3, True, up=False),
+        ],
+        resume_at=0,
+        background_at=10,
+        foreground_at=40,
+        foreground_event="none",
+        expect_final_online=False,
+        expect_final_relay_reachable=True,
+        forbid_red_flash=False,              # red IS correct — server really off
+        forbid_warn_flash=True,
+        horizon=43.0,                        # tight — only the v7.9 poll meets it
     ),
     Scenario(
         # v7.8 — the reported bug. COLD reopen after the 60 s localStorage TTL

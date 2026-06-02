@@ -5,32 +5,34 @@ var wolStartTime=0,wolPollTimer=null,wolRetryTimers=[];
 // orange "Vérification…" card so we don't strobe orange on every 15 s
 // tick when the prior state is already on screen.
 var hasConfirmedState=false;
-// All-timeout guard (v7.6). A single check cycle where the relay didn't
-// answer (transport timeout, both attempts) AND the direct-home fallback
-// ALSO timed out is, on a cold/stalled mobile radio, indistinguishable from
-// a real outage — but far more often it's just the radio (observed IRL on
-// v7.5: a healthy green server flashed red+"relais injoignable", fixed by a
-// manual force-refresh). Don't let ONE such cycle paint red: hold for one
-// cycle and re-check sooner. v7.6 held only an already confirmed-online state;
-// v7.8 widened the hold to the cold-launch / no-cache reopen too (same cold
-// radio otherwise painted an instant false red on reopen). A
-// relay that *answers* (even up:false) is always trusted immediately — this
-// guard only covers the everything-timed-out case. Capped at 1 held cycle so
-// a real outage still surfaces within the ADR's 60 s stale ceiling. See ADR
-// 2026-05-27 addendum.
-var allTimeoutStreak=0,holdRecheckTimer=null,HOLD_RECHECK_MS=3000;
-// v7.0 — single-fetch model. The PWA now asks the relay one question
-// (GET /status → {up, stale, age_s}) instead of running a probe + a
-// direct home check in parallel. One cold-radio window instead of two,
-// no races, no defensive layers. ADR `2026-05-27-pwa-plex-jqh-omv-
-// relay-as-oracle` has the full design (alternatives + critères
-// d'acceptance + plan).
-// v7.1 (2026-05-27) bumped 3000 → 5000: family test reported a ~3 s
-// cold open on Android over 4G, right at the timeout boundary. 5 s
-// gives 2 s of headroom for the TCP+TLS handshake on a cold mobile
-// radio without changing UX on the warm path (timeout only fires when
-// the request really hangs).
-var STATUS_FETCH_TIMEOUT_MS=5000;
+// v8.0 — single-probe status model. The whole v4→v7 pile of cold-radio
+// defences (retry chains, 2 fail-streaks, all-timeout HOLD, adaptive tick)
+// existed for ONE reason: a 5 s status timeout was too tight against a cold
+// mobile radio (~3 s to warm) + TLS handshake, so the fetch timed out and the
+// code cascaded — up to ~33 s of orange/"reconnexion…" on reopen (the IRL bug:
+// "PWA en background, réouverture → check orange 30 s ou plus"). v8 replaces
+// all of it with ONE generous-timeout probe and a generation guard:
+//   checkStatus() → probe() resolves ONCE to {up, relayReachable}, never rejects.
+//   A probeGen counter ignores a stale in-flight probe that resolves AFTER a
+//   resume (the Android suspend-mid-fetch race) instead of letting it repaint.
+// The generous timeout lets the radio warm INSIDE the first attempt, so there's
+// nothing left to retry/hold/streak. Worst case = PROBE + HOME fallback (~13 s)
+// and only on a genuine relay+home outage; the common reopen settles in <3 s.
+// Trade-off: if the radio stays cold past PROBE_TIMEOUT_MS (rare) we paint a
+// transient red, corrected by the next 15 s self-healing tick — accepted as the
+// price of killing the defensive pile. See the ADR (knowledge-base) superseding
+// the 2026-05-27 relay-as-oracle addendum.
+var probeGen=0;
+// Relay /status fetch budget. Generous on purpose: it must outlast a cold
+// mobile-radio TCP+TLS handshake (~3 s observed on Android 4G) so the first
+// attempt succeeds rather than timing out into the fallback. The relay's own
+// /status is server-side SWR-cached, so the relay never makes us wait on the
+// relay→home leg — this budget covers only the PWA→relay last mile.
+var PROBE_TIMEOUT_MS=8000;
+// Direct-home fallback budget. Only used when the relay /status fetch fails
+// (transport failure or answered-but-degraded). One shot, no retry — by the
+// time we reach it the radio is warm, so 5 s is ample.
+var HOME_FALLBACK_TIMEOUT_MS=5000;
 // Mini-cache for back-to-back reopens (closing then reopening the PWA
 // within a minute). Kept short on purpose — beyond a minute the user
 // expects a fresh check, and we already learned (v6.0 drop-cache fix)
@@ -318,8 +320,7 @@ function startApp(){
   buildLinks();
   clearWolPoll();
   clearWolRetries();
-  if(holdRecheckTimer){clearTimeout(holdRecheckTimer);holdRecheckTimer=null;}
-  isOnline=false;wolSent=false;checking=false;relayReachable=true;hasConfirmedState=false;allTimeoutStreak=0;
+  isOnline=false;wolSent=false;checking=false;relayReachable=true;hasConfirmedState=false;
   // Paint the localStorage cache (<60 s) immediately so back-to-back
   // reopens don't strobe orange. The background checkStatus() below
   // confirms or corrects.
@@ -370,8 +371,10 @@ function writeLocalStatus(up,relayOk){
   try{localStorage.setItem(STATUS_LOCAL_KEY,JSON.stringify({up:!!up,relayOk:relayOk!==false,t:Date.now()}));}catch(e){}
 }
 
-function fetchOnce(url,opts){
-  var ctrl=new AbortController(),timer=setTimeout(function(){ctrl.abort();},STATUS_FETCH_TIMEOUT_MS);
+// timeoutMs defaults to PROBE_TIMEOUT_MS (the relay /status budget). The
+// direct-home fallback passes HOME_FALLBACK_TIMEOUT_MS explicitly.
+function fetchOnce(url,opts,timeoutMs){
+  var ctrl=new AbortController(),timer=setTimeout(function(){ctrl.abort();},timeoutMs||PROBE_TIMEOUT_MS);
   var init=Object.assign({cache:'no-store',signal:ctrl.signal},opts||{});
   return fetch(url,init).finally(function(){clearTimeout(timer);});
 }
@@ -401,15 +404,21 @@ function fetchHomeDirectly(){
   // no-cors: response is opaque but a fulfilled promise still tells us
   // the home accepted the TCP/TLS handshake and returned *something*.
   // That's enough to flip the up/down state when the relay is dead.
-  return fetchOnce('https://'+statusHost(),{mode:'no-cors'});
+  return fetchOnce('https://'+statusHost(),{mode:'no-cors'},HOME_FALLBACK_TIMEOUT_MS);
 }
 
+// v8.0 — single-probe status check. One probe, one generous timeout, no
+// cascade. The generation guard makes a stale in-flight probe (one that was
+// suspended mid-fetch while the PWA was backgrounded and resolves only after
+// resume) a no-op, so a fresh resume probe always wins without the old
+// retry/hold/streak machinery.
 function checkStatus(){
   if(checking||!config)return;checking=true;
+  var gen=++probeGen;
   var label=document.getElementById('statusLabel'),sub=document.getElementById('statusSub'),btn=document.getElementById('refreshBtn');
   btn.classList.add('spinning');
   // Keep the prior visual when we already have a confirmed (or cached)
-  // state; orange "Vérification…" only appears on the very first paint.
+  // state; orange "Vérification…" only appears when nothing is known yet.
   if(hasConfirmedState){
     sub.textContent='vérification…';
   }else{
@@ -417,71 +426,44 @@ function checkStatus(){
     document.getElementById('statusCard').className='status-card';
     label.textContent='Vérification...';sub.textContent='ping en cours';
   }
+  probe().then(function(res){
+    // A newer probe (e.g. a resume re-probe) superseded this one — drop the
+    // stale verdict without touching `checking`, which the newer probe owns.
+    if(gen!==probeGen)return;
+    checking=false;btn.classList.remove('spinning');
+    relayReachable=res.relayReachable;
+    writeLocalStatus(res.up,res.relayReachable);
+    if(res.up)setOnline();else setOffline();
+  });
+}
 
-  var finish=function(){checking=false;btn.classList.remove('spinning');};
-
+// Resolves EXACTLY ONCE to {up, relayReachable}; never rejects. One relay
+// /status fetch, and on its failure exactly one direct-home fallback:
+//   - relay answers 200 {up}            → trust it (relay reachable).
+//   - relay *answers* but degraded      → relay alive, oracle off: fall back to
+//     (503 STATUS_TARGET_URL unset, 404)  direct-home for up/down, keep WoL on.
+//   - relay *transport*-fails (timeout) → relay unreachable: fall back, mark it
+//                                         down (→ "Réveil indisponible").
+// No retry, no hold, no streak — the generous PROBE_TIMEOUT_MS absorbs the
+// cold-radio handshake that the old cascade was built to paper over.
+function probe(){
   if(!config.relay){
-    // No relay configured → straight to direct-home detection. Relay
-    // warnings are silenced (no relay = no relay-down state to show).
-    relayReachable=true;
-    fetchHomeDirectly()
-      .then(function(){finish();writeLocalStatus(true,true);setOnline();})
-      .catch(function(){finish();writeLocalStatus(false,true);setOffline();});
-    return;
+    // No relay configured → direct-home only; no relay-down state to show.
+    return fetchHomeDirectly().then(
+      function(){return {up:true,relayReachable:true};},
+      function(){return {up:false,relayReachable:true};}
+    );
   }
-
-  fetchStatusFromRelay()
-    .catch(function(err){
-      // Retry only transport failures — an HTTP answer (503/404/bad-shape) is
-      // deterministic, retrying it just wastes a round-trip before fallback.
-      if(err&&err.answered)return Promise.reject(err);
-      return fetchStatusFromRelay();
-    })
-    .then(function(j){
-      // Happy path: relay answered with a valid verdict, trust it.
-      finish();
-      allTimeoutStreak=0;
-      relayReachable=true;
-      writeLocalStatus(j.up,true);
-      if(j.up)setOnline();else setOffline();
-    })
-    .catch(function(err){
-      // /status unusable → fall back to a direct home check for up/down.
-      // But only mark the relay UNREACHABLE (→ "Réveil indisponible", wake
-      // button disabled) on a transport failure. If the relay actually
-      // answered (degraded oracle, e.g. STATUS_TARGET_URL unset), it's alive
-      // and /wol still works — keep relayReachable=true so the button stays
-      // enabled; postWol() will surface any real WoL failure on its own.
-      var answered=!!(err&&err.answered);
-      var priorRelay=relayReachable;
-      relayReachable=answered;
-      fetchHomeDirectly()
-        .then(function(){finish();allTimeoutStreak=0;writeLocalStatus(true,relayReachable);setOnline();})
-        .catch(function(){
-          finish();
-          // All-timeout cycle: the relay didn't answer AND the direct-home
-          // fallback also failed. On a cold mobile radio this is far more often
-          // the radio warming up than a real outage, so hold ONE such cycle
-          // (neutral "reconnexion…", never red) and re-check sooner. v7.6 held
-          // this only for an already confirmed-online state; v7.8 widens it to
-          // the cold-launch / no-cache reopen too, where the same cold radio
-          // otherwise painted an instant false RED ("rouge direct alors que le
-          // homelab est ON"). Restore the prior relay-reachable value so the
-          // held cycle doesn't disable WoL either. Capped at one held cycle so a
-          // genuine outage still surfaces on the next cycle.
-          if(!answered&&allTimeoutStreak<1){
-            allTimeoutStreak++;
-            relayReachable=priorRelay;
-            document.getElementById('statusSub').textContent='reconnexion…';
-            if(holdRecheckTimer)clearTimeout(holdRecheckTimer);
-            holdRecheckTimer=setTimeout(checkStatus,HOLD_RECHECK_MS);
-            return;
-          }
-          allTimeoutStreak=0;
-          writeLocalStatus(false,relayReachable);
-          setOffline();
-        });
-    });
+  return fetchStatusFromRelay().then(
+    function(j){return {up:j.up,relayReachable:true};},
+    function(err){
+      var relayUp=!!(err&&err.answered);
+      return fetchHomeDirectly().then(
+        function(){return {up:true,relayReachable:relayUp};},
+        function(){return {up:false,relayReachable:relayUp};}
+      );
+    }
+  );
 }
 
 // Note: relay preconnect lives in preconnect.js (loaded BEFORE app.js).
@@ -763,8 +745,11 @@ function onForeground(){
   // A fetch in flight when the screen locked may never resolve (Android
   // suspends network) — its `checking=true` flag would then permanently
   // block subsequent checks. Reset it on resume so the next checkStatus()
-  // runs unhindered.
-  checking=false;
+  // runs unhindered. Bumping probeGen here (belt-and-braces with the bump
+  // inside checkStatus) guarantees that if that suspended probe DOES resolve
+  // late, its verdict is dropped instead of repainting a stale state over the
+  // fresh resume probe.
+  checking=false;probeGen++;
   // The local cache (<60 s) gives an instant paint on rapid reopens; the
   // background checkStatus() below confirms or corrects within ~1 s.
   var cached=readLocalStatus();

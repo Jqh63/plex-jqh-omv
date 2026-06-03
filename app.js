@@ -1,5 +1,15 @@
 var config=null,isOnline=false,wolSent=false,checking=false,checkInterval=null;
 var relayReachable=true;
+// v8.1 — 1-tick debounce on the relay-DOWN cosmetic only. A single relay
+// /status transport failure is most often a slow-but-alive e2-micro (cold
+// burstable CPU) or a last-mile blip, NOT a dead relay. So the FIRST miss
+// keeps relayReachable optimistic (button stays enabled, no "Relais
+// injoignable" alarm) and only flags `relayDownPending`; the alarm hardens
+// only if the NEXT probe (~15 s later) also misses. Invariant: pending===true
+// implies relayReachable===true. This debounces the passive cosmetic ONLY —
+// the up/down verdict stays single-probe (v8 core), and a genuine relay-down
+// the user actually hits via WoL still surfaces instantly (postWol catch).
+var relayDownPending=false;
 var wolStartTime=0,wolPollTimer=null,wolRetryTimers=[];
 // True once setOnline / setOffline has fired this session. Gates the
 // orange "Vérification…" card so we don't strobe orange on every 15 s
@@ -320,7 +330,7 @@ function startApp(){
   buildLinks();
   clearWolPoll();
   clearWolRetries();
-  isOnline=false;wolSent=false;checking=false;relayReachable=true;hasConfirmedState=false;
+  isOnline=false;wolSent=false;checking=false;relayReachable=true;relayDownPending=false;hasConfirmedState=false;
   // Paint the localStorage cache (<60 s) immediately so back-to-back
   // reopens don't strobe orange. The background checkStatus() below
   // confirms or corrects.
@@ -431,8 +441,17 @@ function checkStatus(){
     // stale verdict without touching `checking`, which the newer probe owns.
     if(gen!==probeGen)return;
     checking=false;btn.classList.remove('spinning');
-    relayReachable=res.relayReachable;
-    writeLocalStatus(res.up,res.relayReachable);
+    // 1-tick debounce on relay reachability (see relayDownPending comment):
+    // a lone transport miss stays optimistic; the alarm hardens only on a
+    // second consecutive miss. The home up/down verdict (res.up) is used raw.
+    if(res.relayReachable){
+      relayReachable=true;relayDownPending=false;
+    }else if(relayDownPending||!relayReachable){
+      relayReachable=false;relayDownPending=false; // 2nd miss, or already down → confirm
+    }else{
+      relayDownPending=true;                       // 1st miss → stay optimistic this tick
+    }
+    writeLocalStatus(res.up,relayReachable);
     if(res.up)setOnline();else setOffline();
   });
 }
@@ -606,8 +625,10 @@ function postWol(isRetry){
     if(isRetry)return;
     wolSent=false;wolStartTime=0;stopCountdown();clearWolPoll();clearWolRetries();
     // Flip relayReachable manually — a checkStatus() right now would race
-    // the WoL POST, and we already know the relay just failed.
-    relayReachable=false;
+    // the WoL POST, and we already know the relay just failed. This is a
+    // CONFIRMED failure (the user actually tried to wake), so bypass the
+    // 1-tick debounce and surface it immediately; clear any pending state.
+    relayReachable=false;relayDownPending=false;
     if(navigator.vibrate)navigator.vibrate(300);
     showToast('⚠ Relais injoignable — utilise le réveil manuel ↓',true,5000);
     setOffline();

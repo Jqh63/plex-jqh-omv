@@ -27,13 +27,21 @@ Or against the live deploy (post-merge gate): leave PWA_BASE unset.
 Scenarios (mirror state-machine-sim.py):
   1. cold-launch-server-up-fast        — /status up → green ≤3 s
   2. cold-launch-server-off-fast       — /status down → red ≤3 s
-  3. relay-fail-fallback-home-up       — /status ✕ → home ok → green + warn
-  4. relay-and-home-down               — /status ✕ → home ✕ → red + warn
+  3. relay-fail-fallback-home-up       — /status ✕ → home ok → green; relay warn
+                                         only AFTER the v8.1 debounce confirms (~15 s)
+  4. relay-and-home-down               — /status ✕ → home ✕ → red immediate;
+                                         relay warn only after the ~15 s debounce
   5. stale-cache-paint-then-confirm    — localStorage <60 s → green instant
   6. relay-degraded-server-up          — /status 503 → home ok → green, no warn, WoL on
   7. relay-degraded-server-down        — /status 503 → home ✕ → red, no warn, WoL on
   8. resume-focus-only-converges-red   — bg → server dies → focus → red
   9. resume-no-event-self-heals-red    — bg → server dies → no event → red ≤3 s
+ 10. relay-single-miss-debounced-no-warn — lone /status ✕ then recover → green,
+                                         NEVER warn, WoL stays enabled (v8.1 payoff)
+
+Note: scenarios 3, 4 and 10 sample past T+15 s because the v8.1 relay-down
+debounce only hardens the warn on the SECOND consecutive miss, i.e. after the
+15 s self-healing tick re-probes.
 """
 
 import os
@@ -253,18 +261,27 @@ def main():
         results.append(("cold-launch-server-off-fast", ok2, r2,
                         "red ≤T+3, no green, no warn"))
 
+        # v8.1: a sustained relay failure stays optimistic on the FIRST miss
+        # (green, no warn) and the relay warn confirms only after the ~15 s
+        # self-healing tick lands the 2nd miss. Sample at 16 s to catch it; the
+        # early samples must show NO warn.
         r3 = run_scenario(p, "relay-fail-fallback-home-up",
                           relay_plan=lambda n: "fail", home_plan=lambda n: "ok",
-                          sample_delays_s=[1, 3])
-        ok3 = r3["final_green"] and r3["final_warn"] and not r3["red_at"]
+                          sample_delays_s=[1, 3, 16])
+        ok3 = (r3["final_green"] and r3["final_warn"] and not r3["red_at"]
+               and all(t >= 15 for t in r3["warn_at"]))
         results.append(("relay-fail-fallback-home-up", ok3, r3,
-                        "final green+warn, no red"))
+                        "green throughout; relay warn only after ~15 s debounce; no red"))
 
+        # v8.1: red (server down) is immediate — the up/down verdict is NOT
+        # debounced — but the relay warn still waits for the 2nd-miss confirm.
         r4 = run_scenario(p, "relay-and-home-down",
                           relay_plan=lambda n: "fail", home_plan=lambda n: "fail",
-                          sample_delays_s=[1, 3])
-        ok4 = r4["final_red"] and r4["final_warn"] and not r4["final_green"]
-        results.append(("relay-and-home-down", ok4, r4, "final red+warn"))
+                          sample_delays_s=[1, 3, 16])
+        ok4 = (r4["final_red"] and r4["final_warn"] and not r4["final_green"]
+               and all(t >= 15 for t in r4["warn_at"]))
+        results.append(("relay-and-home-down", ok4, r4,
+                        "red immediate; relay warn only after ~15 s debounce"))
 
         r5 = run_scenario(p, "stale-cache-paint-then-confirm",
                           relay_plan=lambda n: "up", home_plan=lambda n: "ok",
@@ -302,6 +319,19 @@ def main():
         ok9 = r9["final_red"] and not r9["final_green"] and bool(r9["red_at"]) and r9["red_at"][0] <= 3
         results.append(("resume-no-event-self-heals-red", ok9, r9,
                         "red ≤ fg+3 s via 1 s visibility poll"))
+
+        # v8.1 payoff: a lone relay transport miss (slow-but-alive e2-micro /
+        # last-mile blip) then recovery on the next tick must NEVER paint the
+        # relay warn nor disable the wake button — relayReachable stays true
+        # throughout. This is the false-alarm the debounce exists to kill.
+        r10 = run_scenario(p, "relay-single-miss-debounced-no-warn",
+                           relay_plan=lambda n: "fail" if n == 1 else "up",
+                           home_plan=lambda n: "ok",
+                           sample_delays_s=[1, 3, 16])
+        ok10 = (r10["final_green"] and not r10["warn_at"] and not r10["red_at"]
+                and not r10["final_wol_disabled"])
+        results.append(("relay-single-miss-debounced-no-warn", ok10, r10,
+                        "lone miss + recover → green, never warn, WoL stays enabled"))
 
     print("\n" + "=" * 72)
     print(f"VERDICT (real browser E2E — v8 single-probe model) — base={PWA_BASE}")

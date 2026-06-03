@@ -265,11 +265,14 @@ class BaseApp:
 
 
 class V8App(BaseApp):
-    """v8.0 — one probe, one generous timeout, generation guard. No cascade."""
+    """v8.0/8.1 — one probe, one generous timeout, generation guard, no
+    cascade; plus the v8.1 1-tick debounce on the relay-down cosmetic."""
 
     def __init__(self, clock, scenario):
         super().__init__(clock, scenario)
         self.probe_gen = 0
+        # v8.1 — 1-tick debounce on the relay-DOWN cosmetic (see app.js).
+        self.relay_down_pending = False
 
     def check_status(self):
         # Mirror app.js: bump the generation at the START of every check so a
@@ -316,7 +319,18 @@ class V8App(BaseApp):
     def _settle(self, gen, up, relay_ok):
         if gen != self.probe_gen:
             return  # superseded by a newer probe (resume race) — drop it
-        self._apply(up, relay_ok)
+        # v8.1 1-tick debounce on the relay-down cosmetic only (mirrors the
+        # checkStatus().then debounce in app.js). A lone relay miss stays
+        # optimistic (eff=True, no "Relais injoignable"); the alarm hardens
+        # only on a second consecutive miss. The home up/down verdict (`up`)
+        # is unaffected. Invariant: relay_down_pending → relay_reachable.
+        if relay_ok:
+            eff, self.relay_down_pending = True, False
+        elif self.relay_down_pending or not self.relay_reachable:
+            eff, self.relay_down_pending = False, False  # 2nd miss / already down → confirm
+        else:
+            eff, self.relay_down_pending = True, True     # 1st miss → stay optimistic this tick
+        self._apply(up, eff)
 
 
 class OldCascadeApp(BaseApp):
@@ -450,8 +464,11 @@ SCENARIOS = [
         horizon=40.0,
     ),
     Scenario(
-        # Relay transport-fails (timeout), home is up → green + relay-down warn.
-        # Detection survives a GCP relay outage. Settles ≤ PROBE + HOME ≈ 13 s.
+        # Relay transport-fails (timeout) on EVERY probe, home is up → green,
+        # and the relay-down warn appears only after the v8.1 debounce confirms
+        # it (2nd consecutive miss, ~1 tick later). Detection survives a GCP
+        # relay outage. First settle ≤ PROBE+HOME ≈ 13 s (green, no warn yet),
+        # confirm warn after the T=15 tick re-probes → needs horizon > ~24 s.
         name="relay-timeout-fallback-home-up",
         relay_outcomes=[FetchOutcome(None, ok=False)],
         home_outcomes=[FetchOutcome(0.3, ok=True)],
@@ -459,6 +476,27 @@ SCENARIOS = [
         expect_final_relay_reachable=False,
         forbid_red_flash=True,
         forbid_warn_flash=False,
+        horizon=30.0,
+    ),
+    Scenario(
+        # v8.1 DEBOUNCE PAYOFF. A single relay /status transport miss (a
+        # slow-but-alive e2-micro or a last-mile blip), then the relay recovers
+        # on the next tick. The lone miss must NEVER paint the "Relais
+        # injoignable" warn nor disable the wake button — relay stays reachable
+        # throughout. (Not an is_contrast scenario: the tape's repeat-last
+        # semantics make OldCascade consume both relay outcomes at T=0 via its
+        # retry, so it can't be compared cleanly on a single-miss-then-recover
+        # tape — this stands on its own as a v8.1 regression guard.)
+        name="relay-single-miss-debounced-no-warn",
+        relay_outcomes=[
+            FetchOutcome(None, ok=False),           # T=0 lone transport miss
+            FetchOutcome(0.3, ok=True, up=True),     # T=15 tick — relay back
+        ],
+        home_outcomes=[FetchOutcome(0.3, ok=True)],
+        expect_final_online=True,
+        expect_final_relay_reachable=True,
+        forbid_red_flash=True,
+        forbid_warn_flash=True,
         horizon=20.0,
     ),
     Scenario(

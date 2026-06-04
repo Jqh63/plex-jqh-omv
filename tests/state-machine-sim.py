@@ -54,6 +54,17 @@ PROBE_TIMEOUT = 8.0      # app.js PROBE_TIMEOUT_MS — relay /status budget
 HOME_TIMEOUT = 5.0       # app.js HOME_FALLBACK_TIMEOUT_MS — direct-home fallback
 CHECK_INTERVAL = 15.0    # app.js self-healing poll (foreground-only)
 STATUS_LOCAL_TTL = 60.0  # app.js STATUS_LOCAL_TTL_MS — localStorage paint TTL
+# A check still "in flight" past this is presumed wedged (suspended-mid-fetch
+# zombie probe, or a resume event that never fired) and the next re-probe
+# trigger reclaims it. Sized at PROBE+HOME+slack so a legitimately slow probe
+# (≤13 s worst case) is never preempted, yet < CHECK_INTERVAL so the 15 s
+# self-healing tick always reclaims a wedge on its first post-wedge fire.
+CHECK_WATCHDOG = PROBE_TIMEOUT + HOME_TIMEOUT + 1.0   # 14 s  (app.js CHECK_WATCHDOG_MS)
+# Consecutive relay /status misses before the (advisory) "Relais injoignable"
+# cosmetic hardens. A cold burstable e2-micro can miss across more than one
+# 15 s tick; a real WoL failure surfaces instantly via postWol regardless, so
+# the passive indicator can afford to be patient and avoid false alarms.
+RELAY_DOWN_MISSES = 3    # app.js RELAY_DOWN_MISSES
 
 # OldCascadeApp (v7) constants — the baseline we're proving better than.
 OLD_STATUS_TIMEOUT = 5.0  # v7.1 STATUS_FETCH_TIMEOUT_MS
@@ -76,6 +87,13 @@ class FetchOutcome:
     # button enabled) and we fall back to direct-home; on a transport failure
     # the relay is marked down. Ignored when ok=True.
     answered: bool = False
+    # A "zombie" fetch: started but NEVER resolves and never rejects. Models the
+    # Android suspend-mid-fetch race the real PWA hits — the socket is torn down
+    # by the OS during background and the in-flight fetch's abort timer is frozen
+    # with it, so `checking=true` is left stuck. The whole point of the watchdog
+    # is to reclaim that stuck flag; this lets the sim exercise it. Overrides
+    # latency/ok when True.
+    zombie: bool = False
 
 
 @dataclass
@@ -265,21 +283,33 @@ class BaseApp:
 
 
 class V8App(BaseApp):
-    """v8.0/8.1 — one probe, one generous timeout, generation guard, no
-    cascade; plus the v8.1 1-tick debounce on the relay-down cosmetic."""
+    """v8.2 — one probe, one generous timeout, generation guard, no cascade;
+    a `checking` watchdog so a wedged in-flight probe can't freeze re-probing;
+    and an N-consecutive-miss debounce on the (advisory) relay-down cosmetic."""
 
     def __init__(self, clock, scenario):
         super().__init__(clock, scenario)
         self.probe_gen = 0
-        # v8.1 — 1-tick debounce on the relay-DOWN cosmetic (see app.js).
-        self.relay_down_pending = False
+        self.check_started_at = 0.0
+        # v8.2 — consecutive relay-miss counter feeding the relay-down debounce.
+        self.relay_miss_streak = 0
 
     def check_status(self):
-        # Mirror app.js: bump the generation at the START of every check so a
-        # stale in-flight probe is dropped when it finally resolves.
-        if self.checking or not self.config:
+        if not self.config:
+            return
+        # Watchdog: a check still in flight past CHECK_WATCHDOG is presumed
+        # wedged (zombie probe / missed resume event) — fall through and start a
+        # fresh one rather than early-returning forever. The generation bump
+        # below drops the stale probe if it ever resolves. This is the backstop
+        # that the v8.0 generation guard was MISSING: dropping a stale probe
+        # without resetting `checking` meant a never-resolving probe froze the
+        # app (the "total KO, must kill" bug).
+        if self.checking and (self.clock.now - self.check_started_at) < CHECK_WATCHDOG:
             return
         self.checking = True
+        self.check_started_at = self.clock.now
+        # Bump the generation at the START of every check so a stale in-flight
+        # probe is dropped when it finally resolves.
         self.probe_gen += 1
         if not self.has_confirmed_state:
             self.paint("checking")
@@ -296,6 +326,8 @@ class V8App(BaseApp):
             self._probe_home(gen, relay_ok=True)
             return
         out = self._next_relay()
+        if out.zombie:
+            return  # wedged probe — never resolves; leaves checking=True stuck
         if out.latency is None or out.latency >= PROBE_TIMEOUT:
             self.clock.after(PROBE_TIMEOUT, lambda: self._relay_done(gen, False, None, False))
         else:
@@ -319,17 +351,18 @@ class V8App(BaseApp):
     def _settle(self, gen, up, relay_ok):
         if gen != self.probe_gen:
             return  # superseded by a newer probe (resume race) — drop it
-        # v8.1 1-tick debounce on the relay-down cosmetic only (mirrors the
-        # checkStatus().then debounce in app.js). A lone relay miss stays
-        # optimistic (eff=True, no "Relais injoignable"); the alarm hardens
-        # only on a second consecutive miss. The home up/down verdict (`up`)
-        # is unaffected. Invariant: relay_down_pending → relay_reachable.
+        # v8.2 N-consecutive-miss debounce on the relay-down cosmetic only
+        # (mirrors checkStatus().then in app.js). A relay miss stays optimistic
+        # (eff=True, no "Relais injoignable") until RELAY_DOWN_MISSES misses in a
+        # row — a cold e2-micro can miss across more than one 15 s tick. Any
+        # answered/successful probe resets the streak. The home up/down verdict
+        # (`up`) is never debounced. Invariant: streak<RELAY_DOWN_MISSES while
+        # reachable.
         if relay_ok:
-            eff, self.relay_down_pending = True, False
-        elif self.relay_down_pending or not self.relay_reachable:
-            eff, self.relay_down_pending = False, False  # 2nd miss / already down → confirm
+            eff, self.relay_miss_streak = True, 0
         else:
-            eff, self.relay_down_pending = True, True     # 1st miss → stay optimistic this tick
+            self.relay_miss_streak += 1
+            eff = not (self.relay_miss_streak >= RELAY_DOWN_MISSES or not self.relay_reachable)
         self._apply(up, eff)
 
 
@@ -465,10 +498,11 @@ SCENARIOS = [
     ),
     Scenario(
         # Relay transport-fails (timeout) on EVERY probe, home is up → green,
-        # and the relay-down warn appears only after the v8.1 debounce confirms
-        # it (2nd consecutive miss, ~1 tick later). Detection survives a GCP
-        # relay outage. First settle ≤ PROBE+HOME ≈ 13 s (green, no warn yet),
-        # confirm warn after the T=15 tick re-probes → needs horizon > ~24 s.
+        # and the relay-down warn appears only after the v8.2 debounce confirms
+        # it (RELAY_DOWN_MISSES=3 consecutive misses). Detection survives a GCP
+        # relay outage. Each miss settles ≈ PROBE+HOME ≈ 8.3 s (home up, fast
+        # fallback), one per 15 s tick: misses at ~8 / ~23 / ~38 s → the 3rd
+        # confirms the warn → needs horizon > ~38 s. Green (home up) throughout.
         name="relay-timeout-fallback-home-up",
         relay_outcomes=[FetchOutcome(None, ok=False)],
         home_outcomes=[FetchOutcome(0.3, ok=True)],
@@ -476,7 +510,7 @@ SCENARIOS = [
         expect_final_relay_reachable=False,
         forbid_red_flash=True,
         forbid_warn_flash=False,
-        horizon=30.0,
+        horizon=45.0,
     ),
     Scenario(
         # v8.1 DEBOUNCE PAYOFF. A single relay /status transport miss (a
@@ -500,8 +534,10 @@ SCENARIOS = [
         horizon=20.0,
     ),
     Scenario(
-        # Both relay and home down → red + warn. Full outage; settles ≈ 13 s.
-        # The KEY property: even a total outage holds orange ≤ 13 s, never 33 s.
+        # Both relay and home down → red is immediate (the up/down verdict is
+        # never debounced; each probe settles red ≈ PROBE+HOME ≈ 13 s). The relay
+        # warn hardens only on the 3rd consecutive miss (~43 s). The KEY property:
+        # even a total outage holds orange ≤ 13 s, never 33 s → horizon > ~43 s.
         name="relay-and-home-down-bounded-orange",
         relay_outcomes=[FetchOutcome(None, ok=False)],
         home_outcomes=[FetchOutcome(None, ok=False)],
@@ -510,7 +546,7 @@ SCENARIOS = [
         forbid_red_flash=False,
         forbid_warn_flash=False,
         is_contrast=True,
-        horizon=40.0,
+        horizon=48.0,
     ),
     Scenario(
         # Relay ANSWERS degraded (503 STATUS_TARGET_URL unset / 404 legacy),
@@ -587,6 +623,50 @@ SCENARIOS = [
         expect_final_online=False,
         forbid_red_flash=False,
         horizon=30.0,
+    ),
+    Scenario(
+        # BUG 2 — frozen-green wedge (the "total KO, must kill the app" report).
+        # The cold-launch probe is a ZOMBIE: started, then the app is suspended
+        # mid-fetch and the socket dies, so it never resolves and leaves
+        # checking=True stuck. NO resume event fires (Android PWA standalone
+        # quirk). The server actually went down during the freeze. The ONLY
+        # rescue is the 15 s self-healing tick — but with a stuck `checking`
+        # flag it early-returns forever, so the app stays frozen on the stale
+        # green pre-paint until killed. The watchdog must let the tick reclaim
+        # the stale flag and re-probe → red. Without it, final stays green → FAIL.
+        name="zombie-probe-wedges-checking-self-heals",
+        relay_outcomes=[
+            FetchOutcome(None, zombie=True),         # #1 cold probe never resolves
+            FetchOutcome(0.3, ok=True, up=False),    # #2 reclaimed probe — server down
+        ],
+        oracle_cache={"up": True, "relay_ok": True},  # stale green pre-paint
+        foreground_event="none",
+        expect_final_online=False,
+        forbid_red_flash=False,
+        horizon=50.0,
+    ),
+    Scenario(
+        # BUG 1 — cold relay e2-micro slow across MORE than one tick. The relay
+        # /status transport-misses on the first TWO probes (T=0 and the T=15
+        # tick) because the burstable VM is cold, then recovers on the third.
+        # Home is up throughout. The v8.1 1-tick debounce confirms "relay down"
+        # on the 2nd consecutive miss → paints the false "Relais injoignable"
+        # warn at ~T=15-30 (the user's "message relais off"). The relay-down
+        # indicator is purely advisory (a real WoL failure surfaces instantly via
+        # postWol), so it must tolerate a multi-tick cold start: NO warn, relay
+        # stays reachable, server shows green from the home fallback throughout.
+        name="cold-relay-two-tick-miss-no-false-warn",
+        relay_outcomes=[
+            FetchOutcome(None, ok=False),            # T=0 cold miss
+            FetchOutcome(None, ok=False),            # T=15 still cold miss
+            FetchOutcome(0.3, ok=True, up=True),     # T=30 relay warm
+        ],
+        home_outcomes=[FetchOutcome(0.3, ok=True)],
+        expect_final_online=True,
+        expect_final_relay_reachable=True,
+        forbid_red_flash=True,
+        forbid_warn_flash=True,
+        horizon=50.0,
     ),
 ]
 

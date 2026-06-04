@@ -28,20 +28,24 @@ Scenarios (mirror state-machine-sim.py):
   1. cold-launch-server-up-fast        — /status up → green ≤3 s
   2. cold-launch-server-off-fast       — /status down → red ≤3 s
   3. relay-fail-fallback-home-up       — /status ✕ → home ok → green; relay warn
-                                         only AFTER the v8.1 debounce confirms (~15 s)
+                                         only after the v8.2 3rd-miss debounce (~30 s)
   4. relay-and-home-down               — /status ✕ → home ✕ → red immediate;
-                                         relay warn only after the ~15 s debounce
+                                         relay warn only after the 3rd-miss debounce
   5. stale-cache-paint-then-confirm    — localStorage <60 s → green instant
   6. relay-degraded-server-up          — /status 503 → home ok → green, no warn, WoL on
   7. relay-degraded-server-down        — /status 503 → home ✕ → red, no warn, WoL on
   8. resume-focus-only-converges-red   — bg → server dies → focus → red
   9. resume-no-event-self-heals-red    — bg → server dies → no event → red ≤3 s
  10. relay-single-miss-debounced-no-warn — lone /status ✕ then recover → green,
-                                         NEVER warn, WoL stays enabled (v8.1 payoff)
+                                         NEVER warn, WoL stays enabled (debounce payoff)
+ 11. watchdog-reclaims-wedged-checking — stuck checking=true + server down → a
+                                         re-probe reclaims the flag → red, not frozen green
 
-Note: scenarios 3, 4 and 10 sample past T+15 s because the v8.1 relay-down
-debounce only hardens the warn on the SECOND consecutive miss, i.e. after the
-15 s self-healing tick re-probes.
+Note: scenarios 3 and 4 sample past T+30 s because the v8.2 relay-down debounce
+only hardens the warn on the THIRD consecutive miss, i.e. after two 15 s
+self-healing ticks re-probe. Scenario 11 exercises the `checking` watchdog
+directly (a real headless browser can't reproduce the Android suspend that
+wedges the flag — that race is covered by the offline state-machine sim).
 """
 
 import os
@@ -244,6 +248,63 @@ def run_resume_scenario(p, name, relay_plan, fg_event, bg_at_s, fg_at_s, sample_
     }
 
 
+def run_watchdog_scenario(p):
+    """v8.2 `checking` watchdog. A real headless browser can't reproduce the
+    Android suspend-mid-fetch that wedges `checking` (its timers run normally in
+    foreground, so a probe always resolves within PROBE_TIMEOUT) — that race is
+    the sim's job. Here we exercise the watchdog DIRECTLY through the real
+    app.js: force a stuck `checking=true` with a `checkStartedAt` older than the
+    watchdog budget (the wedge a never-resolving probe + missed resume event
+    would leave), flip the server to down, then fire a re-probe trigger. With the
+    watchdog, checkStatus reclaims the stale flag and repaints red; WITHOUT it,
+    checkStatus early-returns and the app stays frozen on green (the bug)."""
+    name = "watchdog-reclaims-wedged-checking"
+    print(f"\n## Watchdog scenario: {name}")
+    counters = {"relay": 0, "home": 0}
+    relay_verdict = {"v": "up"}
+
+    def handle(route: Route):
+        parsed = urlparse(route.request.url)
+        host = parsed.netloc
+        if host == RELAY_HOST and parsed.path == "/status":
+            counters["relay"] += 1
+            _relay_fulfill(route, relay_verdict["v"])
+            return
+        if host == CONFIG_HOST or host.endswith("." + CONFIG_HOST):
+            counters["home"] += 1
+            route.fulfill(status=200, body="")
+            return
+        route.continue_()
+
+    b = p.chromium.launch()
+    ctx = b.new_context(viewport={"width": 390, "height": 844})
+    page = ctx.new_page()
+    page.route("**/*", handle)
+    page.goto(PWA_URL, wait_until="load")
+    page.wait_for_selector("#statusLabel", state="attached", timeout=10000)
+    page.wait_for_timeout(1500)
+    pre = capture_state(page)  # relay up → green
+
+    # Server goes down, AND simulate a wedged in-flight check: checking stuck
+    # true with checkStartedAt far in the past (> CHECK_WATCHDOG_MS). app.js
+    # declares these as top-level `var`s, so they live on window.
+    relay_verdict["v"] = "down"
+    page.evaluate("() => { window.checking = true; window.checkStartedAt = Date.now() - 60000; }")
+    # Re-probe trigger (stands in for the 15 s self-healing tick) — the refresh
+    # button calls checkStatus().
+    page.click("#refreshBtn")
+    page.wait_for_timeout(2000)
+    post = capture_state(page)
+    b.close()
+    return {
+        "name": name,
+        "pre_green": is_green(pre),
+        "final_red": is_red(post),
+        "final_green": is_green(post),
+        "counters": dict(counters),
+    }
+
+
 def main():
     results = []
     with sync_playwright() as p:
@@ -261,27 +322,27 @@ def main():
         results.append(("cold-launch-server-off-fast", ok2, r2,
                         "red ≤T+3, no green, no warn"))
 
-        # v8.1: a sustained relay failure stays optimistic on the FIRST miss
-        # (green, no warn) and the relay warn confirms only after the ~15 s
-        # self-healing tick lands the 2nd miss. Sample at 16 s to catch it; the
-        # early samples must show NO warn.
+        # v8.2: a sustained relay failure stays optimistic until RELAY_DOWN_MISSES
+        # (3) consecutive misses. With instant-abort, misses land at the T=0 /
+        # T=15 / T=30 ticks, so the warn confirms ~T=30. Sample at 31 s to catch
+        # it; every earlier sample must show NO warn (the false-alarm we killed).
         r3 = run_scenario(p, "relay-fail-fallback-home-up",
                           relay_plan=lambda n: "fail", home_plan=lambda n: "ok",
-                          sample_delays_s=[1, 3, 16])
+                          sample_delays_s=[1, 3, 16, 31])
         ok3 = (r3["final_green"] and r3["final_warn"] and not r3["red_at"]
-               and all(t >= 15 for t in r3["warn_at"]))
+               and all(t >= 30 for t in r3["warn_at"]))
         results.append(("relay-fail-fallback-home-up", ok3, r3,
-                        "green throughout; relay warn only after ~15 s debounce; no red"))
+                        "green throughout; relay warn only after 3rd miss (~30 s); no red"))
 
-        # v8.1: red (server down) is immediate — the up/down verdict is NOT
-        # debounced — but the relay warn still waits for the 2nd-miss confirm.
+        # v8.2: red (server down) is immediate — the up/down verdict is NOT
+        # debounced — but the relay warn still waits for the 3rd-miss confirm.
         r4 = run_scenario(p, "relay-and-home-down",
                           relay_plan=lambda n: "fail", home_plan=lambda n: "fail",
-                          sample_delays_s=[1, 3, 16])
+                          sample_delays_s=[1, 3, 16, 31])
         ok4 = (r4["final_red"] and r4["final_warn"] and not r4["final_green"]
-               and all(t >= 15 for t in r4["warn_at"]))
+               and all(t >= 30 for t in r4["warn_at"]))
         results.append(("relay-and-home-down", ok4, r4,
-                        "red immediate; relay warn only after ~15 s debounce"))
+                        "red immediate; relay warn only after 3rd miss (~30 s)"))
 
         r5 = run_scenario(p, "stale-cache-paint-then-confirm",
                           relay_plan=lambda n: "up", home_plan=lambda n: "ok",
@@ -332,6 +393,11 @@ def main():
                 and not r10["final_wol_disabled"])
         results.append(("relay-single-miss-debounced-no-warn", ok10, r10,
                         "lone miss + recover → green, never warn, WoL stays enabled"))
+
+        r11 = run_watchdog_scenario(p)
+        ok11 = r11["pre_green"] and r11["final_red"] and not r11["final_green"]
+        results.append(("watchdog-reclaims-wedged-checking", ok11, r11,
+                        "wedged checking reclaimed on re-probe → red, not frozen green"))
 
     print("\n" + "=" * 72)
     print(f"VERDICT (real browser E2E — v8 single-probe model) — base={PWA_BASE}")

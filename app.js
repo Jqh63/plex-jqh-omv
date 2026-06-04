@@ -1,15 +1,17 @@
 var config=null,isOnline=false,wolSent=false,checking=false,checkInterval=null;
 var relayReachable=true;
-// v8.1 — 1-tick debounce on the relay-DOWN cosmetic only. A single relay
+// v8.2 — N-consecutive-miss debounce on the relay-DOWN cosmetic only. A relay
 // /status transport failure is most often a slow-but-alive e2-micro (cold
-// burstable CPU) or a last-mile blip, NOT a dead relay. So the FIRST miss
-// keeps relayReachable optimistic (button stays enabled, no "Relais
-// injoignable" alarm) and only flags `relayDownPending`; the alarm hardens
-// only if the NEXT probe (~15 s later) also misses. Invariant: pending===true
-// implies relayReachable===true. This debounces the passive cosmetic ONLY —
-// the up/down verdict stays single-probe (v8 core), and a genuine relay-down
-// the user actually hits via WoL still surfaces instantly (postWol catch).
-var relayDownPending=false;
+// burstable CPU spanning more than one 15 s tick) or a last-mile blip, NOT a
+// dead relay. So a miss keeps relayReachable optimistic (button stays enabled,
+// no "Relais injoignable" alarm) and only bumps `relayMissStreak`; the alarm
+// hardens only once RELAY_DOWN_MISSES misses land in a row. Any answered/up
+// probe resets the streak. This debounces the passive cosmetic ONLY — the
+// up/down verdict stays single-probe (v8 core), and a genuine relay-down the
+// user actually hits via WoL still surfaces instantly (postWol catch). v8.1
+// used a 1-tick debounce (2 misses) — too tight against a cold relay that
+// misses across two ticks, which painted a false "relais off" on cold open.
+var relayMissStreak=0;
 var wolStartTime=0,wolPollTimer=null,wolRetryTimers=[];
 // True once setOnline / setOffline has fired this session. Gates the
 // orange "Vérification…" card so we don't strobe orange on every 15 s
@@ -43,6 +45,22 @@ var PROBE_TIMEOUT_MS=8000;
 // (transport failure or answered-but-degraded). One shot, no retry — by the
 // time we reach it the radio is warm, so 5 s is ample.
 var HOME_FALLBACK_TIMEOUT_MS=5000;
+// Consecutive relay /status misses before the (advisory) "Relais injoignable"
+// cosmetic hardens — see relayMissStreak above. 3 misses ≈ 2 self-healing
+// ticks of patience, enough to ride out a cold e2-micro without crying wolf.
+var RELAY_DOWN_MISSES=3;
+// v8.2 — `checking` watchdog. A check still in flight past this is presumed
+// WEDGED: the Android suspend-mid-fetch race can tear down the socket and
+// freeze the abort timer with it, so a probe never resolves and never resets
+// `checking` — and checkStatus()'s `if(checking)return` then blocks EVERY
+// subsequent re-probe forever (the "total KO, statut figé, must kill the app"
+// bug). Past this budget, any re-probe trigger (the 15 s self-healing tick is
+// the guaranteed-eventually one) reclaims the stuck flag and starts fresh; the
+// probeGen bump drops the wedged probe if it ever resolves late. Sized at
+// PROBE+HOME+slack so a legitimately slow probe (≤13 s) is never preempted, yet
+// < the 15 s interval so the next tick always reclaims a wedge.
+var CHECK_WATCHDOG_MS=PROBE_TIMEOUT_MS+HOME_FALLBACK_TIMEOUT_MS+1000;
+var checkStartedAt=0;
 // Mini-cache for back-to-back reopens (closing then reopening the PWA
 // within a minute). Kept short on purpose — beyond a minute the user
 // expects a fresh check, and we already learned (v6.0 drop-cache fix)
@@ -330,7 +348,7 @@ function startApp(){
   buildLinks();
   clearWolPoll();
   clearWolRetries();
-  isOnline=false;wolSent=false;checking=false;relayReachable=true;relayDownPending=false;hasConfirmedState=false;
+  isOnline=false;wolSent=false;checking=false;checkStartedAt=0;relayReachable=true;relayMissStreak=0;hasConfirmedState=false;
   // Paint the localStorage cache (<60 s) immediately so back-to-back
   // reopens don't strobe orange. The background checkStatus() below
   // confirms or corrects.
@@ -423,7 +441,14 @@ function fetchHomeDirectly(){
 // resume) a no-op, so a fresh resume probe always wins without the old
 // retry/hold/streak machinery.
 function checkStatus(){
-  if(checking||!config)return;checking=true;
+  if(!config)return;
+  // v8.2 watchdog (see CHECK_WATCHDOG_MS): don't let a wedged in-flight check —
+  // a probe suspended mid-fetch that never resolved, or a check whose resume
+  // event never fired — block re-probing forever. If the prior check is older
+  // than the watchdog budget, fall through and start a fresh one; the ++probeGen
+  // below drops the stale probe if it ever resolves late.
+  if(checking&&Date.now()-checkStartedAt<CHECK_WATCHDOG_MS)return;
+  checking=true;checkStartedAt=Date.now();
   var gen=++probeGen;
   var label=document.getElementById('statusLabel'),sub=document.getElementById('statusSub'),btn=document.getElementById('refreshBtn');
   btn.classList.add('spinning');
@@ -441,15 +466,15 @@ function checkStatus(){
     // stale verdict without touching `checking`, which the newer probe owns.
     if(gen!==probeGen)return;
     checking=false;btn.classList.remove('spinning');
-    // 1-tick debounce on relay reachability (see relayDownPending comment):
-    // a lone transport miss stays optimistic; the alarm hardens only on a
-    // second consecutive miss. The home up/down verdict (res.up) is used raw.
+    // N-consecutive-miss debounce on relay reachability (see relayMissStreak
+    // comment): a miss stays optimistic until RELAY_DOWN_MISSES in a row; any
+    // answered/up probe resets the streak. The home up/down verdict (res.up) is
+    // used raw — never debounced.
     if(res.relayReachable){
-      relayReachable=true;relayDownPending=false;
-    }else if(relayDownPending||!relayReachable){
-      relayReachable=false;relayDownPending=false; // 2nd miss, or already down → confirm
+      relayReachable=true;relayMissStreak=0;
     }else{
-      relayDownPending=true;                       // 1st miss → stay optimistic this tick
+      relayMissStreak++;
+      relayReachable=!(relayMissStreak>=RELAY_DOWN_MISSES||!relayReachable);
     }
     writeLocalStatus(res.up,relayReachable);
     if(res.up)setOnline();else setOffline();
@@ -627,8 +652,9 @@ function postWol(isRetry){
     // Flip relayReachable manually — a checkStatus() right now would race
     // the WoL POST, and we already know the relay just failed. This is a
     // CONFIRMED failure (the user actually tried to wake), so bypass the
-    // 1-tick debounce and surface it immediately; clear any pending state.
-    relayReachable=false;relayDownPending=false;
+    // miss-streak debounce and surface it immediately; pin the streak at the
+    // confirmed-down ceiling so a following miss keeps it down.
+    relayReachable=false;relayMissStreak=RELAY_DOWN_MISSES;
     if(navigator.vibrate)navigator.vibrate(300);
     showToast('⚠ Relais injoignable — utilise le réveil manuel ↓',true,5000);
     setOffline();

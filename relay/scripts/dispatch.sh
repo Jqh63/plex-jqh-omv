@@ -16,8 +16,16 @@
 #   ssh wol-relay-deploy logs-wol-relay    # journalctl -u wol-relay -n 100 (read-only)
 #   ssh wol-relay-deploy logs-caddy        # journalctl -u caddy -n 100 (read-only)
 #
+# home-watch (external homelab monitor, content pushed in from the private
+# knowledge-base repo — never stored here):
+#   ssh wol-relay-deploy push-home-watch{,-service,-timer}  # stdin → staging
+#   ssh wol-relay-deploy apply-home-watch  # install + enable home-watch.timer
+#   ssh wol-relay-deploy home-watch-status # timer active + next run (read-only)
+#   ssh wol-relay-deploy logs-home-watch   # journalctl -u home-watch -n 100 (read-only)
+#
 # Standard usage pattern: `relay/scripts/deploy.sh` on the deploying host
 # pipes the 3 push commands from the local repo, then triggers apply.
+# home-watch is deployed analogously by knowledge-base's deploy-home-watch.sh.
 #
 # Security by construction:
 #   - Static enum whitelist (no regex, no glob, no free args).
@@ -45,6 +53,18 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
   push-service)
     cat > "$STAGING_DIR/wol-relay.service"
     echo "[push-service] OK ($(wc -c < "$STAGING_DIR/wol-relay.service") bytes)"
+    ;;
+  push-home-watch)
+    cat > "$STAGING_DIR/home-watch.sh"
+    echo "[push-home-watch] OK ($(wc -c < "$STAGING_DIR/home-watch.sh") bytes)"
+    ;;
+  push-home-watch-service)
+    cat > "$STAGING_DIR/home-watch.service"
+    echo "[push-home-watch-service] OK ($(wc -c < "$STAGING_DIR/home-watch.service") bytes)"
+    ;;
+  push-home-watch-timer)
+    cat > "$STAGING_DIR/home-watch.timer"
+    echo "[push-home-watch-timer] OK ($(wc -c < "$STAGING_DIR/home-watch.timer") bytes)"
     ;;
   apply)
     # Pre-condition: the 3 staged files must exist.
@@ -77,9 +97,33 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
   logs-caddy)
     sudo /usr/bin/journalctl -u caddy -n 100 --no-pager
     ;;
+  apply-home-watch)
+    # home-watch = external homelab monitor (private content pushed via stdin
+    # from the knowledge-base repo). Pre-condition: the 3 staged files exist.
+    for f in home-watch.sh home-watch.service home-watch.timer; do
+      if [[ ! -s "$STAGING_DIR/$f" ]]; then
+        echo "[apply-home-watch] FAIL — $STAGING_DIR/$f missing or empty. Run push-home-watch* first." >&2
+        exit 1
+      fi
+    done
+    sudo /usr/bin/install -o homewatch -g homewatch -m 0755 "$STAGING_DIR/home-watch.sh" /opt/home-watch/home-watch.sh
+    sudo /usr/bin/install -m 0644 "$STAGING_DIR/home-watch.service" /etc/systemd/system/home-watch.service
+    sudo /usr/bin/install -m 0644 "$STAGING_DIR/home-watch.timer" /etc/systemd/system/home-watch.timer
+    sudo /bin/systemctl daemon-reload
+    sudo /bin/systemctl enable --now home-watch.timer
+    echo "[apply-home-watch] OK — home-watch.timer enabled"
+    ;;
+  home-watch-status)
+    /bin/systemctl is-active home-watch.timer
+    /bin/systemctl list-timers home-watch.timer --no-pager
+    ;;
+  logs-home-watch)
+    sudo /usr/bin/journalctl -u home-watch -n 100 --no-pager
+    ;;
   *)
     echo "dispatch.sh: unknown command '${SSH_ORIGINAL_COMMAND:-}'" >&2
-    echo "Expected: push-app, push-caddyfile, push-service, apply, status, health, logs-wol-relay, logs-caddy." >&2
+    echo "Expected: push-app, push-caddyfile, push-service, apply, status, health, logs-wol-relay, logs-caddy," >&2
+    echo "          push-home-watch{,-service,-timer}, apply-home-watch, home-watch-status, logs-home-watch." >&2
     exit 64
     ;;
 esac

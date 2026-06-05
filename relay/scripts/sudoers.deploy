@@ -33,4 +33,19 @@ Cmnd_Alias WOL_RELAY_LOGS = \
   /usr/bin/journalctl -u wol-relay -n 100 --no-pager, \
   /usr/bin/journalctl -u caddy -n 100 --no-pager
 
-deploy ALL=(root) NOPASSWD: WOL_RELAY_INSTALL, WOL_RELAY_SYSTEMCTL, WOL_RELAY_LOGS
+# home-watch — external homelab monitor (apply-home-watch / logs-home-watch).
+# Same isolation: exact verbs, literal paths, no wildcards. (daemon-reload is
+# already covered by WOL_RELAY_SYSTEMCTL above.)
+Cmnd_Alias HOME_WATCH_INSTALL = \
+  /usr/bin/install -o homewatch -g homewatch -m 0755 /tmp/wol-relay-staging/home-watch.sh /opt/home-watch/home-watch.sh, \
+  /usr/bin/install -m 0644 /tmp/wol-relay-staging/home-watch.service /etc/systemd/system/home-watch.service, \
+  /usr/bin/install -m 0644 /tmp/wol-relay-staging/home-watch.timer /etc/systemd/system/home-watch.timer
+
+Cmnd_Alias HOME_WATCH_SYSTEMCTL = \
+  /bin/systemctl enable --now home-watch.timer
+
+Cmnd_Alias HOME_WATCH_LOGS = \
+  /usr/bin/journalctl -u home-watch -n 100 --no-pager
+
+deploy ALL=(root) NOPASSWD: WOL_RELAY_INSTALL, WOL_RELAY_SYSTEMCTL, WOL_RELAY_LOGS, \
+                            HOME_WATCH_INSTALL, HOME_WATCH_SYSTEMCTL, HOME_WATCH_LOGS

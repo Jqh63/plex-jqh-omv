@@ -199,6 +199,29 @@ else
   echo "[bootstrap] no omvtunnel pubkey (2nd arg) — reverse-SSH endpoint skipped"
 fi
 
+# --- 9. home-watch external monitor prerequisites -------------------------
+# External homelab monitor (content deployed via the dispatch.sh channel from
+# the private knowledge-base repo). This only provisions the runtime context;
+# the script/units + the two secret files (/etc/msmtprc, /etc/home-watch.env)
+# are pushed/edited separately. Idempotent.
+if ! id -u homewatch &>/dev/null; then
+  useradd -r -s /usr/sbin/nologin homewatch
+  echo "[bootstrap] user 'homewatch' created (system, nologin)"
+else
+  echo "[bootstrap] user 'homewatch' already present (skip)"
+fi
+install -d -m 0755 -o homewatch -g homewatch /opt/home-watch
+install -d -m 0750 -o homewatch -g homewatch /var/lib/home-watch
+echo "[bootstrap] /opt/home-watch + /var/lib/home-watch ready"
+if ! command -v msmtp &>/dev/null; then
+  echo "[bootstrap] installing msmtp (mail egress for home-watch alerts) ..."
+  DEBIAN_FRONTEND=noninteractive apt-get install -y msmtp msmtp-mta \
+    && echo "[bootstrap] msmtp installed" \
+    || echo "[bootstrap] WARN: msmtp install failed — install manually before deploying home-watch"
+else
+  echo "[bootstrap] msmtp already present (skip)"
+fi
+
 cat <<EOF
 
 [bootstrap] DONE.
@@ -210,6 +233,11 @@ Next steps (manual, ONE-SHOT):
   4. Test from your deploy host:
        ssh wol-relay-deploy status
        ssh wol-relay-deploy health
+  5. (home-watch monitor) post two secret files (0600, owner homewatch),
+     then deploy from the private knowledge-base sandbox:
+       /etc/msmtprc          (dedicated Gmail app-password)
+       /etc/home-watch.env   (HW_MAIL_TO=...)
+       bash wol-relay/scripts/deploy-home-watch.sh   # (knowledge-base repo)
 EOF
 
 if [[ -n "$OMVTUNNEL_PUBKEY_PATH" ]]; then

@@ -184,6 +184,40 @@ If any of these fail: check `journalctl -u sshd` on the VM
 (forced-command denial), `sudo -l -U deploy` (expected sudoers),
 `cat ~deploy/.ssh/authorized_keys` (forced-command present).
 
+### Reverse-SSH fallback endpoint (optional, operator-specific)
+
+This VM can double as an **out-of-band SSH fallback** to a home server
+whose only remote access path is a VPN that might itself break. The
+design and threat model live in the operator's knowledge-base ADR
+`2026-06-05-fallback-ssh-out-of-band-reverse-autossh`; this section only
+covers the VM-side endpoint.
+
+**Recovery chain** (2 hops, 2 auths): `admin → VM (IAP: Google + 2FA) →
+127.0.0.1:2222 tunnel socket → home sshd (password + Fail2ban)`. The home
+server keeps a permanent **outbound** reverse tunnel open during its uptime
+(`ssh -N -R 127.0.0.1:2222:127.0.0.1:2222 omvtunnel@<vm>`), so the path
+exists *before* the VPN breaks — you cannot ask a locked-out host to open
+it after the fact.
+
+To provision the endpoint:
+
+```bash
+# On the HOME server: generate a dedicated key (private stays there).
+ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519_omvtunnel -N "" -C "omvtunnel"
+cat ~/.ssh/id_ed25519_omvtunnel.pub          # → copy this
+
+# Drop the .pub on the VM, then re-run the bootstrap WITH the 2nd arg:
+sudo bash /tmp/relay-bootstrap/scripts/bootstrap-wol-relay.sh \
+     /tmp/wol-relay-deploy.pub /tmp/id_ed25519_omvtunnel.pub
+```
+
+The bootstrap then creates the `omvtunnel` user and an `authorized_keys`
+restricted to the single loopback listener (`restrict` + `permitlisten` +
+nologin). The home-side tunnel unit (systemd `ssh -N -R`) is versioned
+separately in the operator's homelab repo. Validate **from 4G/VPN-off**
+with the home VPN deliberately cut server-side — a LAN test proves nothing
+here.
+
 ## Initial VM provisioning (recovery from zero)
 
 This section covers building a fresh VM from scratch. Skip it if you
@@ -207,15 +241,29 @@ LE rate-limits per name.
 
 ### 3. Firewall
 
-Restrict SSH to your admin IP. Open 80/tcp + 443/tcp to the world
-(Caddy needs 80 for the LE HTTP-01 challenge).
+Open 80/tcp + 443/tcp to the world (Caddy needs 80 for the LE HTTP-01
+challenge). For SSH, pick one of:
+
+- **Base relay only** — restrict SSH (tcp:22) to your admin IP. Simplest,
+  smallest public surface.
+- **VM also used as an out-of-band fallback** (the optional `omvtunnel`
+  reverse-SSH endpoint, see *Hardening notes*) — do **not** pin SSH to a
+  fixed source IP: the recovery scenario (admin away from home, home VPN
+  down) implies an *arbitrary* source IP, so pinning would lock you out at
+  the exact moment the fallback is needed. Instead expose **no public
+  tcp:22 at all** and reach SSH through a strong-auth broker that works
+  from any network. On GCP that is **IAP** (Identity-Aware Proxy): allow
+  only the IAP range `35.235.240.0/20` to tcp:22, drop any `0.0.0.0/0`
+  tcp:22 rule, and grant your account the *IAP-secured Tunnel User* role —
+  auth becomes Google account + 2FA from anywhere, no port open to the
+  world.
 
 ### 4. Base packages (Debian 12)
 
 ```bash
 sudo apt update && sudo apt full-upgrade -y && sudo apt install -y \
   debian-keyring debian-archive-keyring apt-transport-https curl gnupg \
-  python3-venv python3-pip ufw vim
+  python3-venv python3-pip ufw vim fail2ban
 
 # Caddy from the official repo
 curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | \
@@ -236,6 +284,23 @@ sudo -u wol /opt/wol-relay/venv/bin/pip install fastapi 'uvicorn[standard]' 'htt
 sudo ufw default deny incoming && sudo ufw default allow outgoing
 sudo ufw allow 22/tcp && sudo ufw allow 80/tcp && sudo ufw allow 443/tcp
 sudo ufw --force enable
+
+# SSH key-only (GCP images already default to this — verify and enforce).
+# Required if this VM is also the out-of-band fallback endpoint: a password
+# prompt reachable through the chain would be a brute-force surface.
+sudo sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
+sudo systemctl restart ssh
+
+# Fail2ban: enable the sshd jail (backend systemd reads journald).
+sudo tee /etc/fail2ban/jail.local >/dev/null <<'JAIL'
+[sshd]
+enabled  = true
+backend  = systemd
+maxretry = 4
+bantime  = 1h
+findtime = 10m
+JAIL
+sudo systemctl enable --now fail2ban
 ```
 
 ### 5. Continue with the GitOps bootstrap
@@ -295,8 +360,12 @@ env var is safe (no `/wol` regression).
 
 | Measure | Why |
 |---|---|
-| Cloud firewall SSH IP-restricted | Reduces SSH public surface to your admin IP only |
+| SSH key-only (`PasswordAuthentication no`) | No password to brute-force; mandatory when the VM is an out-of-band fallback hop |
+| Cloud firewall: no public tcp:22, IAP-only (or admin-IP if base relay) | Out-of-band fallback needs any-source reach → IAP (Google account + 2FA) instead of an IP pin that would lock you out mid-incident. Base-relay-only deployments may IP-restrict instead |
+| Fail2ban `sshd` jail (systemd backend) | Caps auth-failure velocity on any connection that reaches sshd (incl. IAP-tunneled) |
 | UFW redundant (deny incoming + allow 22/80/443) | Defense in depth if the cloud firewall is misconfigured |
+| `omvtunnel` user: `restrict` + `permitlisten="127.0.0.1:2222"` + nologin | Reverse-SSH fallback endpoint can ONLY terminate the one loopback-bound listener — no shell, no PTY, no other forward. Zero command capability, so no forced-command needed |
+| Reverse-tunnel listener bound to VM loopback (not `0.0.0.0`) | The tunnelled OMV sshd is **not** reachable from the VM public IP — one must first be logged ON the VM (via IAP) to reach it. Closes the "VM becomes a free public SSH-to-home" risk |
 | Caddy auto-HTTPS Let's Encrypt | TLS without manual config; the token transits in an encrypted header |
 | Caddy CORS on 502 | Error responses don't break browser-side diagnostics |
 | uvicorn `--no-access-log` | The token never ends up in a log |

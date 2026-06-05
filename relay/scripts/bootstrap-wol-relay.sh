@@ -8,6 +8,15 @@
 # the Caddy systemd drop-in, and (optionally) seeds the two env file
 # templates. Idempotent: re-runnable without breaking existing state.
 #
+# Optional reverse-SSH fallback endpoint: pass a SECOND argument (path to
+# the OMV tunnel public key) to also provision the `omvtunnel` user. That
+# user can ONLY terminate a reverse-listener bound to the VM loopback
+# (127.0.0.1:2222) — no shell, no PTY, no other forward (restrict +
+# permitlisten). It is the VM-side endpoint of the out-of-band SSH fallback
+# (admin → VM via IAP → tunnel → OMV sshd) decided in knowledge-base ADR
+# 2026-06-05-fallback-ssh-out-of-band-reverse-autossh. Omit the 2nd arg to
+# skip it entirely (backward compatible with the deploy-only bootstrap).
+#
 # Prerequisites: this script and the following files must live in the
 # SAME directory when invoked (the helper resolves them relative to
 # itself):
@@ -35,6 +44,9 @@
 #     IF the runtime files don't exist yet (does NOT overwrite)
 #   - Creates /tmp/wol-relay-staging/ (also created by dispatch.sh on
 #     each push, but pre-created here for clarity)
+#   - (IF a 2nd arg is given) Creates user `omvtunnel` (nologin shell, no
+#     sudo) and ~omvtunnel/.ssh/authorized_keys restricted to the single
+#     reverse-listener 127.0.0.1:2222 (restrict,permitlisten,nologin)
 #
 # Reload note: this script does `systemctl daemon-reload` so the Caddy
 # drop-in takes effect. It does NOT restart caddy itself — the operator
@@ -49,11 +61,21 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 if [[ $# -lt 1 ]]; then
-  echo "Usage: sudo bash $0 <path-to-deploy-public-key>" >&2
+  echo "Usage: sudo bash $0 <path-to-deploy-public-key> [<path-to-omvtunnel-public-key>]" >&2
   exit 64
 fi
 
 PUBKEY_PATH="$1"
+# Optional 2nd arg: enables the reverse-SSH fallback endpoint (omvtunnel user).
+OMVTUNNEL_PUBKEY_PATH="${2:-}"
+
+# Reverse-tunnel listener exposed on the VM loopback ONLY (jamais 0.0.0.0).
+# Must match the OMV-side `ssh -R 127.0.0.1:2222:127.0.0.1:2222` and the OMV
+# sshd port (2222). The bind-localhost is the central guard rail of the ADR:
+# the OMV sshd is NOT reachable from the VM public IP — one must first be
+# logged ON the VM (via IAP) to reach the tunnel socket.
+TUNNEL_LISTEN="127.0.0.1:2222"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RELAY_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 DISPATCH_SRC="$SCRIPT_DIR/dispatch.sh"
@@ -65,6 +87,12 @@ WOL_ENV_SRC="$RELAY_DIR/wol-relay.env.example"
 for f in "$PUBKEY_PATH" "$DISPATCH_SRC" "$SUDOERS_SRC" "$CADDY_DROPIN_SRC" "$CADDY_ENV_SRC" "$WOL_ENV_SRC"; do
   [[ -f "$f" ]] || { echo "ERR: required file missing: $f" >&2; exit 1; }
 done
+
+# The omvtunnel pubkey is optional, but if a path is given it must exist.
+if [[ -n "$OMVTUNNEL_PUBKEY_PATH" && ! -f "$OMVTUNNEL_PUBKEY_PATH" ]]; then
+  echo "ERR: omvtunnel pubkey path given but not found: $OMVTUNNEL_PUBKEY_PATH" >&2
+  exit 1
+fi
 
 # --- 1. deploy user --------------------------------------------------------
 if ! id -u deploy >/dev/null 2>&1; then
@@ -133,6 +161,39 @@ fi
 install -d -m 0755 -o deploy -g deploy /tmp/wol-relay-staging
 echo "[bootstrap] /tmp/wol-relay-staging ready"
 
+# --- 8. omvtunnel reverse-SSH fallback endpoint (optional) ----------------
+# Provisioned only when a 2nd arg (omvtunnel pubkey path) is supplied.
+# Cf. knowledge-base ADR 2026-06-05-fallback-ssh-out-of-band-reverse-autossh.
+# This user CANNOT run anything: `restrict` strips every capability (pty,
+# port-forwarding, X11, agent, user-rc), `permitlisten` re-allows ONLY the
+# single reverse-listener on the VM loopback, and command=nologin neutralises
+# any session attempt. That is precisely why it needs no forced-command à la
+# dispatch.sh — it has zero command capability to begin with.
+if [[ -n "$OMVTUNNEL_PUBKEY_PATH" ]]; then
+  if ! id -u omvtunnel >/dev/null 2>&1; then
+    useradd -m -s /usr/sbin/nologin omvtunnel
+    echo "[bootstrap] user 'omvtunnel' created (nologin shell, no sudo)"
+  else
+    echo "[bootstrap] user 'omvtunnel' already present (skip)"
+  fi
+
+  install -d -m 0700 -o omvtunnel -g omvtunnel /home/omvtunnel/.ssh
+  OMVTUNNEL_PUBKEY=$(cat "$OMVTUNNEL_PUBKEY_PATH")
+  OMVTUNNEL_LINE='restrict,permitlisten="'"$TUNNEL_LISTEN"'",command="/usr/sbin/nologin",no-pty '"$OMVTUNNEL_PUBKEY"
+  OMVTUNNEL_AUTH=/home/omvtunnel/.ssh/authorized_keys
+
+  if [[ -f "$OMVTUNNEL_AUTH" ]] && grep -qF "$OMVTUNNEL_PUBKEY" "$OMVTUNNEL_AUTH"; then
+    echo "[bootstrap] omvtunnel authorized_keys already up to date (skip)"
+  else
+    echo "$OMVTUNNEL_LINE" > "$OMVTUNNEL_AUTH"
+    chmod 0600 "$OMVTUNNEL_AUTH"
+    chown omvtunnel:omvtunnel "$OMVTUNNEL_AUTH"
+    echo "[bootstrap] omvtunnel authorized_keys installed (restrict + permitlisten=$TUNNEL_LISTEN)"
+  fi
+else
+  echo "[bootstrap] no omvtunnel pubkey (2nd arg) — reverse-SSH endpoint skipped"
+fi
+
 cat <<EOF
 
 [bootstrap] DONE.
@@ -145,3 +206,17 @@ Next steps (manual, ONE-SHOT):
        ssh wol-relay-deploy status
        ssh wol-relay-deploy health
 EOF
+
+if [[ -n "$OMVTUNNEL_PUBKEY_PATH" ]]; then
+  cat <<EOF
+  5. Reverse-SSH fallback endpoint provisioned (omvtunnel). Remaining,
+     ONE-SHOT, host-side (NOT done by this script):
+       - VM SSH must be key-only (PasswordAuthentication no) + reachable
+         via IAP only (no 0.0.0.0/0 on tcp:22) — cf. relay/README.md
+         § Hardening notes.
+       - Start the OMV-side tunnel unit (knowledge-base bootstrap-host.sh).
+       - Validate from 4G/WG with WireGuard cut server-side:
+           gcloud compute ssh <vm> --tunnel-through-iap
+           ssh -p 2222 <omv-user>@127.0.0.1     # → OMV sshd through the tunnel
+EOF
+fi

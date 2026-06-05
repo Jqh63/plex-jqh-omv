@@ -164,11 +164,16 @@ echo "[bootstrap] /tmp/wol-relay-staging ready"
 # --- 8. omvtunnel reverse-SSH fallback endpoint (optional) ----------------
 # Provisioned only when a 2nd arg (omvtunnel pubkey path) is supplied.
 # Cf. knowledge-base ADR 2026-06-05-fallback-ssh-out-of-band-reverse-autossh.
-# This user CANNOT run anything: `restrict` strips every capability (pty,
-# port-forwarding, X11, agent, user-rc), `permitlisten` re-allows ONLY the
-# single reverse-listener on the VM loopback, and command=nologin neutralises
-# any session attempt. That is precisely why it needs no forced-command à la
-# dispatch.sh — it has zero command capability to begin with.
+# This user CANNOT run anything: command=nologin neutralises any session, no-pty
+# + no-agent/X11/user-rc strip the rest, and permitlisten restricts the -R
+# forward to the single loopback listener. That is precisely why it needs no
+# forced-command à la dispatch.sh — it has zero command capability to begin with.
+#
+# NOTE — pas de `restrict` : constaté au runtime 2026-06-05 (OpenSSH 9.2 /
+# Debian 12), `restrict` désactive le port-forwarding ET `permitlisten` ne le
+# ré-active PAS (contrairement au man) → `remote port forwarding failed for
+# listen port 2222`. On liste donc les no-* explicitement SAUF no-port-
+# forwarding, en gardant permitlisten pour borner le -R. Sécurité équivalente.
 if [[ -n "$OMVTUNNEL_PUBKEY_PATH" ]]; then
   if ! id -u omvtunnel >/dev/null 2>&1; then
     useradd -m -s /usr/sbin/nologin omvtunnel
@@ -179,7 +184,7 @@ if [[ -n "$OMVTUNNEL_PUBKEY_PATH" ]]; then
 
   install -d -m 0700 -o omvtunnel -g omvtunnel /home/omvtunnel/.ssh
   OMVTUNNEL_PUBKEY=$(cat "$OMVTUNNEL_PUBKEY_PATH")
-  OMVTUNNEL_LINE='restrict,permitlisten="'"$TUNNEL_LISTEN"'",command="/usr/sbin/nologin",no-pty '"$OMVTUNNEL_PUBKEY"
+  OMVTUNNEL_LINE='command="/usr/sbin/nologin",no-pty,no-agent-forwarding,no-x11-forwarding,no-user-rc,permitlisten="'"$TUNNEL_LISTEN"'" '"$OMVTUNNEL_PUBKEY"
   OMVTUNNEL_AUTH=/home/omvtunnel/.ssh/authorized_keys
 
   if [[ -f "$OMVTUNNEL_AUTH" ]] && grep -qF "$OMVTUNNEL_PUBKEY" "$OMVTUNNEL_AUTH"; then

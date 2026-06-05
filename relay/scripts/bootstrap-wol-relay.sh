@@ -213,13 +213,18 @@ fi
 install -d -m 0755 -o homewatch -g homewatch /opt/home-watch
 install -d -m 0750 -o homewatch -g homewatch /var/lib/home-watch
 echo "[bootstrap] /opt/home-watch + /var/lib/home-watch ready"
-if ! command -v msmtp &>/dev/null; then
-  echo "[bootstrap] installing msmtp (mail egress for home-watch alerts) ..."
-  DEBIAN_FRONTEND=noninteractive apt-get install -y msmtp msmtp-mta \
-    && echo "[bootstrap] msmtp installed" \
-    || echo "[bootstrap] WARN: msmtp install failed — install manually before deploying home-watch"
+# Dependencies: dig (targeted public-resolver queries, bypasses /etc/hosts) +
+# msmtp (mail egress). curl is already present on the VM (used by wol-relay).
+HW_PKGS=""
+command -v dig   &>/dev/null || HW_PKGS="$HW_PKGS bind9-dnsutils"
+command -v msmtp &>/dev/null || HW_PKGS="$HW_PKGS msmtp msmtp-mta"
+if [[ -n "$HW_PKGS" ]]; then
+  echo "[bootstrap] installing home-watch deps:$HW_PKGS ..."
+  DEBIAN_FRONTEND=noninteractive apt-get install -y $HW_PKGS \
+    && echo "[bootstrap] home-watch deps installed" \
+    || echo "[bootstrap] WARN: dep install failed — install$HW_PKGS manually before deploying home-watch"
 else
-  echo "[bootstrap] msmtp already present (skip)"
+  echo "[bootstrap] home-watch deps (dig, msmtp) already present (skip)"
 fi
 
 cat <<EOF

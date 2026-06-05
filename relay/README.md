@@ -115,6 +115,28 @@ Security by construction: forced-command `dispatch.sh` on the VM
 directory `/tmp/wol-relay-staging/`. No GitHub PAT or secret embedded
 on the VM — files flow over stdin SSH, no `git pull` server-side.
 
+### Second service on this channel: `home-watch`
+
+The same channel also carries **`home-watch`**, an external homelab
+monitor (systemd timer that probes the home's public surface from this
+VM and emails on outage). Its code is **private** (it enumerates the
+monitored home surface) and lives in the author's `knowledge-base`
+repo — it is pushed in over stdin and **never stored here**. The
+channel just exposes generic handlers:
+
+```bash
+ssh wol-relay-deploy push-home-watch{,-service,-timer}  # stage (stdin)
+ssh wol-relay-deploy apply-home-watch                   # install + enable timer
+ssh wol-relay-deploy home-watch-status                  # timer active + next run
+ssh wol-relay-deploy logs-home-watch                    # journalctl -n 100
+```
+
+Prereqs (provisioned by `bootstrap-wol-relay.sh` step 9): `homewatch`
+user, `/opt/home-watch` + `/var/lib/home-watch`, and `msmtp` for mail
+egress. The two secret files (`/etc/msmtprc` with a dedicated Gmail
+app-password, `/etc/home-watch.env`) are posted manually (0600).
+Deploy is driven from the private repo's `deploy-home-watch.sh`.
+
 ### One-shot bootstrap (DR or first install)
 
 Run UNCE to activate the channel. If the VM already exists but

@@ -212,10 +212,14 @@ sudo bash /tmp/relay-bootstrap/scripts/bootstrap-wol-relay.sh \
 ```
 
 The bootstrap then creates the `omvtunnel` user and an `authorized_keys`
-restricted to the single loopback listener (`restrict` + `permitlisten` +
-nologin). The home-side tunnel unit (systemd `ssh -N -R`) is versioned
-separately in the operator's homelab repo. Validate **from 4G/VPN-off**
-with the home VPN deliberately cut server-side — a LAN test proves nothing
+restricted to the single loopback listener (`command=nologin` + `no-pty` +
+`no-agent/x11/user-rc` + `permitlisten="127.0.0.1:2222"`). Note: **not**
+`restrict` — under OpenSSH 9.2 it disables port-forwarding and `permitlisten`
+does *not* re-enable it, so the `-R` fails (`remote port forwarding failed`);
+the explicit `no-*` set leaves `-R` allowed while `command=nologin` still
+guarantees zero command capability. The home-side tunnel unit (systemd
+`ssh -N -R`) is versioned separately in the operator's homelab repo. Validate
+**from 4G/VPN-off** with the home VPN deliberately cut server-side — a LAN test proves nothing
 here.
 
 ## Initial VM provisioning (recovery from zero)
@@ -361,10 +365,10 @@ env var is safe (no `/wol` regression).
 | Measure | Why |
 |---|---|
 | SSH key-only (`PasswordAuthentication no`) | No password to brute-force; mandatory when the VM is an out-of-band fallback hop |
-| Cloud firewall: no public tcp:22, IAP-only (or admin-IP if base relay) | Out-of-band fallback needs any-source reach → IAP (Google account + 2FA) instead of an IP pin that would lock you out mid-incident. Base-relay-only deployments may IP-restrict instead |
+| Cloud firewall: no `0.0.0.0/0` on tcp:22 — IAP range for admin, + the reverse-tunnel source IP | Out-of-band admin reach → IAP (Google account + 2FA, any source) instead of an IP pin that would lock you out mid-incident. **But** the reverse tunnel dials the VM:22 directly from the home server's WAN IP (not via IAP), so that one static IP must stay allowed — it's transport, not admin recovery. Base-relay-only deployments may simply IP-restrict to the admin IP |
 | Fail2ban `sshd` jail (systemd backend) | Caps auth-failure velocity on any connection that reaches sshd (incl. IAP-tunneled) |
 | UFW redundant (deny incoming + allow 22/80/443) | Defense in depth if the cloud firewall is misconfigured |
-| `omvtunnel` user: `restrict` + `permitlisten="127.0.0.1:2222"` + nologin | Reverse-SSH fallback endpoint can ONLY terminate the one loopback-bound listener — no shell, no PTY, no other forward. Zero command capability, so no forced-command needed |
+| `omvtunnel` user: `command=nologin` + `no-pty` + `no-agent/x11/user-rc` + `permitlisten="127.0.0.1:2222"` | Reverse-SSH fallback endpoint can ONLY terminate the one loopback-bound listener — no shell, no PTY. Zero command capability, so no forced-command needed. (Not `restrict`: it kills the `-R` and `permitlisten` doesn't re-enable it under OpenSSH 9.2.) |
 | Reverse-tunnel listener bound to VM loopback (not `0.0.0.0`) | The tunnelled OMV sshd is **not** reachable from the VM public IP — one must first be logged ON the VM (via IAP) to reach it. Closes the "VM becomes a free public SSH-to-home" risk |
 | Caddy auto-HTTPS Let's Encrypt | TLS without manual config; the token transits in an encrypted header |
 | Caddy CORS on 502 | Error responses don't break browser-side diagnostics |

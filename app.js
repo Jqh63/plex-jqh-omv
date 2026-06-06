@@ -13,26 +13,19 @@ var relayReachable=true;
 // misses across two ticks, which painted a false "relais off" on cold open.
 var relayMissStreak=0;
 var wolStartTime=0,wolPollTimer=null,wolRetryTimers=[];
-// True once setOnline / setOffline has fired this session. Gates the
-// orange "Vérification…" card so we don't strobe orange on every 15 s
-// tick when the prior state is already on screen.
-var hasConfirmedState=false;
-// v8.4 — power-button honesty. The button asserts the confident green "Serveur
-// allumé" only once a LIVE probe has settled this session (relay or direct-home
-// answered with an up/down verdict). A localStorage cache pre-paint (init /
-// resume) paints the neutral "Vérification…" button instead, until the first
-// probe confirms — so the button never asserts a confident green off a cached
-// memory the check is still verifying. That's the original fix (button no longer
-// out-confidents the card during the pre-probe window).
-// NB — fixes the v8.3 regression (button stuck orange ~30 s+): a relay /status
-// `stale:true` must NOT be read as "unconfirmed". The relay's SWR fresh window
-// is 5 s while the PWA polls every 15 s, so ALMOST EVERY poll is `stale:true` on
-// a perfectly healthy home — gating the green on `!stale` left the button orange
-// nearly always. A relay up verdict (stale or fresh) is a real server-side
-// confirmation; only the relay flipping to up:false past its 60 s ceiling moves
-// the button off green. setOffline is unaffected. Reset to false before every
-// cache pre-paint; set true at each probe settle.
-var verdictFresh=false;
+// True once setOnline / setOffline has fired this session (a cache pre-paint or
+// a live probe settle). Two jobs:
+//   1. Gate the orange "Vérification…" card so we don't strobe orange on every
+//      self-healing tick when a state is already on screen.
+//   2. Drive the open/resume model (v8.6): a recent (<60 s) cached verdict is
+//      REUSED on open/resume — painted as the confident green/red with the
+//      refresh spinner running (= "re-checking") — instead of a neutral orange.
+//      When nothing recent is cached, no verdict is shown → orange
+//      "Vérification…". A fresh probe then confirms or corrects within ~1 probe.
+// The brief cache-vs-reality window this reuse allows is the accepted trade-off
+// (the probe + the 8 s self-healing poll correct it fast). v8.6 drops the v8.4/
+// v8.5 `verdictFresh` honesty gate that used to repaint a cached up as a neutral
+// orange: the author chose reuse-the-recent-verdict over honest-orange-on-cache.
 // v8.0 — single-probe status model. The whole v4→v7 pile of cold-radio
 // defences (retry chains, 2 fail-streaks, all-timeout HOLD, adaptive tick)
 // existed for ONE reason: a 5 s status timeout was too tight against a cold
@@ -376,7 +369,7 @@ function startApp(){
   buildLinks();
   clearWolPoll();
   clearWolRetries();
-  isOnline=false;wolSent=false;checking=false;checkStartedAt=0;relayReachable=true;relayMissStreak=0;hasConfirmedState=false;verdictFresh=false;
+  isOnline=false;wolSent=false;checking=false;checkStartedAt=0;relayReachable=true;relayMissStreak=0;hasConfirmedState=false;
   // Paint the localStorage cache (<60 s) immediately so back-to-back
   // reopens don't strobe orange. The background checkStatus() below
   // confirms or corrects.
@@ -506,11 +499,6 @@ function checkStatus(){
       relayReachable=!(relayMissStreak>=RELAY_DOWN_MISSES||!relayReachable);
     }
     writeLocalStatus(res.up,relayReachable);
-    // A live probe settled → we now have a verdict confirmed this session (vs a
-    // cache pre-paint). The relay's SWR `stale` flag is deliberately NOT used
-    // here: a relay up (stale or fresh) is a real confirmation; only up:false
-    // moves the button off green.
-    verdictFresh=true;
     if(res.up)setOnline();else setOffline();
   });
 }
@@ -585,36 +573,19 @@ function setOnline(){
   clearWolPoll();
   clearWolRetries();
   applyLinksState();
-  if(verdictFresh){
-    document.getElementById('statusDot').className='status-dot online';
-    document.getElementById('statusCard').className='status-card online';
-    document.getElementById('statusLabel').textContent='En ligne';
-    document.getElementById('statusSub').textContent='serveur accessible';
-  }else{
-    // v8.5 — card honesty (mirrors the power button below). An `up` from a
-    // cache pre-paint or a relay stale verdict is NOT confirmed this session,
-    // so don't assert the confident green "En ligne" card. Paint the neutral
-    // "Vérification…" until the live probe settles (verdictFresh=true), which
-    // repaints the confident green within ~1-2 s. This removes the false green
-    // a "just stopped the server" reopen used to flash straight from the
-    // localStorage cache — green now means a live verdict said up.
-    document.getElementById('statusDot').className='status-dot checking';
-    document.getElementById('statusCard').className='status-card';
-    document.getElementById('statusLabel').textContent='Vérification…';
-    document.getElementById('statusSub').textContent='ping en cours';
-  }
+  // Confident green. setOnline fires either from a cache pre-paint (open/resume
+  // with a <60 s verdict — reused, with the refresh spinner already running from
+  // checkStatus to signal the in-flight re-check) or from a live probe settle.
+  // Both are treated as "up"; a contradicting probe corrects to red within ~1
+  // probe (see hasConfirmedState note).
+  document.getElementById('statusDot').className='status-dot online';
+  document.getElementById('statusCard').className='status-card online';
+  document.getElementById('statusLabel').textContent='En ligne';
+  document.getElementById('statusSub').textContent='serveur accessible';
   if(config.mac){
     var pBtn=document.getElementById('powerBtn'),pLbl=document.getElementById('powerLabel');
-    if(verdictFresh){
-      pBtn.className='power-btn online';
-      pLbl.textContent='Serveur allumé';pLbl.className='power-label sent';
-    }else{
-      // up, but from a cached pre-paint or a relay stale=true verdict — a check
-      // is (re)confirming it. Don't assert a confident green while the card is
-      // still verifying; mirror its "vérification…" on the button.
-      pBtn.className='power-btn checking';
-      pLbl.textContent='Vérification…';pLbl.className='power-label checking';
-    }
+    pBtn.className='power-btn online';
+    pLbl.textContent='Serveur allumé';pLbl.className='power-label sent';
     setFallbackState();
   }
   if(wolSent){
@@ -852,11 +823,12 @@ function onForeground(){
   // inside checkStatus) guarantees that if that suspended probe DOES resolve
   // late, its verdict is dropped instead of repainting a stale state over the
   // fresh resume probe.
-  checking=false;probeGen++;verdictFresh=false;
-  // The local cache (<60 s) gives an instant paint on rapid reopens; the
-  // background checkStatus() below confirms or corrects within ~1 s. The cache
-  // is never a fresh verdict, so the button paints "Vérification…" (verdictFresh
-  // reset above), not a confident green, until the probe lands.
+  checking=false;probeGen++;
+  // The local cache (<60 s) is REUSED for an instant confident paint on rapid
+  // reopens (green/red, with the refresh spinner from checkStatus signalling the
+  // re-check); the background checkStatus() below confirms or corrects within ~1
+  // probe. A stale cache (>60 s) falls through to the else-branch which forces
+  // the orange "Vérification…".
   var cached=readLocalStatus();
   if(cached){
     relayReachable=cached.relayOk!==false;

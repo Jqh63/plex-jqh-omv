@@ -79,11 +79,9 @@
   .power-btn.sent{border-color:var(--green);color:var(--green);box-shadow:0 0 40px var(--green-glow);pointer-events:none}
   .power-btn.online{border-color:var(--green);color:var(--green);cursor:default;pointer-events:none;box-shadow:0 0 24px var(--green-glow)}
   .power-btn.unavailable{border-color:var(--red);color:var(--red);opacity:.5;cursor:not-allowed;pointer-events:none}
-  .power-btn.checking{border-color:var(--orange);color:var(--orange);cursor:default;pointer-events:none;animation:pulse 1.2s infinite}
   .power-ring:has(.power-btn.sent)::before{border-color:var(--green);opacity:.3}
   .power-ring:has(.power-btn.online)::before{border-color:var(--green);opacity:.4}
   .power-ring:has(.power-btn.unavailable)::before{border-color:var(--red);opacity:.3}
-  .power-ring:has(.power-btn.checking)::before{border-color:var(--orange);opacity:.4}
   .power-btn .ico{width:42px;height:42px}
   .power-btn .ico-check{display:none}
   .power-btn.online .ico-power{display:none}
@@ -91,7 +89,6 @@
   .power-label{font-size:13px;color:var(--text-dim);text-align:center;min-height:18px;transition:color .3s}
   .power-label.sent{color:var(--green)}
   .power-label.unavailable{color:var(--red)}
-  .power-label.checking{color:var(--orange)}
   .power-progress{display:none;width:120px;height:3px;background:var(--border);border-radius:2px;overflow:hidden;margin-top:6px}
   .power-progress.active{display:block}
   .power-progress-bar{height:100%;width:0;background:var(--green);box-shadow:0 0 6px var(--green-glow)}

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Deterministic state-machine simulator of app.js v8 status / probe timing.
+Deterministic state-machine simulator of app.js v8.6 status / probe timing.
 
 Replays the relevant timer / fetch / resume logic on a synthetic clock so we
 can verify the cold-radio resume behaviour without spinning up a browser.
@@ -8,58 +8,42 @@ Faster than the E2E (~50 ms vs ~2 min), so useful for tight iteration on the
 timing logic. The browser E2E (`cold-radio-e2e.py`) is the source of truth —
 this sim is a lightweight first line of defence.
 
-## Why v8 collapses the old sim
+## The model under test (v8.6)
 
-Earlier versions (v4→v7) accumulated a *ladder* of apps here — Buggy / V43 /
-V44 / V45 / Fixed / Live / Oracle — each adding one more cold-radio defence
-(retry chain, two fail-streaks, all-timeout HOLD, adaptive tick). They all
-fought the SAME root cause: a 5 s status timeout was too tight against a cold
-mobile radio (~3 s to warm) + TLS handshake, so the fetch timed out and the
-code cascaded — up to ~33 s of orange/"reconnexion…" on reopen. That is the
-IRL bug ("PWA en background, réouverture → check orange 30 s ou plus").
+`checkStatus()` fires `probe()`, which resolves EXACTLY ONCE to
+`{up, relay_reachable}` and never rejects: one relay `/status` fetch
+(`PROBE_TIMEOUT`, generous so a cold mobile radio warms inside the attempt) and,
+on its failure, one direct-home fallback (`HOME_TIMEOUT`). No retry, no hold, no
+streak. A `probe_gen` counter drops a stale in-flight probe that resolves after a
+resume (the Android suspend-mid-fetch race). A `checking` watchdog
+(`CHECK_WATCHDOG`) lets a wedged in-flight probe be reclaimed by a later tick. An
+N-consecutive-miss debounce (`RELAY_DOWN_MISSES`) keeps the advisory "Relais
+injoignable" cosmetic from crying wolf on a cold e2-micro.
 
-v8 deletes the whole pile and replaces it with ONE generous-timeout probe plus
-a generation guard. So this sim is now just two implementations side by side:
+### Open / resume display rule (v8.6)
 
-  - OldCascadeApp: the v7 cascade (relay retry → home fallback → all-timeout
-    HOLD → re-check). Kept ONLY as the contrast baseline — it reproduces the
-    ~33 s orange so each scenario can prove v8 fixes it.
-  - V8App: the current logic. checkStatus() fires probe(), which resolves
-    EXACTLY ONCE to {up, relay_reachable} and never rejects. A probe_gen
-    counter drops a stale in-flight probe that resolves after a resume (the
-    Android suspend-mid-fetch race). One relay attempt (PROBE_TIMEOUT), and on
-    its failure one direct-home fallback (HOME_TIMEOUT). No retry, no hold, no
-    streak. As of v8.4 it also models power-button honesty: the confident green
-    "Serveur allumé" lights once a LIVE probe has settled this session (relay or
-    home answered, regardless of the relay's SWR `stale` flag); only a cache
-    pre-paint (before the first probe) paints the neutral "Vérification…" button.
-    (v8.3 also gated on `not stale`, which left the button stuck orange because a
-    healthy home is almost always served `stale:true` — fixed in v8.4.)
-  - BuggyButtonApp: V8App's card logic verbatim, but with the PRE-v8.3 power
-    button — it asserts the confident green on ANY up verdict, including straight
-    from a cache pre-paint. The side-by-side baseline for the `button_contrast`
-    scenarios: it paints the false green from a cache pre-paint exactly where the
-    fixed V8App shows "Vérification…" until the first live probe lands.
-  - BuggyCardApp: V8App's button logic verbatim, but with the PRE-v8.5 status
-    CARD — it asserts the confident green "En ligne" card on ANY up verdict,
-    including straight from a cache pre-paint. The baseline for the
-    `card_contrast` scenarios: it paints the false green CARD from a cache
-    pre-paint exactly where the fixed V8App shows the neutral "Vérification…"
-    card until the first live probe lands. This is the reported bug — "the PWA
-    shows green right after I stopped the homelab". v8.5 also shortens the poll
-    interval (15 s → 8 s) so the corrected red lands ~2× sooner — asserted via
-    `expect_red_by`.
+A recent (<60 s) localStorage verdict is REUSED on open/resume: it paints the
+confident green/red immediately (the real PWA also spins the refresh icon to
+signal the in-flight re-check), and the live probe confirms or corrects within
+~1 probe. When nothing recent is cached, no verdict is shown → the orange
+"Vérification…" card. The brief cache-vs-reality window the reuse allows is the
+accepted trade-off (the probe + the 8 s self-healing poll correct it fast).
+
+v8.6 dropped the v8.4/v8.5 `verdictFresh` honesty gate (and its `BuggyButtonApp`/
+`BuggyCardApp` baselines): the author chose reuse-the-recent-verdict over
+honest-orange-on-cache. So the card and the power button now simply mirror the
+up/down verdict — a cache pre-paint paints the confident green/red, not a neutral
+orange.
+
+`OldCascadeApp` (the v7 cascade: relay retry → home fallback → all-timeout HOLD →
+re-check) is kept ONLY as the contrast baseline — it reproduces the ~33 s orange
+that v8 removed, so each cold-radio scenario can prove v8 is measurably better.
 
 A scenario passes for V8App if the final state matches the spec, no forbidden
 paint (red / warn / checking) was emitted, the orange "Vérification…" card was
-never shown longer than `max_orange_s` (the property that kills the 33 s bug),
-the power button honours its freshness assertions (`expect_first_button` /
-`expect_confident_button`), AND the status card honours its freshness assertions
-(`expect_first_card` / `expect_confident_card`) and corrects to red by
-`expect_red_by` when set. The `contrast` check asserts OldCascadeApp behaves
-worse on the cold-radio scenarios; `button_contrast` / `card_contrast` assert
-BuggyButtonApp / BuggyCardApp paint the false confident green the fix removes —
-so the scenarios genuinely exercise the fix.
+never shown longer than `max_orange_s`, and (when set) the card corrects to red
+by `expect_red_by`. The `contrast` check asserts OldCascadeApp behaves worse on
+the cold-radio scenarios.
 
 Run:
   python3 tests/state-machine-sim.py
@@ -82,7 +66,7 @@ CHECK_INTERVAL = 8.0     # app.js STATUS_POLL_INTERVAL_MS — self-healing poll
                          # just-stopped home via a background SWR refresh, so the
                          # NEXT poll is what surfaces "down"). Relay-outage probes
                          # are bounded by PROBE_TIMEOUT, not this — see below.
-STATUS_LOCAL_TTL = 60.0  # app.js STATUS_LOCAL_TTL_MS — localStorage paint TTL
+STATUS_LOCAL_TTL = 60.0  # app.js STATUS_LOCAL_TTL_MS — localStorage reuse TTL
 # A check still "in flight" past this is presumed wedged (suspended-mid-fetch
 # zombie probe, or a resume event that never fired) and the next re-probe
 # trigger reclaims it. Sized at PROBE+HOME+slack so a legitimately slow probe
@@ -93,8 +77,8 @@ STATUS_LOCAL_TTL = 60.0  # app.js STATUS_LOCAL_TTL_MS — localStorage paint TTL
 CHECK_WATCHDOG = PROBE_TIMEOUT + HOME_TIMEOUT + 1.0   # 14 s  (app.js CHECK_WATCHDOG_MS)
 # Consecutive relay /status misses before the (advisory) "Relais injoignable"
 # cosmetic hardens. A cold burstable e2-micro can miss across more than one
-# 15 s tick; a real WoL failure surfaces instantly via postWol regardless, so
-# the passive indicator can afford to be patient and avoid false alarms.
+# tick; a real WoL failure surfaces instantly via postWol regardless, so the
+# passive indicator can afford to be patient and avoid false alarms.
 RELAY_DOWN_MISSES = 3    # app.js RELAY_DOWN_MISSES
 
 # OldCascadeApp (v7) constants — the baseline we're proving better than.
@@ -125,12 +109,6 @@ class FetchOutcome:
     # is to reclaim that stuck flag; this lets the sim exercise it. Overrides
     # latency/ok when True.
     zombie: bool = False
-    # For a relay /status SUCCESS (ok=True): the JSON body's `stale` flag. The
-    # relay serves a stale-but-within-ceiling verdict during its 60 s SWR window
-    # (the home may have just gone down). The PWA treats a stale up as NOT fresh
-    # → the power button stays honest ("Vérification…") instead of asserting a
-    # confident green. Ignored on failures / home outcomes.
-    stale: bool = False
 
 
 @dataclass
@@ -139,8 +117,9 @@ class Scenario:
     relay_outcomes: List[FetchOutcome] = field(default_factory=list)
     home_outcomes: List[FetchOutcome] = field(default_factory=list)
     has_relay: bool = True
-    # localStorage status cache (<60 s). When set, both apps pre-paint it on
-    # cold launch / resume before the probe resolves.
+    # localStorage status cache (<60 s). When set, both apps reuse it on cold
+    # launch / resume as the confident green/red pre-paint before the probe
+    # resolves.
     oracle_cache: Optional[dict] = None
     # Background / foreground transitions. background_at hides the app (ticks
     # pause); foreground_at returns it; foreground_event is which event fires
@@ -163,36 +142,11 @@ class Scenario:
     # genuinely exercises the fix.
     is_contrast: bool = False
     horizon: float = 60.0
-    # v8.3 power-button honesty assertions (None = not checked):
-    #   expect_first_button — the FIRST button paint must equal this
-    #     ("checking" | "on" | "wake" | "unavailable"); a cached/stale up must
-    #     paint "checking" first, never a confident "on".
-    #   expect_confident_button — True: a confident "on" must appear at some
-    #     point (the fix must NOT over-suppress a genuinely fresh up); False:
-    #     "on" must NEVER appear (a cache/stale-only scenario).
-    #   button_contrast — also run BuggyButtonApp and assert it paints the false
-    #     confident green where the fixed app does not, proving the scenario
-    #     genuinely exercises the fix.
-    expect_first_button: Optional[str] = None
-    expect_confident_button: Optional[bool] = None
-    button_contrast: bool = False
-    # v8.5 status-card honesty assertions (None = not checked), mirroring the
-    # button ones:
-    #   expect_first_card — the FIRST card paint must equal this
-    #     ("checking" | "online" | "offline"); a cached/stale up must paint the
-    #     neutral "checking" first, never a confident "online".
-    #   expect_confident_card — True: a confident "online" card must appear at
-    #     some point (the fix must NOT over-suppress a genuinely fresh up);
-    #     False: "online" must NEVER appear.
-    #   expect_red_by — if set, an "offline" card paint must land at or before
-    #     this time. Locks the v8.5 faster-correction (8 s poll): a "just
-    #     stopped" home must flip to red within ~one poll, not ~15 s.
-    #   card_contrast — also run BuggyCardApp and assert it paints the false
-    #     confident green CARD where the fixed app does not.
-    expect_first_card: Optional[str] = None
-    expect_confident_card: Optional[bool] = None
+    # If set, an "offline" (red) card paint must land at or before this time.
+    # Locks the v8.5 faster-correction (8 s poll): a "just stopped" home must
+    # flip to red within ~one poll, not ~15 s — even when a recent cache reused
+    # a green pre-paint.
     expect_red_by: Optional[float] = None
-    card_contrast: bool = False
 
 
 class Clock:
@@ -251,34 +205,25 @@ class BaseApp:
         if self._orange_start is not None:
             self.max_orange = max(self.max_orange, t_end - self._orange_start)
 
-    # ---- power button (v8.3) ----------------------------------------------
+    # ---- power button -----------------------------------------------------
     def set_button(self, kind):
-        # Record a button transition (deduped). The button reflects the SAME
-        # up/down the card does, but its confident "on" is gated on freshness.
+        # Record a button transition (deduped). The button simply mirrors the
+        # card's up/down verdict (v8.6 — no separate freshness gate).
         if kind != self.button:
             self.button = kind
             self.button_paints.append((round(self.clock.now, 2), kind))
 
-    def _button_for(self, up, fresh, relay_ok):
-        # Fixed (v8.3) honesty: confident green "on" only on a FRESH up; a
-        # cached / relay-stale up paints "checking". Down → the wake affordance,
-        # or "unavailable" when the relay is unreachable too. BuggyButtonApp
-        # overrides this with the pre-fix "any up → on".
+    def _button_for(self, up, relay_ok):
+        # up → confident green wake-done; down → the wake affordance, or
+        # "unavailable" when the relay is unreachable too.
         if up:
-            return "on" if fresh else "checking"
+            return "on"
         return "wake" if relay_ok else "unavailable"
 
-    # ---- status card (v8.5) -----------------------------------------------
-    def _card_for(self, up, fresh):
-        # Fixed (v8.5) card honesty, mirroring the button: confident green
-        # "online" only on a FRESH up; a cached / relay-stale up paints the
-        # neutral "checking" ("Vérification…") instead of asserting "En ligne".
-        # Down always paints "offline" (red is never a false-confidence problem
-        # for a WoL app, and keeps the wake affordance prominent). BuggyCardApp
-        # overrides this with the pre-fix "any up → online".
-        if up:
-            return "online" if fresh else "checking"
-        return "offline"
+    # ---- status card ------------------------------------------------------
+    def _card_for(self, up):
+        # The card mirrors the up/down verdict directly (v8.6).
+        return "online" if up else "offline"
 
     # ---- fetch outcome tape ------------------------------------------------
     # Repeat-the-LAST outcome once the tape is exhausted (not a fixed "up"
@@ -305,13 +250,13 @@ class BaseApp:
         return out
 
     # ---- shared settle -----------------------------------------------------
-    def _apply(self, up, relay_ok, fresh=True):
+    def _apply(self, up, relay_ok):
         self.checking = False
         self.relay_reachable = relay_ok
         self.has_confirmed_state = True
         self.is_online = up
-        self.paint(self._card_for(up, fresh))
-        self.set_button(self._button_for(up, fresh, relay_ok))
+        self.paint(self._card_for(up))
+        self.set_button(self._button_for(up, relay_ok))
         if not relay_ok:
             # Mirrors setFallbackState(): "Réveil indisponible" surfaces whether
             # the home is up (warn) or down (offline-relay-promoted).
@@ -325,11 +270,10 @@ class BaseApp:
         self.relay_reachable = bool(cache.get("relay_ok", True))
         self.is_online = bool(cache.get("up"))
         self.has_confirmed_state = True
-        # A cache pre-paint is never a fresh verdict → honest card AND button
-        # (v8.5): an "up" cache paints the neutral "checking", not a confident
-        # green, until the live probe confirms.
-        self.paint(self._card_for(self.is_online, False))
-        self.set_button(self._button_for(self.is_online, False, self.relay_reachable))
+        # v8.6 — a recent cache is REUSED as the confident green/red pre-paint;
+        # the live probe below confirms or corrects.
+        self.paint(self._card_for(self.is_online))
+        self.set_button(self._button_for(self.is_online, self.relay_reachable))
 
     def start_app(self):
         self._pre_paint_cache()
@@ -356,8 +300,8 @@ class BaseApp:
 
     def _resume(self):
         # app.js onForeground: clear the checking guard, invalidate any
-        # suspended probe, re-paint cache (or drop confirmed-state so the
-        # re-probe shows orange), then check_status.
+        # suspended probe, reuse a recent cache (confident pre-paint) or drop
+        # confirmed-state so the re-probe shows orange, then check_status.
         self.checking = False
         self._invalidate_inflight()
         cache = self.scenario.oracle_cache
@@ -365,10 +309,8 @@ class BaseApp:
             self.relay_reachable = bool(cache.get("relay_ok", True))
             self.is_online = bool(cache.get("up"))
             self.has_confirmed_state = True
-            # Same v8.5 honesty as the cold pre-paint: a resume cache repaint of
-            # an "up" shows "checking", not a confident green.
-            self.paint(self._card_for(self.is_online, False))
-            self.set_button(self._button_for(self.is_online, False, self.relay_reachable))
+            self.paint(self._card_for(self.is_online))
+            self.set_button(self._button_for(self.is_online, self.relay_reachable))
         else:
             self.has_confirmed_state = False
         self.check_status()
@@ -389,15 +331,15 @@ class BaseApp:
 
 
 class V8App(BaseApp):
-    """v8.2 — one probe, one generous timeout, generation guard, no cascade;
-    a `checking` watchdog so a wedged in-flight probe can't freeze re-probing;
-    and an N-consecutive-miss debounce on the (advisory) relay-down cosmetic."""
+    """One probe, one generous timeout, generation guard, no cascade; a
+    `checking` watchdog so a wedged in-flight probe can't freeze re-probing; and
+    an N-consecutive-miss debounce on the (advisory) relay-down cosmetic."""
 
     def __init__(self, clock, scenario):
         super().__init__(clock, scenario)
         self.probe_gen = 0
         self.check_started_at = 0.0
-        # v8.2 — consecutive relay-miss counter feeding the relay-down debounce.
+        # Consecutive relay-miss counter feeding the relay-down debounce.
         self.relay_miss_streak = 0
 
     def check_status(self):
@@ -435,19 +377,13 @@ class V8App(BaseApp):
         if out.zombie:
             return  # wedged probe — never resolves; leaves checking=True stuck
         if out.latency is None or out.latency >= PROBE_TIMEOUT:
-            self.clock.after(PROBE_TIMEOUT, lambda: self._relay_done(gen, False, None, False, False))
+            self.clock.after(PROBE_TIMEOUT, lambda: self._relay_done(gen, False, None, False))
         else:
-            self.clock.after(out.latency, lambda: self._relay_done(gen, out.ok, out.up, out.answered, out.stale))
+            self.clock.after(out.latency, lambda: self._relay_done(gen, out.ok, out.up, out.answered))
 
-    def _relay_done(self, gen, ok, up, answered, stale=False):
+    def _relay_done(self, gen, ok, up, answered):
         if ok:
-            # A live relay verdict is confirmed-this-session regardless of the
-            # relay's SWR `stale` flag (v8.4 — see app.js verdictFresh note): the
-            # PWA polls every 15 s vs the relay's 5 s fresh window, so a healthy
-            # home is almost always served `stale:true`. Gating the button on
-            # `not stale` (v8.3) left it stuck orange. Only up:false (60 s
-            # ceiling) moves the button off green. `stale` kept for tape parity.
-            self._settle(gen, up=up, relay_ok=True, fresh=True)
+            self._settle(gen, up=up, relay_ok=True)
             return
         # Relay failed. answered → alive but degraded (keep reachable);
         # transport → unreachable. Either way, one direct-home fallback.
@@ -455,19 +391,18 @@ class V8App(BaseApp):
 
     def _probe_home(self, gen, relay_ok):
         out = self._next_home()
-        # A direct-home probe is always a live, fresh reading.
         if out.latency is None or out.latency >= HOME_TIMEOUT:
-            self.clock.after(HOME_TIMEOUT, lambda: self._settle(gen, up=False, relay_ok=relay_ok, fresh=True))
+            self.clock.after(HOME_TIMEOUT, lambda: self._settle(gen, up=False, relay_ok=relay_ok))
         else:
-            self.clock.after(out.latency, lambda: self._settle(gen, up=out.ok, relay_ok=relay_ok, fresh=True))
+            self.clock.after(out.latency, lambda: self._settle(gen, up=out.ok, relay_ok=relay_ok))
 
-    def _settle(self, gen, up, relay_ok, fresh=True):
+    def _settle(self, gen, up, relay_ok):
         if gen != self.probe_gen:
             return  # superseded by a newer probe (resume race) — drop it
-        # v8.2 N-consecutive-miss debounce on the relay-down cosmetic only
-        # (mirrors checkStatus().then in app.js). A relay miss stays optimistic
+        # N-consecutive-miss debounce on the relay-down cosmetic only (mirrors
+        # checkStatus().then in app.js). A relay miss stays optimistic
         # (eff=True, no "Relais injoignable") until RELAY_DOWN_MISSES misses in a
-        # row — a cold e2-micro can miss across more than one 15 s tick. Any
+        # row — a cold e2-micro can miss across more than one tick. Any
         # answered/successful probe resets the streak. The home up/down verdict
         # (`up`) is never debounced. Invariant: streak<RELAY_DOWN_MISSES while
         # reachable.
@@ -476,7 +411,7 @@ class V8App(BaseApp):
         else:
             self.relay_miss_streak += 1
             eff = not (self.relay_miss_streak >= RELAY_DOWN_MISSES or not self.relay_reachable)
-        self._apply(up, eff, fresh)
+        self._apply(up, eff)
 
 
 class OldCascadeApp(BaseApp):
@@ -540,36 +475,6 @@ class OldCascadeApp(BaseApp):
         self._apply(False, relay_ok)
 
 
-class BuggyButtonApp(V8App):
-    """Pre-v8.3 power-button behaviour — the side-by-side baseline. The card
-    machinery is identical to V8App (so the up/down verdict and timing are the
-    same); only the button is wrong: it asserts the confident green "on" on ANY
-    up verdict, ignoring freshness. That's the reported bug — the button shows
-    "Serveur allumé" from a cache pre-paint or a relay stale=true verdict while
-    the card is still showing "vérification…". The button_contrast scenarios run
-    this app to prove they actually catch what the fix removes."""
-
-    def _button_for(self, up, fresh, relay_ok):
-        if up:
-            return "on"
-        return "wake" if relay_ok else "unavailable"
-
-
-class BuggyCardApp(V8App):
-    """Pre-v8.5 status-CARD behaviour — the side-by-side baseline. The button
-    machinery is identical to V8App (so the up/down verdict and timing match);
-    only the card is wrong: it asserts the confident green "online" on ANY up
-    verdict, ignoring freshness. That's the reported bug — the card shows
-    "En ligne" straight from a cache pre-paint (or a relay stale=true verdict)
-    right after the home was stopped. The card_contrast scenarios run this app
-    to prove they actually catch what the fix removes."""
-
-    def _card_for(self, up, fresh):
-        if up:
-            return "online"
-        return "offline"
-
-
 def run(scenario, app_class):
     clock = Clock()
     app = app_class(clock, scenario)
@@ -600,27 +505,6 @@ def evaluate(app, scenario):
         issues.append(f"final relay={app.relay_reachable} vs {scenario.expect_final_relay_reachable}")
     if round(app.max_orange, 2) > scenario.max_orange_s:
         issues.append(f"orange held {round(app.max_orange,1)}s > max {scenario.max_orange_s}s")
-    # v8.3 power-button honesty checks.
-    confident = [p for p in app.button_paints if p[1] == "on"]
-    if scenario.expect_first_button is not None:
-        first = app.button_paints[0][1] if app.button_paints else None
-        if first != scenario.expect_first_button:
-            issues.append(f"first button {first!r} vs expected {scenario.expect_first_button!r}")
-    if scenario.expect_confident_button is True and not confident:
-        issues.append("expected a confident-green button ('on') but none painted")
-    if scenario.expect_confident_button is False and confident:
-        issues.append(f"unexpected confident-green button ('on') at {[p[0] for p in confident]}")
-    # v8.5 status-card honesty checks (mirror the button ones).
-    card_paints = [p for p in app.paints if p[1] in ("checking", "online", "offline")]
-    confident_card = [p for p in card_paints if p[1] == "online"]
-    if scenario.expect_first_card is not None:
-        first_card = card_paints[0][1] if card_paints else None
-        if first_card != scenario.expect_first_card:
-            issues.append(f"first card {first_card!r} vs expected {scenario.expect_first_card!r}")
-    if scenario.expect_confident_card is True and not confident_card:
-        issues.append("expected a confident-green card ('online') but none painted")
-    if scenario.expect_confident_card is False and confident_card:
-        issues.append(f"unexpected confident-green card ('online') at {[p[0] for p in confident_card]}")
     if scenario.expect_red_by is not None:
         reds_t = [p[0] for p in app.paints if p[1] == "offline"]
         if not reds_t or min(reds_t) > scenario.expect_red_by:
@@ -653,11 +537,12 @@ SCENARIOS = [
         horizon=5.0,
     ),
     Scenario(
-        # THE bug. Cold reopen: the radio takes 6.5 s to warm — past the old
-        # 5 s timeout but inside v8's 8 s budget. v8: relay answers at 6.5 s →
-        # green, orange ≤ ~6.5 s, NO red. OldCascade: relay times out at 5 s →
-        # retry (another 5 s) → home fallback (5 s) → HOLD 3 s → re-check… long
-        # orange and a likely false red. is_contrast asserts old does worse.
+        # THE cold-radio bug. Cold reopen with NO cache: the radio takes 6.5 s to
+        # warm — past the old 5 s timeout but inside v8's 8 s budget. v8: orange
+        # until the relay answers at 6.5 s → green, NO red. OldCascade: relay
+        # times out at 5 s → retry (another 5 s) → home fallback (5 s) → HOLD 3 s
+        # → re-check… long orange and a likely false red. is_contrast asserts old
+        # does worse.
         name="cold-reopen-radio-warms-at-6.5s-no-false-red",
         relay_outcomes=[FetchOutcome(6.5, ok=True, up=True)],
         expect_final_online=True,
@@ -668,12 +553,12 @@ SCENARIOS = [
     ),
     Scenario(
         # Relay transport-fails (timeout) on EVERY probe, home is up → green,
-        # and the relay-down warn appears only after the v8.2 debounce confirms
-        # it (RELAY_DOWN_MISSES=3 consecutive misses). Detection survives a GCP
+        # and the relay-down warn appears only after the debounce confirms it
+        # (RELAY_DOWN_MISSES=3 consecutive misses). Detection survives a GCP
         # relay outage. Each miss settles ≈ PROBE+HOME ≈ 8.3 s (home up, fast
-        # fallback). v8.5: the 8 s probe timeout exceeds the 8 s tick, so a tick
-        # fired mid-probe is skipped and the effective re-probe cadence is ~16 s;
-        # misses at ~8 / ~24 / ~40 s → the 3rd confirms the warn → horizon > ~40 s.
+        # fallback). The 8 s probe timeout exceeds the 8 s tick, so a tick fired
+        # mid-probe is skipped and the effective re-probe cadence is ~16 s; misses
+        # at ~8 / ~24 / ~40 s → the 3rd confirms the warn → horizon > ~40 s.
         # Green (home up) throughout.
         name="relay-timeout-fallback-home-up",
         relay_outcomes=[FetchOutcome(None, ok=False)],
@@ -685,14 +570,14 @@ SCENARIOS = [
         horizon=45.0,
     ),
     Scenario(
-        # v8.1 DEBOUNCE PAYOFF. A single relay /status transport miss (a
-        # slow-but-alive e2-micro or a last-mile blip), then the relay recovers
-        # on the next tick. The lone miss must NEVER paint the "Relais
-        # injoignable" warn nor disable the wake button — relay stays reachable
-        # throughout. (Not an is_contrast scenario: the tape's repeat-last
-        # semantics make OldCascade consume both relay outcomes at T=0 via its
-        # retry, so it can't be compared cleanly on a single-miss-then-recover
-        # tape — this stands on its own as a v8.1 regression guard.)
+        # DEBOUNCE PAYOFF. A single relay /status transport miss (a slow-but-alive
+        # e2-micro or a last-mile blip), then the relay recovers on the next tick.
+        # The lone miss must NEVER paint the "Relais injoignable" warn nor disable
+        # the wake button — relay stays reachable throughout. (Not an is_contrast
+        # scenario: the tape's repeat-last semantics make OldCascade consume both
+        # relay outcomes at T=0 via its retry, so it can't be compared cleanly on
+        # a single-miss-then-recover tape — this stands on its own as a
+        # regression guard.)
         name="relay-single-miss-debounced-no-warn",
         relay_outcomes=[
             FetchOutcome(None, ok=False),           # T=0 lone transport miss
@@ -708,7 +593,7 @@ SCENARIOS = [
     Scenario(
         # Both relay and home down → red is immediate (the up/down verdict is
         # never debounced; each probe settles red ≈ PROBE+HOME ≈ 13 s). The relay
-        # warn hardens only on the 3rd consecutive miss (~45 s at the v8.5 ~16 s
+        # warn hardens only on the 3rd consecutive miss (~45 s at the ~16 s
         # effective outage cadence). The KEY property: even a total outage holds
         # orange ≤ 13 s, never 33 s → horizon > ~45 s.
         name="relay-and-home-down-bounded-orange",
@@ -747,45 +632,33 @@ SCENARIOS = [
         horizon=10.0,
     ),
     Scenario(
-        # v8.5 CARD — cache <60 s + server still up. The cache pre-paint must NOT
-        # assert the confident green "En ligne" card; it paints the neutral
-        # "Vérification…" (checking) and the live probe confirms green within a
-        # probe. So a brief checking IS expected now (pre-v8.5 the cache painted
-        # instant green and checking was forbidden here) — that instant green is
-        # exactly the reported bug. BuggyCardApp paints the false green straight
-        # from the cache → card_contrast proves the scenario exercises the fix.
-        name="card-cache-up-honest-then-green",
+        # v8.6 REUSE — cache <60 s + server still up. The cache pre-paint reuses
+        # the confident green immediately and the live probe confirms it; green
+        # throughout, no red, no warn. (Pre-v8.6 this painted a transient orange
+        # "Vérification…" from the honesty gate; v8.6 reuses the recent verdict.)
+        name="cache-up-server-up-reused-green",
         relay_outcomes=[FetchOutcome(0.3, ok=True, up=True)],
         oracle_cache={"up": True, "relay_ok": True},
         expect_final_online=True,
-        expect_first_card="checking",
-        expect_confident_card=True,
-        card_contrast=True,
+        forbid_red_flash=True,
+        forbid_warn_flash=True,
         horizon=5.0,
     ),
     Scenario(
-        # v8.5 HEADLINE — the reported bug. The user stopped the homelab, then
-        # reopens the PWA. The localStorage cache (<60 s) still says "up", and the
-        # relay's first /status answers up but SWR-STALE: its last poll caught the
-        # home while it was still up, and the background refresh that flips it to
-        # down hasn't run yet. Pre-v8.5: instant green from the cache, then a green
-        # that lingers ~15 s. Fixed: (1) the cache pre-paint shows the neutral
-        # "checking", NOT a confident green (card_contrast vs BuggyCardApp);
-        # (2) the live stale-up still greens the card briefly — we can't tell a
-        # stale-about-to-flip from a healthy stale (the !stale constraint that the
-        # v8.3 button regression taught us); BUT (3) the next 8 s poll catches the
-        # relay's now-down verdict → red by ~8.3 s, not ~15 s (expect_red_by).
-        name="card-just-stopped-no-instant-green-fast-correct",
+        # v8.6 TRADE-OFF + fast correction. The user stopped the homelab, then
+        # reopens: the localStorage cache (<60 s) still says "up", so the app
+        # reuses the confident green pre-paint (the accepted brief cache-vs-reality
+        # window). The relay's first /status still answers up (its server-side SWR
+        # cache caught the home while it was up), then the next 8 s poll catches
+        # the relay's now-down verdict → red by ~8.3 s, not ~15 s (expect_red_by).
+        name="cache-up-server-just-stopped-corrects-red-fast",
         relay_outcomes=[
-            FetchOutcome(0.3, ok=True, up=True, stale=True),   # T=0 stale "up" (home just died)
-            FetchOutcome(0.3, ok=True, up=False),              # T=8 relay bg-refresh caught down
+            FetchOutcome(0.3, ok=True, up=True),    # T=0 relay still cached "up"
+            FetchOutcome(0.3, ok=True, up=False),   # T=8 relay bg-refresh caught down
         ],
         oracle_cache={"up": True, "relay_ok": True},
         expect_final_online=False,
-        expect_first_card="checking",
-        expect_confident_card=True,   # the brief stale-up green is expected
         expect_red_by=9.0,
-        card_contrast=True,
         forbid_red_flash=False,
         horizon=15.0,
     ),
@@ -814,9 +687,9 @@ SCENARIOS = [
     Scenario(
         # Resume with NO foreground event (Android PWA standalone quirk): the
         # self-healing tick must re-probe on its own and converge to red after
-        # the server died during background. v8.5: ticks every 8 s, so background
-        # at 3 / foreground at 6 (no event), and the first post-foreground tick at
-        # T=8 re-probes → red.
+        # the server died during background. Ticks every 8 s, so background at 3 /
+        # foreground at 6 (no event), and the first post-foreground tick at T=8
+        # re-probes → red.
         name="resume-no-event-self-heals-to-red",
         relay_outcomes=[
             FetchOutcome(0.3, ok=True, up=True),    # T=0 cold check — up
@@ -832,42 +705,39 @@ SCENARIOS = [
         horizon=30.0,
     ),
     Scenario(
-        # BUG 2 — frozen wedge (the "total KO, must kill the app" report).
-        # The cold-launch probe is a ZOMBIE: started, then the app is suspended
-        # mid-fetch and the socket dies, so it never resolves and leaves
-        # checking=True stuck. NO resume event fires (Android PWA standalone
-        # quirk). The server actually went down during the freeze. The ONLY
-        # rescue is the self-healing tick — but with a stuck `checking` flag it
-        # early-returns forever, so the app stays frozen until killed. The
-        # watchdog must let a tick reclaim the stale flag and re-probe → red.
-        # Without it, final stays online → FAIL. v8.5 note: the cache pre-paint
-        # now shows the honest "Vérification…" (not a stale green) for the whole
-        # wedge, so the orange is held until the reclaim — at 8 s ticks the
-        # watchdog (14 s) clears on the 2nd tick (~16 s), so max_orange is raised
-        # to 17 s. That long "checking" is the honest replacement for the old
-        # frozen green; it's bounded by the watchdog and self-heals to red.
+        # Frozen wedge (the "total KO, must kill the app" report). The cold-launch
+        # probe is a ZOMBIE: started, then the app is suspended mid-fetch and the
+        # socket dies, so it never resolves and leaves checking=True stuck. NO
+        # resume event fires (Android PWA standalone quirk). The server actually
+        # went down during the freeze. The ONLY rescue is the self-healing tick —
+        # but with a stuck `checking` flag it early-returns forever, so the app
+        # stays frozen until killed. The watchdog must let a tick reclaim the
+        # stale flag and re-probe → red. Without it, final stays online → FAIL.
+        # v8.6 note: the cache pre-paint reuses the confident green for the whole
+        # wedge (the accepted trade-off — a stale green, not an orange, until the
+        # watchdog reclaims at ~16 s and corrects to red). So there's no orange to
+        # bound here; the property under test is the self-heal to red.
         name="zombie-probe-wedges-checking-self-heals",
         relay_outcomes=[
             FetchOutcome(None, zombie=True),         # #1 cold probe never resolves
             FetchOutcome(0.3, ok=True, up=False),    # #2 reclaimed probe — server down
         ],
-        oracle_cache={"up": True, "relay_ok": True},  # honest "checking" pre-paint
+        oracle_cache={"up": True, "relay_ok": True},  # reused green during the wedge
         foreground_event="none",
         expect_final_online=False,
         forbid_red_flash=False,
-        max_orange_s=17.0,
         horizon=50.0,
     ),
     Scenario(
-        # BUG 1 — cold relay e2-micro slow across MORE than one tick. The relay
-        # /status transport-misses on the first TWO probes (T=0 and the T=16
-        # tick, the v8.5 ~16 s effective outage cadence) because the burstable VM
-        # is cold, then recovers on the third. Home is up throughout. With
-        # RELAY_DOWN_MISSES=3 two consecutive misses must NOT yet paint the false
-        # "Relais injoignable" warn (the user's "message relais off"). The
-        # relay-down indicator is purely advisory (a real WoL failure surfaces
-        # instantly via postWol), so it must tolerate a multi-tick cold start: NO
-        # warn, relay stays reachable, server shows green from the home fallback.
+        # Cold relay e2-micro slow across MORE than one tick. The relay /status
+        # transport-misses on the first TWO probes (T=0 and the T=16 tick, the
+        # ~16 s effective outage cadence) because the burstable VM is cold, then
+        # recovers on the third. Home is up throughout. With RELAY_DOWN_MISSES=3
+        # two consecutive misses must NOT yet paint the false "Relais injoignable"
+        # warn (the user's "message relais off"). The relay-down indicator is
+        # purely advisory (a real WoL failure surfaces instantly via postWol), so
+        # it must tolerate a multi-tick cold start: NO warn, relay stays
+        # reachable, server shows green from the home fallback.
         name="cold-relay-two-tick-miss-no-false-warn",
         relay_outcomes=[
             FetchOutcome(None, ok=False),            # T=0 cold miss
@@ -881,47 +751,6 @@ SCENARIOS = [
         forbid_warn_flash=True,
         horizon=50.0,
     ),
-    Scenario(
-        # v8.4 BUTTON — the reported bug AND the regression in one scenario.
-        # Reopen with a <60 s localStorage cache (up); the relay answers up but
-        # SWR-STALE (the steady state: PWA polls /15 s vs the relay's 5 s fresh
-        # window). The cache pre-paint must NOT assert a confident green → first
-        # button "checking". The probe then lands a live relay up (stale) and the
-        # button MUST go green — it must NOT stay orange just because the relay
-        # flagged stale (that was the v8.3 regression: stuck orange ~30 s+).
-        # Fixed: checking → on. BuggyButton (pre-v8.3): on straight from cache.
-        name="button-cache-up-stale-relay-honest-then-green",
-        relay_outcomes=[FetchOutcome(0.3, ok=True, up=True, stale=True)],
-        oracle_cache={"up": True, "relay_ok": True},
-        expect_final_online=True,
-        expect_first_button="checking",
-        expect_confident_button=True,
-        button_contrast=True,
-        horizon=5.0,
-    ),
-    Scenario(
-        # v8.4 BUTTON — regression guard. No cache; the relay answers up but
-        # SWR-stale on every poll (the steady state for a healthy home). The
-        # button MUST light the confident green — a stale-but-up relay is a real
-        # server-side confirmation. The v8.3 bug left it stuck "checking" here.
-        name="button-stale-relay-up-greens",
-        relay_outcomes=[FetchOutcome(0.3, ok=True, up=True, stale=True)],
-        expect_final_online=True,
-        expect_first_button="on",
-        expect_confident_button=True,
-        horizon=20.0,
-    ),
-    Scenario(
-        # v8.3 BUTTON — guard against over-suppression. A genuinely FRESH up
-        # (relay up, stale=false, no cache) MUST light the confident green
-        # "on" — the fix only gates cache/stale verdicts, not real ones.
-        name="button-fresh-up-goes-confident-green",
-        relay_outcomes=[FetchOutcome(0.3, ok=True, up=True)],
-        expect_final_online=True,
-        expect_first_button="on",
-        expect_confident_button=True,
-        horizon=5.0,
-    ),
 ]
 
 
@@ -929,30 +758,12 @@ def fmt_paints(paints):
     return ", ".join(f"{t}s->{k}" for t, k in paints) or "(no transitions)"
 
 
-def first_on(button_paints):
-    # Time of the first confident-green ("on") button paint, or None.
-    for t, k in button_paints:
-        if k == "on":
-            return t
-    return None
-
-
-def first_online_card(paints):
-    # Time of the first confident-green ("online") card paint, or None.
-    for t, k in paints:
-        if k == "online":
-            return t
-    return None
-
-
 def main():
     print("=" * 72)
-    print("PWA v8 state-machine simulation — OldCascade (v7) vs V8")
+    print("PWA v8.6 state-machine simulation — OldCascade (v7) vs V8")
     print("=" * 72)
     v8_pass = True
     contrast_ok = True
-    button_contrast_ok = True
-    card_contrast_ok = True
     for sc in SCENARIOS:
         print(f"\n## {sc.name}")
         v8 = evaluate(run(sc, V8App), sc)
@@ -966,41 +777,6 @@ def main():
             print(f"                 issues: {'; '.join(v8['issues'])}")
         print(f"  [OldCascade ] orange_max={old['max_orange']}s  "
               f"paints: {fmt_paints(old['paints'])}")
-        # v8.3 button dimension: show the button timeline when the scenario
-        # asserts on it, and (for button_contrast scenarios) prove BuggyButtonApp
-        # paints the false confident green where the fixed app stays honest.
-        if sc.expect_first_button is not None or sc.expect_confident_button is not None or sc.button_contrast:
-            print(f"  [button     ] {fmt_paints(v8['button_paints'])}")
-        if sc.button_contrast:
-            buggy = evaluate(run(sc, BuggyButtonApp), sc)
-            buggy_on, fixed_on = first_on(buggy["button_paints"]), first_on(v8["button_paints"])
-            # The bug = a confident "on" the fixed app withholds: buggy lights it
-            # while fixed never does, or buggy lights it strictly earlier.
-            buggy_worse = buggy_on is not None and (fixed_on is None or buggy_on < fixed_on)
-            if not buggy_worse:
-                button_contrast_ok = False
-                print(f"  [btn-contrast] FAIL  expected BuggyButton to assert a false "
-                      f"confident green, but buggy_on={buggy_on} fixed_on={fixed_on}")
-            else:
-                print(f"  [btn-contrast] OK    buggy false-green at {buggy_on}s "
-                      f"vs fixed {'never' if fixed_on is None else str(fixed_on)+'s'}  "
-                      f"buggy: {fmt_paints(buggy['button_paints'])}")
-        # v8.5 card dimension: prove BuggyCardApp paints the false confident green
-        # CARD (from a cache pre-paint) where the fixed app stays neutral until a
-        # live probe lands — the headline of the reported "green right after I
-        # stopped the homelab" bug.
-        if sc.card_contrast:
-            buggy = evaluate(run(sc, BuggyCardApp), sc)
-            buggy_oc, fixed_oc = first_online_card(buggy["paints"]), first_online_card(v8["paints"])
-            buggy_worse = buggy_oc is not None and (fixed_oc is None or buggy_oc < fixed_oc)
-            if not buggy_worse:
-                card_contrast_ok = False
-                print(f"  [card-contrast] FAIL  expected BuggyCard to assert a false "
-                      f"confident green card, but buggy_oc={buggy_oc} fixed_oc={fixed_oc}")
-            else:
-                print(f"  [card-contrast] OK    buggy false-green card at {buggy_oc}s "
-                      f"vs fixed {'never' if fixed_oc is None else str(fixed_oc)+'s'}  "
-                      f"buggy: {fmt_paints(buggy['paints'])}")
         # Contrast: on cold-radio scenarios the old cascade must do measurably
         # worse — either hold orange longer than v8's bound, or emit a forbidden
         # paint v8 avoids. If it doesn't, the scenario isn't exercising the fix.
@@ -1019,11 +795,7 @@ def main():
     print(f"V8App: {'all scenarios PASS' if v8_pass else 'AT LEAST ONE SCENARIO FAILED'}")
     print(f"Contrast (v8 better than v7 on cold-radio): "
           f"{'confirmed' if contrast_ok else 'BROKEN — see [contrast] lines'}")
-    print(f"Button honesty (v8.3 fixed vs buggy baseline): "
-          f"{'confirmed' if button_contrast_ok else 'BROKEN — see [btn-contrast] lines'}")
-    print(f"Card honesty (v8.5 fixed vs buggy baseline): "
-          f"{'confirmed' if card_contrast_ok else 'BROKEN — see [card-contrast] lines'}")
-    return 0 if (v8_pass and contrast_ok and button_contrast_ok and card_contrast_ok) else 1
+    return 0 if (v8_pass and contrast_ok) else 1
 
 
 if __name__ == "__main__":

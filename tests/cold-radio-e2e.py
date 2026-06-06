@@ -28,16 +28,15 @@ Scenarios (mirror state-machine-sim.py):
   1. cold-launch-server-up-fast        — /status up → green ≤3 s
   2. cold-launch-server-off-fast       — /status down → red ≤3 s
   3. relay-fail-fallback-home-up       — /status ✕ → home ok → green; relay warn
-                                         only after the v8.2 3rd-miss debounce (~30 s)
+                                         only after the 3rd-miss debounce (~16 s)
   4. relay-and-home-down               — /status ✕ → home ✕ → red immediate;
                                          relay warn only after the 3rd-miss debounce
-  5. card-cache-up-server-down-no-false-green — cache <60 s says up but the home
-                                         was just stopped (relay down) → the card
-                                         must NEVER flash green (v8.5 honesty),
-                                         red ≤3 s
- 5b. card-cache-up-server-up-confirms-green — cache up + relay up → honest
-                                         "Vérification…" resolves to green (the
-                                         fix must not over-suppress a real up)
+  5. cache-up-server-down-corrects-red — cache <60 s says up but the home was just
+                                         stopped (relay down) → v8.6 reuses the
+                                         cached green pre-paint (accepted trade-off)
+                                         and the live probe corrects to red ≤3 s
+ 5b. cache-up-server-up-reused-green   — cache up + relay up → the reused green is
+                                         confirmed by the live probe (no red/warn)
   6. relay-degraded-server-up          — /status 503 → home ok → green, no warn, WoL on
   7. relay-degraded-server-down        — /status 503 → home ✕ → red, no warn, WoL on
   8. resume-focus-only-converges-red   — bg → server dies → focus → red
@@ -46,9 +45,9 @@ Scenarios (mirror state-machine-sim.py):
                                          NEVER warn, WoL stays enabled (debounce payoff)
  11. watchdog-reclaims-wedged-checking — stuck checking=true + server down → a
                                          re-probe reclaims the flag → red, not frozen green
- 12. button-stale-relay-up-greens      — relay serves a stale up (steady state) →
-                                         button lights the confident green (v8.4;
-                                         guards the v8.3 stuck-orange regression)
+ 12. relay-up-extra-json-fields-greens — /status up with extra JSON fields
+                                         (stale/age_s) → up → green + confident button
+                                         (the parser tolerates fields it ignores)
 
 Note: scenarios 3 and 4 sample past T+16 s because the v8.2 relay-down debounce
 only hardens the warn on the THIRD consecutive miss. Since `route.abort()` is
@@ -108,24 +107,19 @@ def is_wol_disabled(s):
 
 
 def is_button_confident(s):
-    # v8.3: the confident green "Serveur allumé" — power-btn.online. Asserted
-    # only on a FRESH up verdict.
+    # The confident green "Serveur allumé" — power-btn.online. v8.6: lit on any
+    # up verdict (cache reuse or live probe), no separate freshness gate.
     return "online" in s["powerClass"]
-
-
-def is_button_checking(s):
-    # v8.3: the honest "Vérification…" button on a cached / relay-stale up.
-    return "checking" in s["powerClass"]
 
 
 def _relay_fulfill(route, verdict):
     h = {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"}
     if verdict == "up":
         route.fulfill(status=200, headers=h, body='{"up": true, "stale": false, "age_s": 0}')
-    elif verdict == "up-stale":
-        # Relay serving a stale-but-within-ceiling verdict (home may have just
-        # gone down inside the 60 s SWR window). The PWA keeps the up value but
-        # must NOT light the confident green button — v8.3 button honesty.
+    elif verdict == "up-extra-fields":
+        # Relay serving an up verdict with extra JSON fields the PWA ignores
+        # (stale/age_s from the relay's server-side SWR cache). The parser keys
+        # only on the `up` boolean, so this must behave exactly like "up".
         route.fulfill(status=200, headers=h, body='{"up": true, "stale": true, "age_s": 30}')
     elif verdict == "down":
         route.fulfill(status=200, headers=h, body='{"up": false, "stale": false, "age_s": null}')
@@ -198,7 +192,6 @@ def run_scenario(p, name, relay_plan, home_plan, sample_delays_s, preseed_cache=
         "final_wol_disabled": is_wol_disabled(final),
         "button_confident_at": [t for t, s in samples if is_button_confident(s)],
         "final_button_confident": is_button_confident(final),
-        "final_button_checking": is_button_checking(final),
         "counters": dict(counters),
     }
 
@@ -218,9 +211,9 @@ def _spoof_visibility(page, hidden, event):
 
 
 def run_resume_scenario(p, name, relay_plan, fg_event, bg_at_s, fg_at_s, sample_delays_s, preseed_cache):
-    """background → foreground resume. Loads a preseeded "up" cache (v8.5: shown
-    as the honest "Vérification…", not a confident green, until a live probe
-    confirms), backgrounds at bg_at_s, returns to foreground at fg_at_s
+    """background → foreground resume. Loads a preseeded "up" cache (v8.6: reused
+    as the confident green pre-paint on resume, with the live probe confirming or
+    correcting), backgrounds at bg_at_s, returns to foreground at fg_at_s
     dispatching only `fg_event`.
     relay_plan(n) drives the n-th /status verdict so the server can be up
     before background and down after. sample_delays_s are offsets RELATIVE TO
@@ -378,28 +371,28 @@ def main():
         results.append(("relay-and-home-down", ok4, r4,
                         "red immediate; relay warn only after 3rd miss (~16 s)"))
 
-        # v8.5 card honesty — THE reported bug. The cache (<60 s) still says up,
-        # but the home was just stopped so the relay answers down. Pre-v8.5 the
-        # cache pre-paint flashed the confident green at T=0; v8.5 paints the
-        # neutral "Vérification…" and the live probe lands red. The card must
-        # NEVER show green here — that's the deterministic regression guard (old
-        # code → green at T=0; new code → no green at all).
-        r5 = run_scenario(p, "card-cache-up-server-down-no-false-green",
+        # v8.6 trade-off + fast correction. The cache (<60 s) still says up, but
+        # the home was just stopped so the relay answers down. v8.6 REUSES the
+        # cached green pre-paint (the accepted brief cache-vs-reality window —
+        # this replaces the v8.5 "never flash green" honesty), and the live probe
+        # corrects it to red ≤3 s. The property under test is the fast correction,
+        # not the absence of green.
+        r5 = run_scenario(p, "cache-up-server-down-corrects-red",
                           relay_plan=lambda n: "down", home_plan=lambda n: "ok",
                           sample_delays_s=[0, 1, 3], preseed_cache={"up": True, "relayOk": True})
-        ok5 = (not r5["green_at"]) and r5["final_red"] and bool(r5["red_at"]) and r5["red_at"][0] <= 3
-        results.append(("card-cache-up-server-down-no-false-green", ok5, r5,
-                        "no green at all (cache no longer flashes green), red ≤T+3"))
+        ok5 = r5["final_red"] and bool(r5["red_at"]) and r5["red_at"][0] <= 3
+        results.append(("cache-up-server-down-corrects-red", ok5, r5,
+                        "reused cache green corrects to red ≤T+3"))
 
-        # v8.5 — the fix must not OVER-suppress: a cache up + a server that is
-        # still up resolves the honest "Vérification…" to a confident green once
-        # the live probe confirms.
-        r5b = run_scenario(p, "card-cache-up-server-up-confirms-green",
+        # v8.6 — a cache up + a server still up: the reused green pre-paint is
+        # confirmed by the live probe (no red/warn). Guards against the reuse
+        # somehow flipping a genuinely-up server.
+        r5b = run_scenario(p, "cache-up-server-up-reused-green",
                            relay_plan=lambda n: "up", home_plan=lambda n: "ok",
                            sample_delays_s=[1, 3], preseed_cache={"up": True, "relayOk": True})
         ok5b = r5b["final_green"] and not r5b["red_at"] and not r5b["warn_at"]
-        results.append(("card-cache-up-server-up-confirms-green", ok5b, r5b,
-                        "honest checking resolves to green, no red/warn"))
+        results.append(("cache-up-server-up-reused-green", ok5b, r5b,
+                        "reused green confirmed by live probe, no red/warn"))
 
         r6 = run_scenario(p, "relay-degraded-server-up",
                           relay_plan=lambda n: "degraded", home_plan=lambda n: "ok",
@@ -450,19 +443,17 @@ def main():
         results.append(("watchdog-reclaims-wedged-checking", ok11, r11,
                         "wedged checking reclaimed on re-probe → red, not frozen green"))
 
-        # v8.4 button honesty + regression guard: the relay serves a STALE up —
-        # the STEADY STATE on a healthy home (the PWA polls /15 s vs the relay's
-        # 5 s fresh window, so almost every poll is stale:true). The button MUST
-        # light the confident green: a stale-but-up relay is a real server-side
-        # confirmation. v8.3 gated the green on !stale and left the button stuck
-        # orange ~30 s+ on a perfectly up home — the regression this guards.
-        r12 = run_scenario(p, "button-stale-relay-up-greens",
-                           relay_plan=lambda n: "up-stale", home_plan=lambda n: "ok",
+        # The relay's /status carries extra JSON fields (stale/age_s) from its
+        # server-side SWR cache. app.js keys only on the `up` boolean and ignores
+        # the rest, so an up-with-extra-fields verdict must green the card AND
+        # light the confident green button, exactly like a plain up.
+        r12 = run_scenario(p, "relay-up-extra-json-fields-greens",
+                           relay_plan=lambda n: "up-extra-fields", home_plan=lambda n: "ok",
                            sample_delays_s=[1, 3])
         ok12 = (r12["final_green"] and not r12["red_at"] and not r12["final_wol_disabled"]
-                and r12["final_button_confident"] and not r12["final_button_checking"])
-        results.append(("button-stale-relay-up-greens", ok12, r12,
-                        "green card + confident green button on a stale-but-up relay (no stuck orange)"))
+                and r12["final_button_confident"])
+        results.append(("relay-up-extra-json-fields-greens", ok12, r12,
+                        "up with extra JSON fields → green card + confident green button"))
 
     print("\n" + "=" * 72)
     print(f"VERDICT (real browser E2E — v8 single-probe model) — base={PWA_BASE}")

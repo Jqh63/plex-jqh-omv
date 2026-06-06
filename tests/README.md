@@ -7,7 +7,7 @@ state machine.
 
 | File | What | Speed |
 |---|---|---|
-| `state-machine-sim.py` | Deterministic Python sim of the app.js v8 timer/fetch logic. `OldCascade` (v7 baseline) vs `V8App` on the status scenarios + a contrast check. Also models the v8.4 power-button honesty (`BuggyButtonApp` baseline vs the fixed button) — the confident green "Serveur allumé" lights once a live probe settles, never off a cache pre-paint; a relay `stale=true` up is trusted as up (a healthy home is almost always served stale → v8.3 gating on `!stale` stuck the button orange, fixed here). | ~50 ms |
+| `state-machine-sim.py` | Deterministic Python sim of the app.js v8 timer/fetch logic. `OldCascade` (v7 baseline) vs `V8App` on the status scenarios + a contrast check. Models the v8.4 power-button honesty (`BuggyButtonApp` baseline) AND the v8.5 status-card honesty (`BuggyCardApp` baseline) — the confident green ("Serveur allumé" / "En ligne") lights once a live probe settles, never off a cache pre-paint; a relay `stale=true` up is still trusted as up (a healthy home is almost always served stale → gating green on `!stale` stuck the indicator orange, so honesty keys on "a live probe settled this session", not the stale flag). v8.5 also shortens the self-healing poll (15 s → 8 s) so a just-stopped home corrects to red in ~8 s, asserted via `expect_red_by`. | ~50 ms |
 | `cold-radio-e2e.py` | Playwright headless drives Chromium against the PWA with mocked network + spoofed visibilitychange. 12 scenarios. | ~30 s |
 | `screenshots/` | E2E output, gitignored. | — |
 
@@ -54,6 +54,7 @@ State machine sim — no setup, no network, just Python 3.12+:
 ```bash
 python3 tests/state-machine-sim.py
 # expect: V8App: all scenarios PASS  /  Contrast: confirmed
+#         Button honesty: confirmed  /  Card honesty: confirmed
 ```
 
 Real-browser E2E — needs Playwright + Chromium:

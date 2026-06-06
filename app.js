@@ -17,6 +17,16 @@ var wolStartTime=0,wolPollTimer=null,wolRetryTimers=[];
 // orange "Vérification…" card so we don't strobe orange on every 15 s
 // tick when the prior state is already on screen.
 var hasConfirmedState=false;
+// v8.3 — power-button honesty. The button asserts the confident green "Serveur
+// allumé" ONLY when the current up verdict is FRESH: a relay /status with
+// stale=false, or a live direct-home probe. A cached pre-paint (init / resume)
+// or a relay stale=true verdict (the home may have gone down inside the relay's
+// 60 s SWR ceiling) leaves the button on a neutral "Vérification…" instead — so
+// the button never out-confidents the card, which already shows "vérification…"
+// during the same window. setOffline is unaffected: offering "Allumer" on a
+// stale "down" is still correct. Reset to false before every cache pre-paint and
+// set from res.fresh at each probe settle.
+var verdictFresh=false;
 // v8.0 — single-probe status model. The whole v4→v7 pile of cold-radio
 // defences (retry chains, 2 fail-streaks, all-timeout HOLD, adaptive tick)
 // existed for ONE reason: a 5 s status timeout was too tight against a cold
@@ -348,7 +358,7 @@ function startApp(){
   buildLinks();
   clearWolPoll();
   clearWolRetries();
-  isOnline=false;wolSent=false;checking=false;checkStartedAt=0;relayReachable=true;relayMissStreak=0;hasConfirmedState=false;
+  isOnline=false;wolSent=false;checking=false;checkStartedAt=0;relayReachable=true;relayMissStreak=0;hasConfirmedState=false;verdictFresh=false;
   // Paint the localStorage cache (<60 s) immediately so back-to-back
   // reopens don't strobe orange. The background checkStatus() below
   // confirms or corrects.
@@ -477,6 +487,7 @@ function checkStatus(){
       relayReachable=!(relayMissStreak>=RELAY_DOWN_MISSES||!relayReachable);
     }
     writeLocalStatus(res.up,relayReachable);
+    verdictFresh=!!res.fresh;
     if(res.up)setOnline();else setOffline();
   });
 }
@@ -491,20 +502,26 @@ function checkStatus(){
 // No retry, no hold, no streak — the generous PROBE_TIMEOUT_MS absorbs the
 // cold-radio handshake that the old cascade was built to paper over.
 function probe(){
+  // `fresh` (v8.3): a live, current up/down reading. A direct-home probe is
+  // always fresh (we just hit the host). A relay /status verdict is fresh only
+  // when the relay's own SWR cache isn't stale (j.stale === false) — a stale
+  // verdict means the relay is serving a value it's revalidating, so the home
+  // may already be down inside its 60 s ceiling. setOnline() uses `fresh` to
+  // decide whether the power button may assert a confident green.
   if(!config.relay){
     // No relay configured → direct-home only; no relay-down state to show.
     return fetchHomeDirectly().then(
-      function(){return {up:true,relayReachable:true};},
-      function(){return {up:false,relayReachable:true};}
+      function(){return {up:true,relayReachable:true,fresh:true};},
+      function(){return {up:false,relayReachable:true,fresh:true};}
     );
   }
   return fetchStatusFromRelay().then(
-    function(j){return {up:j.up,relayReachable:true};},
+    function(j){return {up:j.up,relayReachable:true,fresh:!j.stale};},
     function(err){
       var relayUp=!!(err&&err.answered);
       return fetchHomeDirectly().then(
-        function(){return {up:true,relayReachable:relayUp};},
-        function(){return {up:false,relayReachable:relayUp};}
+        function(){return {up:true,relayReachable:relayUp,fresh:true};},
+        function(){return {up:false,relayReachable:relayUp,fresh:true};}
       );
     }
   );
@@ -556,9 +573,17 @@ function setOnline(){
   document.getElementById('statusLabel').textContent='En ligne';
   document.getElementById('statusSub').textContent='serveur accessible';
   if(config.mac){
-    document.getElementById('powerBtn').className='power-btn online';
-    document.getElementById('powerLabel').textContent='Serveur allumé';
-    document.getElementById('powerLabel').className='power-label sent';
+    var pBtn=document.getElementById('powerBtn'),pLbl=document.getElementById('powerLabel');
+    if(verdictFresh){
+      pBtn.className='power-btn online';
+      pLbl.textContent='Serveur allumé';pLbl.className='power-label sent';
+    }else{
+      // up, but from a cached pre-paint or a relay stale=true verdict — a check
+      // is (re)confirming it. Don't assert a confident green while the card is
+      // still verifying; mirror its "vérification…" on the button.
+      pBtn.className='power-btn checking';
+      pLbl.textContent='Vérification…';pLbl.className='power-label checking';
+    }
     setFallbackState();
   }
   if(wolSent){
@@ -796,9 +821,11 @@ function onForeground(){
   // inside checkStatus) guarantees that if that suspended probe DOES resolve
   // late, its verdict is dropped instead of repainting a stale state over the
   // fresh resume probe.
-  checking=false;probeGen++;
+  checking=false;probeGen++;verdictFresh=false;
   // The local cache (<60 s) gives an instant paint on rapid reopens; the
-  // background checkStatus() below confirms or corrects within ~1 s.
+  // background checkStatus() below confirms or corrects within ~1 s. The cache
+  // is never a fresh verdict, so the button paints "Vérification…" (verdictFresh
+  // reset above), not a confident green, until the probe lands.
   var cached=readLocalStatus();
   if(cached){
     relayReachable=cached.relayOk!==false;

@@ -7,8 +7,8 @@ state machine.
 
 | File | What | Speed |
 |---|---|---|
-| `state-machine-sim.py` | Deterministic Python sim of the app.js v8 timer/fetch logic. `OldCascade` (v7 baseline) vs `V8App` on the status scenarios + a contrast check. | ~50 ms |
-| `cold-radio-e2e.py` | Playwright headless drives Chromium against the PWA with mocked network + spoofed visibilitychange. 9 scenarios. | ~30 s |
+| `state-machine-sim.py` | Deterministic Python sim of the app.js v8 timer/fetch logic. `OldCascade` (v7 baseline) vs `V8App` on the status scenarios + a contrast check. Also models the v8.3 power-button honesty (`BuggyButtonApp` baseline vs the fixed button) — the confident green "Serveur allumé" only on a FRESH verdict, never off a cache pre-paint or a relay `stale=true`. | ~50 ms |
+| `cold-radio-e2e.py` | Playwright headless drives Chromium against the PWA with mocked network + spoofed visibilitychange. 12 scenarios. | ~30 s |
 | `screenshots/` | E2E output, gitignored. | — |
 
 ## The v8 model (what's under test)

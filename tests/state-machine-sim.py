@@ -29,13 +29,24 @@ a generation guard. So this sim is now just two implementations side by side:
     counter drops a stale in-flight probe that resolves after a resume (the
     Android suspend-mid-fetch race). One relay attempt (PROBE_TIMEOUT), and on
     its failure one direct-home fallback (HOME_TIMEOUT). No retry, no hold, no
-    streak.
+    streak. As of v8.3 it also models power-button honesty: the confident green
+    "Serveur allumé" lights ONLY on a FRESH up (relay stale=false, or a live
+    direct-home probe); a cache pre-paint or a relay stale=true verdict paints
+    the neutral "Vérification…" button instead.
+  - BuggyButtonApp: V8App's card logic verbatim, but with the PRE-v8.3 power
+    button — it asserts the confident green on ANY up verdict, ignoring
+    freshness. The side-by-side baseline for the `button_contrast` scenarios: it
+    paints the false green from a cache pre-paint or a relay stale=true verdict
+    exactly where the fixed V8App now shows "Vérification…".
 
 A scenario passes for V8App if the final state matches the spec, no forbidden
-paint (red / warn / checking) was emitted, AND the orange "Vérification…" card
-was never shown longer than `max_orange_s` (the property that kills the 33 s
-bug). The `contrast` check asserts OldCascadeApp actually behaves worse on the
-cold-radio scenarios, so the scenarios genuinely exercise the fix.
+paint (red / warn / checking) was emitted, the orange "Vérification…" card was
+never shown longer than `max_orange_s` (the property that kills the 33 s bug),
+AND the power button honours its freshness assertions (`expect_first_button` /
+`expect_confident_button`). The `contrast` check asserts OldCascadeApp behaves
+worse on the cold-radio scenarios, and `button_contrast` asserts BuggyButtonApp
+paints the false confident green the fix removes — so the scenarios genuinely
+exercise the fix.
 
 Run:
   python3 tests/state-machine-sim.py
@@ -94,6 +105,12 @@ class FetchOutcome:
     # is to reclaim that stuck flag; this lets the sim exercise it. Overrides
     # latency/ok when True.
     zombie: bool = False
+    # For a relay /status SUCCESS (ok=True): the JSON body's `stale` flag. The
+    # relay serves a stale-but-within-ceiling verdict during its 60 s SWR window
+    # (the home may have just gone down). The PWA treats a stale up as NOT fresh
+    # → the power button stays honest ("Vérification…") instead of asserting a
+    # confident green. Ignored on failures / home outcomes.
+    stale: bool = False
 
 
 @dataclass
@@ -126,6 +143,19 @@ class Scenario:
     # genuinely exercises the fix.
     is_contrast: bool = False
     horizon: float = 60.0
+    # v8.3 power-button honesty assertions (None = not checked):
+    #   expect_first_button — the FIRST button paint must equal this
+    #     ("checking" | "on" | "wake" | "unavailable"); a cached/stale up must
+    #     paint "checking" first, never a confident "on".
+    #   expect_confident_button — True: a confident "on" must appear at some
+    #     point (the fix must NOT over-suppress a genuinely fresh up); False:
+    #     "on" must NEVER appear (a cache/stale-only scenario).
+    #   button_contrast — also run BuggyButtonApp and assert it paints the false
+    #     confident green where the fixed app does not, proving the scenario
+    #     genuinely exercises the fix.
+    expect_first_button: Optional[str] = None
+    expect_confident_button: Optional[bool] = None
+    button_contrast: bool = False
 
 
 class Clock:
@@ -163,6 +193,8 @@ class BaseApp:
         self._relay_i = 0
         self._home_i = 0
         self.paints = []
+        self.button = None
+        self.button_paints = []
         self._orange_start = None
         self.max_orange = 0.0
 
@@ -181,6 +213,23 @@ class BaseApp:
         # Orange still on screen at the horizon counts as orange held until then.
         if self._orange_start is not None:
             self.max_orange = max(self.max_orange, t_end - self._orange_start)
+
+    # ---- power button (v8.3) ----------------------------------------------
+    def set_button(self, kind):
+        # Record a button transition (deduped). The button reflects the SAME
+        # up/down the card does, but its confident "on" is gated on freshness.
+        if kind != self.button:
+            self.button = kind
+            self.button_paints.append((round(self.clock.now, 2), kind))
+
+    def _button_for(self, up, fresh, relay_ok):
+        # Fixed (v8.3) honesty: confident green "on" only on a FRESH up; a
+        # cached / relay-stale up paints "checking". Down → the wake affordance,
+        # or "unavailable" when the relay is unreachable too. BuggyButtonApp
+        # overrides this with the pre-fix "any up → on".
+        if up:
+            return "on" if fresh else "checking"
+        return "wake" if relay_ok else "unavailable"
 
     # ---- fetch outcome tape ------------------------------------------------
     # Repeat-the-LAST outcome once the tape is exhausted (not a fixed "up"
@@ -207,12 +256,13 @@ class BaseApp:
         return out
 
     # ---- shared settle -----------------------------------------------------
-    def _apply(self, up, relay_ok):
+    def _apply(self, up, relay_ok, fresh=True):
         self.checking = False
         self.relay_reachable = relay_ok
         self.has_confirmed_state = True
         self.is_online = up
         self.paint("online" if up else "offline")
+        self.set_button(self._button_for(up, fresh, relay_ok))
         if not relay_ok:
             # Mirrors setFallbackState(): "Réveil indisponible" surfaces whether
             # the home is up (warn) or down (offline-relay-promoted).
@@ -227,6 +277,8 @@ class BaseApp:
         self.is_online = bool(cache.get("up"))
         self.has_confirmed_state = True
         self.paint("online" if self.is_online else "offline")
+        # A cache pre-paint is never a fresh verdict → honest button.
+        self.set_button(self._button_for(self.is_online, False, self.relay_reachable))
 
     def start_app(self):
         self._pre_paint_cache()
@@ -263,6 +315,7 @@ class BaseApp:
             self.is_online = bool(cache.get("up"))
             self.has_confirmed_state = True
             self.paint("online" if self.is_online else "offline")
+            self.set_button(self._button_for(self.is_online, False, self.relay_reachable))
         else:
             self.has_confirmed_state = False
         self.check_status()
@@ -329,13 +382,15 @@ class V8App(BaseApp):
         if out.zombie:
             return  # wedged probe — never resolves; leaves checking=True stuck
         if out.latency is None or out.latency >= PROBE_TIMEOUT:
-            self.clock.after(PROBE_TIMEOUT, lambda: self._relay_done(gen, False, None, False))
+            self.clock.after(PROBE_TIMEOUT, lambda: self._relay_done(gen, False, None, False, False))
         else:
-            self.clock.after(out.latency, lambda: self._relay_done(gen, out.ok, out.up, out.answered))
+            self.clock.after(out.latency, lambda: self._relay_done(gen, out.ok, out.up, out.answered, out.stale))
 
-    def _relay_done(self, gen, ok, up, answered):
+    def _relay_done(self, gen, ok, up, answered, stale=False):
         if ok:
-            self._settle(gen, up=up, relay_ok=True)
+            # A relay success is fresh only if the relay's own SWR cache wasn't
+            # stale — a stale up keeps the button honest (not a confident green).
+            self._settle(gen, up=up, relay_ok=True, fresh=not stale)
             return
         # Relay failed. answered → alive but degraded (keep reachable);
         # transport → unreachable. Either way, one direct-home fallback.
@@ -343,12 +398,13 @@ class V8App(BaseApp):
 
     def _probe_home(self, gen, relay_ok):
         out = self._next_home()
+        # A direct-home probe is always a live, fresh reading.
         if out.latency is None or out.latency >= HOME_TIMEOUT:
-            self.clock.after(HOME_TIMEOUT, lambda: self._settle(gen, up=False, relay_ok=relay_ok))
+            self.clock.after(HOME_TIMEOUT, lambda: self._settle(gen, up=False, relay_ok=relay_ok, fresh=True))
         else:
-            self.clock.after(out.latency, lambda: self._settle(gen, up=out.ok, relay_ok=relay_ok))
+            self.clock.after(out.latency, lambda: self._settle(gen, up=out.ok, relay_ok=relay_ok, fresh=True))
 
-    def _settle(self, gen, up, relay_ok):
+    def _settle(self, gen, up, relay_ok, fresh=True):
         if gen != self.probe_gen:
             return  # superseded by a newer probe (resume race) — drop it
         # v8.2 N-consecutive-miss debounce on the relay-down cosmetic only
@@ -363,7 +419,7 @@ class V8App(BaseApp):
         else:
             self.relay_miss_streak += 1
             eff = not (self.relay_miss_streak >= RELAY_DOWN_MISSES or not self.relay_reachable)
-        self._apply(up, eff)
+        self._apply(up, eff, fresh)
 
 
 class OldCascadeApp(BaseApp):
@@ -427,6 +483,21 @@ class OldCascadeApp(BaseApp):
         self._apply(False, relay_ok)
 
 
+class BuggyButtonApp(V8App):
+    """Pre-v8.3 power-button behaviour — the side-by-side baseline. The card
+    machinery is identical to V8App (so the up/down verdict and timing are the
+    same); only the button is wrong: it asserts the confident green "on" on ANY
+    up verdict, ignoring freshness. That's the reported bug — the button shows
+    "Serveur allumé" from a cache pre-paint or a relay stale=true verdict while
+    the card is still showing "vérification…". The button_contrast scenarios run
+    this app to prove they actually catch what the fix removes."""
+
+    def _button_for(self, up, fresh, relay_ok):
+        if up:
+            return "on"
+        return "wake" if relay_ok else "unavailable"
+
+
 def run(scenario, app_class):
     clock = Clock()
     app = app_class(clock, scenario)
@@ -457,12 +528,23 @@ def evaluate(app, scenario):
         issues.append(f"final relay={app.relay_reachable} vs {scenario.expect_final_relay_reachable}")
     if round(app.max_orange, 2) > scenario.max_orange_s:
         issues.append(f"orange held {round(app.max_orange,1)}s > max {scenario.max_orange_s}s")
+    # v8.3 power-button honesty checks.
+    confident = [p for p in app.button_paints if p[1] == "on"]
+    if scenario.expect_first_button is not None:
+        first = app.button_paints[0][1] if app.button_paints else None
+        if first != scenario.expect_first_button:
+            issues.append(f"first button {first!r} vs expected {scenario.expect_first_button!r}")
+    if scenario.expect_confident_button is True and not confident:
+        issues.append("expected a confident-green button ('on') but none painted")
+    if scenario.expect_confident_button is False and confident:
+        issues.append(f"unexpected confident-green button ('on') at {[p[0] for p in confident]}")
     return {
         "issues": issues,
         "max_orange": round(app.max_orange, 2),
         "final_online": app.is_online,
         "final_relay": app.relay_reachable,
         "paints": app.paints,
+        "button_paints": app.button_paints,
     }
 
 
@@ -668,11 +750,61 @@ SCENARIOS = [
         forbid_warn_flash=True,
         horizon=50.0,
     ),
+    Scenario(
+        # v8.3 BUTTON — the reported bug. Reopen with a <60 s localStorage cache
+        # (up). The cache pre-paints the card green (anti-strobe, kept), but the
+        # BUTTON must NOT assert "Serveur allumé" off a cache: it shows
+        # "Vérification…" until the probe lands a FRESH up, then flips to "on".
+        # Fixed: first button paint = "checking", then "on". BuggyButton: first
+        # paint = "on" (the false confident green while the card still verifies).
+        name="button-cache-up-honest-until-fresh",
+        relay_outcomes=[FetchOutcome(0.3, ok=True, up=True)],   # fresh (stale=False)
+        oracle_cache={"up": True, "relay_ok": True},
+        expect_final_online=True,
+        expect_first_button="checking",
+        expect_confident_button=True,   # it DOES reach green — but only when fresh
+        button_contrast=True,
+        horizon=5.0,
+    ),
+    Scenario(
+        # v8.3 BUTTON — relay serves a STALE up (home went down inside the 60 s
+        # SWR ceiling; relay still answers up=true, stale=true). The card trusts
+        # the up value (stays green, no red flash), but the button must stay
+        # honest "checking" the WHOLE time — never a confident "on" — because the
+        # home may already be off. Tape repeats the stale up, so "on" must never
+        # appear. BuggyButton paints "on" throughout (the false green).
+        name="button-relay-stale-up-stays-honest",
+        relay_outcomes=[FetchOutcome(0.3, ok=True, up=True, stale=True)],
+        expect_final_online=True,
+        expect_first_button="checking",
+        expect_confident_button=False,  # never a confident green on a stale verdict
+        button_contrast=True,
+        horizon=20.0,
+    ),
+    Scenario(
+        # v8.3 BUTTON — guard against over-suppression. A genuinely FRESH up
+        # (relay up, stale=false, no cache) MUST light the confident green
+        # "on" — the fix only gates cache/stale verdicts, not real ones.
+        name="button-fresh-up-goes-confident-green",
+        relay_outcomes=[FetchOutcome(0.3, ok=True, up=True)],
+        expect_final_online=True,
+        expect_first_button="on",
+        expect_confident_button=True,
+        horizon=5.0,
+    ),
 ]
 
 
 def fmt_paints(paints):
     return ", ".join(f"{t}s->{k}" for t, k in paints) or "(no transitions)"
+
+
+def first_on(button_paints):
+    # Time of the first confident-green ("on") button paint, or None.
+    for t, k in button_paints:
+        if k == "on":
+            return t
+    return None
 
 
 def main():
@@ -681,6 +813,7 @@ def main():
     print("=" * 72)
     v8_pass = True
     contrast_ok = True
+    button_contrast_ok = True
     for sc in SCENARIOS:
         print(f"\n## {sc.name}")
         v8 = evaluate(run(sc, V8App), sc)
@@ -694,6 +827,25 @@ def main():
             print(f"                 issues: {'; '.join(v8['issues'])}")
         print(f"  [OldCascade ] orange_max={old['max_orange']}s  "
               f"paints: {fmt_paints(old['paints'])}")
+        # v8.3 button dimension: show the button timeline when the scenario
+        # asserts on it, and (for button_contrast scenarios) prove BuggyButtonApp
+        # paints the false confident green where the fixed app stays honest.
+        if sc.expect_first_button is not None or sc.expect_confident_button is not None or sc.button_contrast:
+            print(f"  [button     ] {fmt_paints(v8['button_paints'])}")
+        if sc.button_contrast:
+            buggy = evaluate(run(sc, BuggyButtonApp), sc)
+            buggy_on, fixed_on = first_on(buggy["button_paints"]), first_on(v8["button_paints"])
+            # The bug = a confident "on" the fixed app withholds: buggy lights it
+            # while fixed never does, or buggy lights it strictly earlier.
+            buggy_worse = buggy_on is not None and (fixed_on is None or buggy_on < fixed_on)
+            if not buggy_worse:
+                button_contrast_ok = False
+                print(f"  [btn-contrast] FAIL  expected BuggyButton to assert a false "
+                      f"confident green, but buggy_on={buggy_on} fixed_on={fixed_on}")
+            else:
+                print(f"  [btn-contrast] OK    buggy false-green at {buggy_on}s "
+                      f"vs fixed {'never' if fixed_on is None else str(fixed_on)+'s'}  "
+                      f"buggy: {fmt_paints(buggy['button_paints'])}")
         # Contrast: on cold-radio scenarios the old cascade must do measurably
         # worse — either hold orange longer than v8's bound, or emit a forbidden
         # paint v8 avoids. If it doesn't, the scenario isn't exercising the fix.
@@ -712,7 +864,9 @@ def main():
     print(f"V8App: {'all scenarios PASS' if v8_pass else 'AT LEAST ONE SCENARIO FAILED'}")
     print(f"Contrast (v8 better than v7 on cold-radio): "
           f"{'confirmed' if contrast_ok else 'BROKEN — see [contrast] lines'}")
-    return 0 if (v8_pass and contrast_ok) else 1
+    print(f"Button honesty (v8.3 fixed vs buggy baseline): "
+          f"{'confirmed' if button_contrast_ok else 'BROKEN — see [btn-contrast] lines'}")
+    return 0 if (v8_pass and contrast_ok and button_contrast_ok) else 1
 
 
 if __name__ == "__main__":

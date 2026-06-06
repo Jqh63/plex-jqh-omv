@@ -70,11 +70,13 @@ var RELAY_DOWN_MISSES=3;
 // freeze the abort timer with it, so a probe never resolves and never resets
 // `checking` — and checkStatus()'s `if(checking)return` then blocks EVERY
 // subsequent re-probe forever (the "total KO, statut figé, must kill the app"
-// bug). Past this budget, any re-probe trigger (the 15 s self-healing tick is
-// the guaranteed-eventually one) reclaims the stuck flag and starts fresh; the
+// bug). Past this budget, any re-probe trigger (the self-healing tick is the
+// guaranteed-eventually one) reclaims the stuck flag and starts fresh; the
 // probeGen bump drops the wedged probe if it ever resolves late. Sized at
-// PROBE+HOME+slack so a legitimately slow probe (≤13 s) is never preempted, yet
-// < the 15 s interval so the next tick always reclaims a wedge.
+// PROBE+HOME+slack so a legitimately slow probe (≤13 s) is never preempted.
+// Since v8.5 it exceeds STATUS_POLL_INTERVAL_MS (8 s), so a wedge is reclaimed
+// on the first self-healing tick whose age clears the watchdog (~2 ticks ≈ 16 s
+// worst case) rather than the next single tick — still guaranteed-eventually.
 var CHECK_WATCHDOG_MS=PROBE_TIMEOUT_MS+HOME_FALLBACK_TIMEOUT_MS+1000;
 var checkStartedAt=0;
 // Mini-cache for back-to-back reopens (closing then reopening the PWA
@@ -83,6 +85,16 @@ var checkStartedAt=0;
 // that a longer cache lies confidently when the server has flipped
 // state in the meantime.
 var STATUS_LOCAL_TTL_MS=60000,STATUS_LOCAL_KEY='plex-jqh-omv-status';
+// Self-healing status poll cadence. v8.5: 15 s → 8 s. When the home goes down,
+// the relay only learns it on a background SWR refresh (~4.5 s after the first
+// /status poll lands on a stale "up"); at the old 15 s cadence the corrected
+// verdict was picked up only on the NEXT tick, so a "just stopped the server"
+// reopen could stay green ~15 s. 8 s is comfortably past the relay's refresh
+// yet roughly halves the worst-case correction window (~7-8 s). It stays above
+// the relay's 5 s fresh window, so a healthy poll is still served from the
+// relay's server-side cache (cheap). Relay-outage probes are bounded by
+// PROBE_TIMEOUT_MS (8 s), not this interval — their cadence is unchanged.
+var STATUS_POLL_INTERVAL_MS=8000;
 // v5.3: 15 s → 5 s. The "Démarrage…" state hung up to 15 s past the
 // actual server-up moment because the next poll hadn't fired yet —
 // a manual refresh would flip to green immediately. 5 s caps the
@@ -378,14 +390,15 @@ function startApp(){
   if(checkInterval)clearInterval(checkInterval);
   // Self-healing poll (v7.7): the interval is NEVER cleared on background.
   // Its body no-ops while hidden and fires a fresh check on the first tick
-  // after the app returns to foreground — so the state corrects within 15 s
-  // even if NO focus/visibilitychange event fires on return. This kills the
+  // after the app returns to foreground — so the state corrects within one
+  // STATUS_POLL_INTERVAL_MS even if NO focus/visibilitychange event fires on
+  // return (v8.5: 8 s, see the constant). This kills the
   // IRL bug where a backgrounded PWA reopened to a frozen green: the old
   // code cleared the interval on hidden and only restarted it from the
   // visibilitychange handler, so when that event didn't fire (Android PWA
   // standalone quirk) nothing ever re-probed. onForeground() below is the
   // fast path; this interval is the guaranteed-eventually safety net.
-  checkInterval=setInterval(function(){if(!document.hidden)checkStatus();},15000);
+  checkInterval=setInterval(function(){if(!document.hidden)checkStatus();},STATUS_POLL_INTERVAL_MS);
   // Install hint: Chrome on Android = "menu ⋮ → Ajouter à l'écran d'accueil";
   // Safari on iOS/iPadOS uses the share sheet. iPad on iPadOS 13+ reports
   // as "Macintosh" — detect it via touch points to avoid showing the wrong
@@ -572,10 +585,24 @@ function setOnline(){
   clearWolPoll();
   clearWolRetries();
   applyLinksState();
-  document.getElementById('statusDot').className='status-dot online';
-  document.getElementById('statusCard').className='status-card online';
-  document.getElementById('statusLabel').textContent='En ligne';
-  document.getElementById('statusSub').textContent='serveur accessible';
+  if(verdictFresh){
+    document.getElementById('statusDot').className='status-dot online';
+    document.getElementById('statusCard').className='status-card online';
+    document.getElementById('statusLabel').textContent='En ligne';
+    document.getElementById('statusSub').textContent='serveur accessible';
+  }else{
+    // v8.5 — card honesty (mirrors the power button below). An `up` from a
+    // cache pre-paint or a relay stale verdict is NOT confirmed this session,
+    // so don't assert the confident green "En ligne" card. Paint the neutral
+    // "Vérification…" until the live probe settles (verdictFresh=true), which
+    // repaints the confident green within ~1-2 s. This removes the false green
+    // a "just stopped the server" reopen used to flash straight from the
+    // localStorage cache — green now means a live verdict said up.
+    document.getElementById('statusDot').className='status-dot checking';
+    document.getElementById('statusCard').className='status-card';
+    document.getElementById('statusLabel').textContent='Vérification…';
+    document.getElementById('statusSub').textContent='ping en cours';
+  }
   if(config.mac){
     var pBtn=document.getElementById('powerBtn'),pLbl=document.getElementById('powerLabel');
     if(verdictFresh){

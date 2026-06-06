@@ -501,6 +501,7 @@ function checkStatus(){
     document.getElementById('statusDot').className='status-dot checking';
     document.getElementById('statusCard').className='status-card';
     label.textContent='Vérification...';sub.textContent='ping en cours';
+    setButtonChecking();
   }
   probe().then(function(res){
     // A newer probe (e.g. a resume re-probe) superseded this one — drop the
@@ -540,15 +541,29 @@ function checkStatus(){
 // v8.7 — orange "Vérification…" shown while a "down" verdict is being
 // re-confirmed (DOWN_CONFIRM). Distinct from the cold-open orange in
 // checkStatus(): here we already had a verdict (often a confident green) but a
-// single "down" is not trusted yet. The power button is deliberately left
-// untouched — it keeps its prior affordance until the verdict actually settles,
-// so it doesn't flicker on a transient blip.
+// single "down" is not trusted yet.
 function setRechecking(){
   document.getElementById('refreshBtn').classList.add('spinning');
+  // During an active WoL wake, keep the "Démarrage…" state — a re-check card
+  // would contradict the wake-in-progress UI (mirrors setOffline's wolSent guard).
+  if(wolSent){setStarting();return;}
   document.getElementById('statusDot').className='status-dot checking';
   document.getElementById('statusCard').className='status-card';
   document.getElementById('statusLabel').textContent='Vérification...';
   document.getElementById('statusSub').textContent='le serveur ne répond pas — nouvelle tentative…';
+  setButtonChecking();
+}
+
+// v8.7 follow-up (user feedback 2026-06-07) — the power button must not keep a
+// stale confident green while the card is showing an orange check. Paint a
+// neutral "Vérification…" button whenever the card is orange (cold-open check or
+// a down being re-confirmed). NOT during a WoL wake — the button owns the
+// "Démarrage…" / progress UI then — nor without a configured MAC (no wake to offer).
+function setButtonChecking(){
+  if(!config||!config.mac||wolSent)return;
+  var pBtn=document.getElementById('powerBtn'),pLbl=document.getElementById('powerLabel');
+  pBtn.className='power-btn checking';
+  pLbl.textContent='Vérification…';pLbl.className='power-label checking';
 }
 
 // Resolves EXACTLY ONCE to {up, relayReachable}; never rejects. One relay

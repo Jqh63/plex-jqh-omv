@@ -128,6 +128,13 @@ def is_button_confident(s):
     return "online" in s["powerClass"]
 
 
+def is_button_checking(s):
+    # v8.7 follow-up: the neutral "Vérification…" power button shown while the
+    # card is orange (cold-open check or a down being re-confirmed), so the
+    # button never sits on a stale confident green during a check.
+    return "checking" in s["powerClass"]
+
+
 def _relay_fulfill(route, verdict):
     h = {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"}
     if verdict == "up":
@@ -208,6 +215,7 @@ def run_scenario(p, name, relay_plan, home_plan, sample_delays_s, preseed_cache=
         "final_warn": is_warn(final),
         "final_wol_disabled": is_wol_disabled(final),
         "button_confident_at": [t for t, s in samples if is_button_confident(s)],
+        "button_checking_at": [t for t, s in samples if is_button_checking(s)],
         "final_button_confident": is_button_confident(final),
         "counters": dict(counters),
     }
@@ -368,9 +376,10 @@ def main():
                           relay_plan=lambda n: "down", home_plan=lambda n: "ok",
                           sample_delays_s=[1, 3])
         ok2 = (bool(r2["red_at"]) and r2["red_at"][0] <= 3 and not r2["green_at"]
-               and not r2["warn_at"] and bool(r2["checking_at"]))
+               and not r2["warn_at"] and bool(r2["checking_at"])
+               and 1 in r2["button_checking_at"])
         results.append(("cold-launch-server-off-fast", ok2, r2,
-                        "orange (T+1) then red ≤T+3, no green, no warn"))
+                        "orange card+button (T+1) then red ≤T+3, no green, no warn"))
 
         # v8.2: a sustained relay failure stays optimistic until RELAY_DOWN_MISSES
         # (3) consecutive misses. With instant-abort, misses land at the T=0 / T=8
@@ -407,10 +416,14 @@ def main():
         r5 = run_scenario(p, "cache-up-server-down-corrects-red",
                           relay_plan=lambda n: "down", home_plan=lambda n: "ok",
                           sample_delays_s=[0, 1, 3], preseed_cache={"up": True, "relayOk": True})
+        # v8.7 follow-up: the button must NOT stay a confident green while the
+        # card is orange — it goes to the neutral "Vérification…" button at T+1
+        # (the user's exact feedback: button green while a check is in progress).
         ok5 = (r5["final_red"] and bool(r5["red_at"]) and r5["red_at"][0] <= 3
-               and bool(r5["checking_at"]))
+               and bool(r5["checking_at"]) and 1 in r5["button_checking_at"]
+               and 1 not in r5["button_confident_at"])
         results.append(("cache-up-server-down-corrects-red", ok5, r5,
-                        "reused green → orange → red ≤T+3"))
+                        "reused green → orange card+button → red ≤T+3 (button not green during check)"))
 
         # v8.6 — a cache up + a server still up: the reused green pre-paint is
         # confirmed by the live probe (no red/warn). Guards against the reuse
@@ -493,9 +506,10 @@ def main():
                            home_plan=lambda n: "ok",
                            sample_delays_s=[1, 4])
         ok13 = (r13["final_green"] and not r13["red_at"] and not r13["warn_at"]
-                and bool(r13["checking_at"]))
+                and bool(r13["checking_at"]) and bool(r13["button_checking_at"])
+                and 1 not in r13["button_confident_at"])
         results.append(("transient-relay-false-down-no-red", ok13, r13,
-                        "transient down → orange then green, NEVER red"))
+                        "transient down → orange card+button then green, NEVER red"))
 
         # v8.7 THE FIX — a stale cache says "down" but the server is actually up.
         # v8.6 pre-painted the cached down as a confident red on open (then the

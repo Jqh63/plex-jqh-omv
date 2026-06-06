@@ -40,6 +40,9 @@ Scenarios (mirror state-machine-sim.py):
                                          NEVER warn, WoL stays enabled (debounce payoff)
  11. watchdog-reclaims-wedged-checking — stuck checking=true + server down → a
                                          re-probe reclaims the flag → red, not frozen green
+ 12. button-relay-stale-up-honest      — relay serves a stale up → card green but
+                                         the power button stays "Vérification…",
+                                         never the confident green (v8.3 honesty)
 
 Note: scenarios 3 and 4 sample past T+30 s because the v8.2 relay-down debounce
 only hardens the warn on the THIRD consecutive miss, i.e. after two 15 s
@@ -96,10 +99,26 @@ def is_wol_disabled(s):
     return "unavailable" in s["powerClass"]
 
 
+def is_button_confident(s):
+    # v8.3: the confident green "Serveur allumé" — power-btn.online. Asserted
+    # only on a FRESH up verdict.
+    return "online" in s["powerClass"]
+
+
+def is_button_checking(s):
+    # v8.3: the honest "Vérification…" button on a cached / relay-stale up.
+    return "checking" in s["powerClass"]
+
+
 def _relay_fulfill(route, verdict):
     h = {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"}
     if verdict == "up":
         route.fulfill(status=200, headers=h, body='{"up": true, "stale": false, "age_s": 0}')
+    elif verdict == "up-stale":
+        # Relay serving a stale-but-within-ceiling verdict (home may have just
+        # gone down inside the 60 s SWR window). The PWA keeps the up value but
+        # must NOT light the confident green button — v8.3 button honesty.
+        route.fulfill(status=200, headers=h, body='{"up": true, "stale": true, "age_s": 30}')
     elif verdict == "down":
         route.fulfill(status=200, headers=h, body='{"up": false, "stale": false, "age_s": null}')
     elif verdict == "degraded":
@@ -169,6 +188,9 @@ def run_scenario(p, name, relay_plan, home_plan, sample_delays_s, preseed_cache=
         "final_red": is_red(final),
         "final_warn": is_warn(final),
         "final_wol_disabled": is_wol_disabled(final),
+        "button_confident_at": [t for t, s in samples if is_button_confident(s)],
+        "final_button_confident": is_button_confident(final),
+        "final_button_checking": is_button_checking(final),
         "counters": dict(counters),
     }
 
@@ -311,9 +333,10 @@ def main():
         r1 = run_scenario(p, "cold-launch-server-up-fast",
                           relay_plan=lambda n: "up", home_plan=lambda n: "ok",
                           sample_delays_s=[1, 3])
-        ok1 = bool(r1["green_at"]) and r1["green_at"][0] <= 3 and not r1["red_at"] and not r1["warn_at"]
+        ok1 = (bool(r1["green_at"]) and r1["green_at"][0] <= 3 and not r1["red_at"]
+               and not r1["warn_at"] and r1["final_button_confident"])
         results.append(("cold-launch-server-up-fast", ok1, r1,
-                        "green ≤T+3, no red, no warn"))
+                        "green ≤T+3, no red, no warn, button confident on fresh up"))
 
         r2 = run_scenario(p, "cold-launch-server-off-fast",
                           relay_plan=lambda n: "down", home_plan=lambda n: "ok",
@@ -398,6 +421,20 @@ def main():
         ok11 = r11["pre_green"] and r11["final_red"] and not r11["final_green"]
         results.append(("watchdog-reclaims-wedged-checking", ok11, r11,
                         "wedged checking reclaimed on re-probe → red, not frozen green"))
+
+        # v8.3 button honesty: the relay serves a STALE up (home may have gone
+        # down inside the 60 s SWR ceiling). The card trusts the up value (green,
+        # no red), but the power button must stay honest "Vérification…" — NEVER
+        # the confident green "Serveur allumé" — for the whole stale window. This
+        # is the "vert sur le bouton d'allumage pendant que le check tourne" bug.
+        r12 = run_scenario(p, "button-relay-stale-up-honest",
+                           relay_plan=lambda n: "up-stale", home_plan=lambda n: "ok",
+                           sample_delays_s=[1, 3])
+        ok12 = (r12["final_green"] and not r12["red_at"] and not r12["final_wol_disabled"]
+                and r12["final_button_checking"] and not r12["final_button_confident"]
+                and not r12["button_confident_at"])
+        results.append(("button-relay-stale-up-honest", ok12, r12,
+                        "green card, button stays 'Vérification…' (never confident green) on a stale verdict"))
 
     print("\n" + "=" * 72)
     print(f"VERDICT (real browser E2E — v8 single-probe model) — base={PWA_BASE}")

@@ -17,15 +17,21 @@ var wolStartTime=0,wolPollTimer=null,wolRetryTimers=[];
 // orange "Vérification…" card so we don't strobe orange on every 15 s
 // tick when the prior state is already on screen.
 var hasConfirmedState=false;
-// v8.3 — power-button honesty. The button asserts the confident green "Serveur
-// allumé" ONLY when the current up verdict is FRESH: a relay /status with
-// stale=false, or a live direct-home probe. A cached pre-paint (init / resume)
-// or a relay stale=true verdict (the home may have gone down inside the relay's
-// 60 s SWR ceiling) leaves the button on a neutral "Vérification…" instead — so
-// the button never out-confidents the card, which already shows "vérification…"
-// during the same window. setOffline is unaffected: offering "Allumer" on a
-// stale "down" is still correct. Reset to false before every cache pre-paint and
-// set from res.fresh at each probe settle.
+// v8.4 — power-button honesty. The button asserts the confident green "Serveur
+// allumé" only once a LIVE probe has settled this session (relay or direct-home
+// answered with an up/down verdict). A localStorage cache pre-paint (init /
+// resume) paints the neutral "Vérification…" button instead, until the first
+// probe confirms — so the button never asserts a confident green off a cached
+// memory the check is still verifying. That's the original fix (button no longer
+// out-confidents the card during the pre-probe window).
+// NB — fixes the v8.3 regression (button stuck orange ~30 s+): a relay /status
+// `stale:true` must NOT be read as "unconfirmed". The relay's SWR fresh window
+// is 5 s while the PWA polls every 15 s, so ALMOST EVERY poll is `stale:true` on
+// a perfectly healthy home — gating the green on `!stale` left the button orange
+// nearly always. A relay up verdict (stale or fresh) is a real server-side
+// confirmation; only the relay flipping to up:false past its 60 s ceiling moves
+// the button off green. setOffline is unaffected. Reset to false before every
+// cache pre-paint; set true at each probe settle.
 var verdictFresh=false;
 // v8.0 — single-probe status model. The whole v4→v7 pile of cold-radio
 // defences (retry chains, 2 fail-streaks, all-timeout HOLD, adaptive tick)
@@ -487,7 +493,11 @@ function checkStatus(){
       relayReachable=!(relayMissStreak>=RELAY_DOWN_MISSES||!relayReachable);
     }
     writeLocalStatus(res.up,relayReachable);
-    verdictFresh=!!res.fresh;
+    // A live probe settled → we now have a verdict confirmed this session (vs a
+    // cache pre-paint). The relay's SWR `stale` flag is deliberately NOT used
+    // here: a relay up (stale or fresh) is a real confirmation; only up:false
+    // moves the button off green.
+    verdictFresh=true;
     if(res.up)setOnline();else setOffline();
   });
 }
@@ -502,26 +512,20 @@ function checkStatus(){
 // No retry, no hold, no streak — the generous PROBE_TIMEOUT_MS absorbs the
 // cold-radio handshake that the old cascade was built to paper over.
 function probe(){
-  // `fresh` (v8.3): a live, current up/down reading. A direct-home probe is
-  // always fresh (we just hit the host). A relay /status verdict is fresh only
-  // when the relay's own SWR cache isn't stale (j.stale === false) — a stale
-  // verdict means the relay is serving a value it's revalidating, so the home
-  // may already be down inside its 60 s ceiling. setOnline() uses `fresh` to
-  // decide whether the power button may assert a confident green.
   if(!config.relay){
     // No relay configured → direct-home only; no relay-down state to show.
     return fetchHomeDirectly().then(
-      function(){return {up:true,relayReachable:true,fresh:true};},
-      function(){return {up:false,relayReachable:true,fresh:true};}
+      function(){return {up:true,relayReachable:true};},
+      function(){return {up:false,relayReachable:true};}
     );
   }
   return fetchStatusFromRelay().then(
-    function(j){return {up:j.up,relayReachable:true,fresh:!j.stale};},
+    function(j){return {up:j.up,relayReachable:true};},
     function(err){
       var relayUp=!!(err&&err.answered);
       return fetchHomeDirectly().then(
-        function(){return {up:true,relayReachable:relayUp,fresh:true};},
-        function(){return {up:false,relayReachable:relayUp,fresh:true};}
+        function(){return {up:true,relayReachable:relayUp};},
+        function(){return {up:false,relayReachable:relayUp};}
       );
     }
   );

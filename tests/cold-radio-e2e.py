@@ -31,7 +31,13 @@ Scenarios (mirror state-machine-sim.py):
                                          only after the v8.2 3rd-miss debounce (~30 s)
   4. relay-and-home-down               — /status ✕ → home ✕ → red immediate;
                                          relay warn only after the 3rd-miss debounce
-  5. stale-cache-paint-then-confirm    — localStorage <60 s → green instant
+  5. card-cache-up-server-down-no-false-green — cache <60 s says up but the home
+                                         was just stopped (relay down) → the card
+                                         must NEVER flash green (v8.5 honesty),
+                                         red ≤3 s
+ 5b. card-cache-up-server-up-confirms-green — cache up + relay up → honest
+                                         "Vérification…" resolves to green (the
+                                         fix must not over-suppress a real up)
   6. relay-degraded-server-up          — /status 503 → home ok → green, no warn, WoL on
   7. relay-degraded-server-down        — /status 503 → home ✕ → red, no warn, WoL on
   8. resume-focus-only-converges-red   — bg → server dies → focus → red
@@ -44,11 +50,13 @@ Scenarios (mirror state-machine-sim.py):
                                          button lights the confident green (v8.4;
                                          guards the v8.3 stuck-orange regression)
 
-Note: scenarios 3 and 4 sample past T+30 s because the v8.2 relay-down debounce
-only hardens the warn on the THIRD consecutive miss, i.e. after two 15 s
-self-healing ticks re-probe. Scenario 11 exercises the `checking` watchdog
-directly (a real headless browser can't reproduce the Android suspend that
-wedges the flag — that race is covered by the offline state-machine sim).
+Note: scenarios 3 and 4 sample past T+16 s because the v8.2 relay-down debounce
+only hardens the warn on the THIRD consecutive miss. Since `route.abort()` is
+instant here (not the real 8 s PROBE_TIMEOUT), the re-probe cadence is purely the
+self-healing tick — v8.5: 8 s (was 15 s), so the 3rd miss lands ~T+16 s (was
+~T+30 s). Scenario 11 exercises the `checking` watchdog directly (a real headless
+browser can't reproduce the Android suspend that wedges the flag — that race is
+covered by the offline state-machine sim).
 """
 
 import os
@@ -210,8 +218,10 @@ def _spoof_visibility(page, hidden, event):
 
 
 def run_resume_scenario(p, name, relay_plan, fg_event, bg_at_s, fg_at_s, sample_delays_s, preseed_cache):
-    """background → foreground resume. Loads preseeded green, backgrounds at
-    bg_at_s, returns to foreground at fg_at_s dispatching only `fg_event`.
+    """background → foreground resume. Loads a preseeded "up" cache (v8.5: shown
+    as the honest "Vérification…", not a confident green, until a live probe
+    confirms), backgrounds at bg_at_s, returns to foreground at fg_at_s
+    dispatching only `fg_event`.
     relay_plan(n) drives the n-th /status verdict so the server can be up
     before background and down after. sample_delays_s are offsets RELATIVE TO
     the foreground event. v8 must converge to red (not stay frozen green)."""
@@ -346,32 +356,50 @@ def main():
                         "red ≤T+3, no green, no warn"))
 
         # v8.2: a sustained relay failure stays optimistic until RELAY_DOWN_MISSES
-        # (3) consecutive misses. With instant-abort, misses land at the T=0 /
-        # T=15 / T=30 ticks, so the warn confirms ~T=30. Sample at 31 s to catch
-        # it; every earlier sample must show NO warn (the false-alarm we killed).
+        # (3) consecutive misses. With instant-abort, misses land at the T=0 / T=8
+        # / T=16 ticks (v8.5: 8 s tick), so the warn confirms ~T=16. Sample at 18 s
+        # to catch it; every earlier sample must show NO warn (the false-alarm we
+        # killed).
         r3 = run_scenario(p, "relay-fail-fallback-home-up",
                           relay_plan=lambda n: "fail", home_plan=lambda n: "ok",
-                          sample_delays_s=[1, 3, 16, 31])
+                          sample_delays_s=[1, 3, 18, 26])
         ok3 = (r3["final_green"] and r3["final_warn"] and not r3["red_at"]
-               and all(t >= 30 for t in r3["warn_at"]))
+               and all(t >= 16 for t in r3["warn_at"]))
         results.append(("relay-fail-fallback-home-up", ok3, r3,
-                        "green throughout; relay warn only after 3rd miss (~30 s); no red"))
+                        "green throughout; relay warn only after 3rd miss (~16 s); no red"))
 
         # v8.2: red (server down) is immediate — the up/down verdict is NOT
         # debounced — but the relay warn still waits for the 3rd-miss confirm.
         r4 = run_scenario(p, "relay-and-home-down",
                           relay_plan=lambda n: "fail", home_plan=lambda n: "fail",
-                          sample_delays_s=[1, 3, 16, 31])
+                          sample_delays_s=[1, 3, 18, 26])
         ok4 = (r4["final_red"] and r4["final_warn"] and not r4["final_green"]
-               and all(t >= 30 for t in r4["warn_at"]))
+               and all(t >= 16 for t in r4["warn_at"]))
         results.append(("relay-and-home-down", ok4, r4,
-                        "red immediate; relay warn only after 3rd miss (~30 s)"))
+                        "red immediate; relay warn only after 3rd miss (~16 s)"))
 
-        r5 = run_scenario(p, "stale-cache-paint-then-confirm",
-                          relay_plan=lambda n: "up", home_plan=lambda n: "ok",
+        # v8.5 card honesty — THE reported bug. The cache (<60 s) still says up,
+        # but the home was just stopped so the relay answers down. Pre-v8.5 the
+        # cache pre-paint flashed the confident green at T=0; v8.5 paints the
+        # neutral "Vérification…" and the live probe lands red. The card must
+        # NEVER show green here — that's the deterministic regression guard (old
+        # code → green at T=0; new code → no green at all).
+        r5 = run_scenario(p, "card-cache-up-server-down-no-false-green",
+                          relay_plan=lambda n: "down", home_plan=lambda n: "ok",
                           sample_delays_s=[0, 1, 3], preseed_cache={"up": True, "relayOk": True})
-        ok5 = bool(r5["green_at"]) and r5["green_at"][0] == 0 and not r5["red_at"]
-        results.append(("stale-cache-paint-then-confirm", ok5, r5, "green at T=0"))
+        ok5 = (not r5["green_at"]) and r5["final_red"] and bool(r5["red_at"]) and r5["red_at"][0] <= 3
+        results.append(("card-cache-up-server-down-no-false-green", ok5, r5,
+                        "no green at all (cache no longer flashes green), red ≤T+3"))
+
+        # v8.5 — the fix must not OVER-suppress: a cache up + a server that is
+        # still up resolves the honest "Vérification…" to a confident green once
+        # the live probe confirms.
+        r5b = run_scenario(p, "card-cache-up-server-up-confirms-green",
+                           relay_plan=lambda n: "up", home_plan=lambda n: "ok",
+                           sample_delays_s=[1, 3], preseed_cache={"up": True, "relayOk": True})
+        ok5b = r5b["final_green"] and not r5b["red_at"] and not r5b["warn_at"]
+        results.append(("card-cache-up-server-up-confirms-green", ok5b, r5b,
+                        "honest checking resolves to green, no red/warn"))
 
         r6 = run_scenario(p, "relay-degraded-server-up",
                           relay_plan=lambda n: "degraded", home_plan=lambda n: "ok",

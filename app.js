@@ -17,15 +17,17 @@ var wolStartTime=0,wolPollTimer=null,wolRetryTimers=[];
 // a live probe settle). Two jobs:
 //   1. Gate the orange "Vérification…" card so we don't strobe orange on every
 //      self-healing tick when a state is already on screen.
-//   2. Drive the open/resume model (v8.6): a recent (<60 s) cached verdict is
-//      REUSED on open/resume — painted as the confident green/red with the
-//      refresh spinner running (= "re-checking") — instead of a neutral orange.
-//      When nothing recent is cached, no verdict is shown → orange
-//      "Vérification…". A fresh probe then confirms or corrects within ~1 probe.
-// The brief cache-vs-reality window this reuse allows is the accepted trade-off
-// (the probe + the 8 s self-healing poll correct it fast). v8.6 drops the v8.4/
-// v8.5 `verdictFresh` honesty gate that used to repaint a cached up as a neutral
-// orange: the author chose reuse-the-recent-verdict over honest-orange-on-cache.
+//   2. Drive the open/resume model: a recent (<60 s) cached "up" is REUSED on
+//      open/resume — painted as the confident green with the refresh spinner
+//      running (= "re-checking"). v8.7: a cached "down" is NOT reused as a
+//      confident red (a stale cache must never flash red — see DOWN_CONFIRM
+//      below); it shows the orange "Vérification…" until the live probe settles.
+//      When nothing recent is cached, no verdict is shown → orange too. A fresh
+//      probe then confirms or corrects within ~1 probe.
+// The brief cache-vs-reality window the "up" reuse allows is the accepted
+// trade-off (the probe + the 8 s self-healing poll correct it fast). v8.6 dropped
+// the v8.4/v8.5 `verdictFresh` honesty gate (reuse-the-recent-verdict over
+// honest-orange-on-cache); v8.7 keeps the green reuse but makes "down" asymmetric.
 // v8.0 — single-probe status model. The whole v4→v7 pile of cold-radio
 // defences (retry chains, 2 fail-streaks, all-timeout HOLD, adaptive tick)
 // existed for ONE reason: a 5 s status timeout was too tight against a cold
@@ -39,10 +41,11 @@ var wolStartTime=0,wolPollTimer=null,wolRetryTimers=[];
 // The generous timeout lets the radio warm INSIDE the first attempt, so there's
 // nothing left to retry/hold/streak. Worst case = PROBE + HOME fallback (~13 s)
 // and only on a genuine relay+home outage; the common reopen settles in <3 s.
-// Trade-off: if the radio stays cold past PROBE_TIMEOUT_MS (rare) we paint a
-// transient red, corrected by the next 15 s self-healing tick — accepted as the
-// price of killing the defensive pile. See the ADR (knowledge-base) superseding
-// the 2026-05-27 relay-as-oracle addendum.
+// v8.7: a "down" verdict is no longer painted red on a single probe — see the
+// DOWN_CONFIRM block below. A cold-radio first-cycle timeout (relay + home both
+// time out, then warm on the re-probe) now shows orange and self-corrects to
+// green instead of flashing the transient red v8.0–v8.6 accepted. See the ADR
+// (knowledge-base) superseding the 2026-05-27 relay-as-oracle addendum.
 var probeGen=0;
 // Relay /status fetch budget. Generous on purpose: it must outlast a cold
 // mobile-radio TCP+TLS handshake (~3 s observed on Android 4G) so the first
@@ -58,6 +61,20 @@ var HOME_FALLBACK_TIMEOUT_MS=5000;
 // cosmetic hardens — see relayMissStreak above. 3 misses ≈ 2 self-healing
 // ticks of patience, enough to ride out a cold e2-micro without crying wolf.
 var RELAY_DOWN_MISSES=3;
+// v8.7 — asymmetric verdict commit (confirm before red). The up/down verdict is
+// no longer committed symmetrically: an "up" paints green instantly (optimistic —
+// the relay only says up after a real HEAD < 500, rarely wrong), but a "down" is
+// NEVER trusted on a single live verdict. The first "down" paints the orange
+// "Vérification…" card and fires ONE fast re-probe (DOWN_RECHECK_MS); red is
+// committed only once DOWN_CONFIRM consecutive downs agree. Any "up" in between
+// cancels back to green. This kills the transient false red the v8.6 raw verdict
+// produced (the user's report: a red that was green a moment later, with no
+// orange in between). Two real sources of a transient {up:false}: the relay's
+// server-side SWR cache catching a momentary home blip, or a cold mobile radio
+// whose relay /status AND direct-home fallback both time out on the first cycle
+// then warm on the re-probe. A genuine down still reaches red, ~DOWN_RECHECK_MS
+// later — the accepted cost (validated in tests/state-machine-sim.py).
+var DOWN_CONFIRM=2,DOWN_RECHECK_MS=2500,downStreak=0,downRecheckTimer=null;
 // v8.2 — `checking` watchdog. A check still in flight past this is presumed
 // WEDGED: the Android suspend-mid-fetch race can tear down the socket and
 // freeze the abort timer with it, so a probe never resolves and never resets
@@ -370,14 +387,16 @@ function startApp(){
   clearWolPoll();
   clearWolRetries();
   isOnline=false;wolSent=false;checking=false;checkStartedAt=0;relayReachable=true;relayMissStreak=0;hasConfirmedState=false;
-  // Paint the localStorage cache (<60 s) immediately so back-to-back
-  // reopens don't strobe orange. The background checkStatus() below
-  // confirms or corrects.
+  downStreak=0;if(downRecheckTimer){clearTimeout(downRecheckTimer);downRecheckTimer=null;}
+  // Reuse the localStorage cache (<60 s) for an instant paint so back-to-back
+  // reopens don't strobe orange. v8.7: only an "up" cache is pre-painted (the
+  // confident green) — a cached "down" is NOT pre-painted red (a stale cache must
+  // never show a confident red); we leave hasConfirmedState=false so checkStatus()
+  // shows the orange "Vérification…" until the live probe settles green or red.
   var cached=readLocalStatus();
-  if(cached){
+  if(cached&&cached.up){
     relayReachable=cached.relayOk!==false;
-    if(cached.up)setOnline();
-    else setOffline();
+    setOnline();
   }
   checkStatus();
   if(checkInterval)clearInterval(checkInterval);
@@ -498,9 +517,38 @@ function checkStatus(){
       relayMissStreak++;
       relayReachable=!(relayMissStreak>=RELAY_DOWN_MISSES||!relayReachable);
     }
-    writeLocalStatus(res.up,relayReachable);
-    if(res.up)setOnline();else setOffline();
+    // v8.7 asymmetric verdict commit. UP commits green instantly and resets the
+    // down streak. DOWN is held: the first live "down" paints orange and fires
+    // ONE fast re-probe; red is committed only once DOWN_CONFIRM consecutive
+    // downs agree. An already-confirmed red (streak ≥ DOWN_CONFIRM) re-commits
+    // red without flickering back to orange. The cache is written only on a
+    // settled verdict so an unconfirmed down never persists a premature "down".
+    if(res.up){
+      writeLocalStatus(true,relayReachable);
+      setOnline();
+    }else if(++downStreak>=DOWN_CONFIRM){
+      writeLocalStatus(false,relayReachable);
+      setOffline();
+    }else{
+      setRechecking();
+      if(downRecheckTimer)clearTimeout(downRecheckTimer);
+      downRecheckTimer=setTimeout(function(){downRecheckTimer=null;checkStatus();},DOWN_RECHECK_MS);
+    }
   });
+}
+
+// v8.7 — orange "Vérification…" shown while a "down" verdict is being
+// re-confirmed (DOWN_CONFIRM). Distinct from the cold-open orange in
+// checkStatus(): here we already had a verdict (often a confident green) but a
+// single "down" is not trusted yet. The power button is deliberately left
+// untouched — it keeps its prior affordance until the verdict actually settles,
+// so it doesn't flicker on a transient blip.
+function setRechecking(){
+  document.getElementById('refreshBtn').classList.add('spinning');
+  document.getElementById('statusDot').className='status-dot checking';
+  document.getElementById('statusCard').className='status-card';
+  document.getElementById('statusLabel').textContent='Vérification...';
+  document.getElementById('statusSub').textContent='le serveur ne répond pas — nouvelle tentative…';
 }
 
 // Resolves EXACTLY ONCE to {up, relayReachable}; never rejects. One relay
@@ -569,6 +617,9 @@ function setFallbackState(){
 function setOnline(){
   isOnline=true;
   hasConfirmedState=true;
+  // v8.7 — green cancels any in-progress down-confirmation (streak + pending
+  // re-probe), whether this fires from a live probe or a cache pre-paint.
+  downStreak=0;if(downRecheckTimer){clearTimeout(downRecheckTimer);downRecheckTimer=null;}
   stopCountdown();
   clearWolPoll();
   clearWolRetries();
@@ -691,6 +742,11 @@ function postWol(isRetry){
 function setOffline(){
   isOnline=false;
   hasConfirmedState=true;
+  // v8.7 — reaching setOffline means red is committed (either DOWN_CONFIRM live
+  // downs agreed, or a confirmed user-triggered WoL failure). Pin the streak at
+  // the ceiling so a following status "down" keeps red sticky instead of
+  // flickering back through the orange re-check; setOnline() resets it to 0.
+  downStreak=DOWN_CONFIRM;if(downRecheckTimer){clearTimeout(downRecheckTimer);downRecheckTimer=null;}
   applyLinksState();
   // While a WoL request is being processed, keep the "starting" state — a red
   // "offline" card next to the spinning power button is contradictory.
@@ -824,23 +880,24 @@ function onForeground(){
   // late, its verdict is dropped instead of repainting a stale state over the
   // fresh resume probe.
   checking=false;probeGen++;
-  // The local cache (<60 s) is REUSED for an instant confident paint on rapid
-  // reopens (green/red, with the refresh spinner from checkStatus signalling the
-  // re-check); the background checkStatus() below confirms or corrects within ~1
-  // probe. A stale cache (>60 s) falls through to the else-branch which forces
-  // the orange "Vérification…".
+  // v8.7 — a stale down episode from before the suspend must not count toward the
+  // confirmation streak on resume; reset it (and any pending re-probe).
+  downStreak=0;if(downRecheckTimer){clearTimeout(downRecheckTimer);downRecheckTimer=null;}
+  // Reuse the local cache (<60 s) for an instant paint on rapid reopens. v8.7:
+  // only an "up" cache is pre-painted (the confident green, refresh spinner
+  // signalling the re-check); a cached "down" is NOT pre-painted red — it falls
+  // through to the orange "Vérification…" like a stale/empty cache. The
+  // background checkStatus() below confirms or corrects within ~1 probe.
   var cached=readLocalStatus();
-  if(cached){
+  if(cached&&cached.up){
     relayReachable=cached.relayOk!==false;
-    if(cached.up)setOnline();else setOffline();
+    setOnline();
   } else {
-    // Stale cache (> STATUS_LOCAL_TTL_MS in background) — the on-screen
-    // state may no longer reflect reality after a long absence. Reset
-    // hasConfirmedState so the upcoming checkStatus() repaints the
-    // orange "Vérification…" card instead of keeping the stale green/red
-    // visible during the re-probe. Without this, the user returning after
-    // hours sees the prior state until the fetch resolves (3-10 s),
-    // sometimes the opposite of reality.
+    // No cache, stale cache (> STATUS_LOCAL_TTL_MS in background), OR a cached
+    // "down" — the on-screen state may no longer reflect reality. Reset
+    // hasConfirmedState so the upcoming checkStatus() repaints the orange
+    // "Vérification…" card instead of keeping a stale verdict (or flashing a
+    // cached red) visible during the re-probe.
     hasConfirmedState=false;
   }
   checkStatus();

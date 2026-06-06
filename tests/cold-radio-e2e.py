@@ -1,5 +1,7 @@
 """
-Real-browser E2E validation of plex-jqh-omv v8 (single-probe status model).
+Real-browser E2E validation of plex-jqh-omv v8.7 (single-probe status model
+with v8.7 confirm-before-red: a "down" verdict shows orange and re-probes once
+before committing red; "up" stays instant).
 
 Drives the PWA with Playwright + Chromium headless. The route handler
 intercepts the relay's `/status` endpoint (the single PWA fetch) and the
@@ -29,7 +31,8 @@ Scenarios (mirror state-machine-sim.py):
   2. cold-launch-server-off-fast       — /status down → red ≤3 s
   3. relay-fail-fallback-home-up       — /status ✕ → home ok → green; relay warn
                                          only after the 3rd-miss debounce (~16 s)
-  4. relay-and-home-down               — /status ✕ → home ✕ → red immediate;
+  4. relay-and-home-down               — /status ✕ → home ✕ → orange then red
+                                         (after the v8.7 confirm re-probe);
                                          relay warn only after the 3rd-miss debounce
   5. cache-up-server-down-corrects-red — cache <60 s says up but the home was just
                                          stopped (relay down) → v8.6 reuses the
@@ -48,6 +51,12 @@ Scenarios (mirror state-machine-sim.py):
  12. relay-up-extra-json-fields-greens — /status up with extra JSON fields
                                          (stale/age_s) → up → green + confident button
                                          (the parser tolerates fields it ignores)
+ 13. transient-relay-false-down-no-red — /status down once then up → orange then
+                                         green, NEVER a red flash (the v8.7 fix:
+                                         the user's red-that-was-green-a-moment-later)
+ 14. cache-down-server-actually-up-no-red — stale cached "down" + server up →
+                                         orange (never a confident red pre-paint),
+                                         greened by the live probe
 
 Note: scenarios 3 and 4 sample past T+16 s because the v8.2 relay-down debounce
 only hardens the warn on the THIRD consecutive miss. Since `route.abort()` is
@@ -98,6 +107,13 @@ def is_warn(s):
 
 def is_green(s):
     return "online" in s["dotClass"] and "online" in s["cardClass"]
+
+
+def is_checking(s):
+    # The orange "Vérification…" — the dot in its checking state and neither a
+    # committed green nor red card. v8.7 shows this while a "down" verdict is
+    # being re-confirmed (and on a cold open / a cached "down").
+    return "checking" in s["dotClass"] and not is_red(s) and not is_green(s)
 
 
 def is_wol_disabled(s):
@@ -186,6 +202,7 @@ def run_scenario(p, name, relay_plan, home_plan, sample_delays_s, preseed_cache=
         "red_at": [t for t, s in samples if is_red(s)],
         "warn_at": [t for t, s in samples if is_warn(s)],
         "green_at": [t for t, s in samples if is_green(s)],
+        "checking_at": [t for t, s in samples if is_checking(s)],
         "final_green": is_green(final),
         "final_red": is_red(final),
         "final_warn": is_warn(final),
@@ -315,10 +332,14 @@ def run_watchdog_scenario(p):
     # declares these as top-level `var`s, so they live on window.
     relay_verdict["v"] = "down"
     page.evaluate("() => { window.checking = true; window.checkStartedAt = Date.now() - 60000; }")
-    # Re-probe trigger (stands in for the 15 s self-healing tick) — the refresh
-    # button calls checkStatus().
+    # Re-probe trigger (stands in for the self-healing tick) — the refresh
+    # button calls checkStatus(). v8.7: the reclaimed re-probe sees "down" → it
+    # paints orange and fires the confirm re-probe (DOWN_RECHECK_MS = 2.5 s), so
+    # red lands ~2.5 s later, not instantly. Wait past it (3.5 s) — the property
+    # under test is that the wedged flag is reclaimed and the app converges to red
+    # (not frozen green), not the latency.
     page.click("#refreshBtn")
-    page.wait_for_timeout(2000)
+    page.wait_for_timeout(3500)
     post = capture_state(page)
     b.close()
     return {
@@ -341,12 +362,15 @@ def main():
         results.append(("cold-launch-server-up-fast", ok1, r1,
                         "green ≤T+3, no red, no warn, button confident on fresh up"))
 
+        # v8.7: a genuine down shows orange first (the confirm re-probe), then
+        # red — never a green. sample at T+1 catches the orange, T+3 the red.
         r2 = run_scenario(p, "cold-launch-server-off-fast",
                           relay_plan=lambda n: "down", home_plan=lambda n: "ok",
                           sample_delays_s=[1, 3])
-        ok2 = bool(r2["red_at"]) and r2["red_at"][0] <= 3 and not r2["green_at"] and not r2["warn_at"]
+        ok2 = (bool(r2["red_at"]) and r2["red_at"][0] <= 3 and not r2["green_at"]
+               and not r2["warn_at"] and bool(r2["checking_at"]))
         results.append(("cold-launch-server-off-fast", ok2, r2,
-                        "red ≤T+3, no green, no warn"))
+                        "orange (T+1) then red ≤T+3, no green, no warn"))
 
         # v8.2: a sustained relay failure stays optimistic until RELAY_DOWN_MISSES
         # (3) consecutive misses. With instant-abort, misses land at the T=0 / T=8
@@ -377,12 +401,16 @@ def main():
         # this replaces the v8.5 "never flash green" honesty), and the live probe
         # corrects it to red ≤3 s. The property under test is the fast correction,
         # not the absence of green.
+        # v8.7: the reused green is held, then a "down" verdict shows orange (the
+        # confirm re-probe) before committing red — green→orange→red, never the
+        # bare green→red flash. checking_at catches the orange phase.
         r5 = run_scenario(p, "cache-up-server-down-corrects-red",
                           relay_plan=lambda n: "down", home_plan=lambda n: "ok",
                           sample_delays_s=[0, 1, 3], preseed_cache={"up": True, "relayOk": True})
-        ok5 = r5["final_red"] and bool(r5["red_at"]) and r5["red_at"][0] <= 3
+        ok5 = (r5["final_red"] and bool(r5["red_at"]) and r5["red_at"][0] <= 3
+               and bool(r5["checking_at"]))
         results.append(("cache-up-server-down-corrects-red", ok5, r5,
-                        "reused cache green corrects to red ≤T+3"))
+                        "reused green → orange → red ≤T+3"))
 
         # v8.6 — a cache up + a server still up: the reused green pre-paint is
         # confirmed by the live probe (no red/warn). Guards against the reuse
@@ -455,8 +483,33 @@ def main():
         results.append(("relay-up-extra-json-fields-greens", ok12, r12,
                         "up with extra JSON fields → green card + confident green button"))
 
+        # v8.7 THE FIX — the user's report. The relay /status answers a transient
+        # "down" once (server-side SWR cache caught a momentary home blip), then
+        # "up". v8.6 committed red on that first down (the red-that-was-green-a-
+        # moment-later, with no orange in between). v8.7 must paint orange
+        # "Vérification…" and re-probe → green, NEVER a red flash.
+        r13 = run_scenario(p, "transient-relay-false-down-no-red",
+                           relay_plan=lambda n: "down" if n == 1 else "up",
+                           home_plan=lambda n: "ok",
+                           sample_delays_s=[1, 4])
+        ok13 = (r13["final_green"] and not r13["red_at"] and not r13["warn_at"]
+                and bool(r13["checking_at"]))
+        results.append(("transient-relay-false-down-no-red", ok13, r13,
+                        "transient down → orange then green, NEVER red"))
+
+        # v8.7 THE FIX — a stale cache says "down" but the server is actually up.
+        # v8.6 pre-painted the cached down as a confident red on open (then the
+        # probe corrected to green) — a red flash from a stale cache. v8.7 never
+        # pre-paints red from a cache: orange until the live probe greens it.
+        r14 = run_scenario(p, "cache-down-server-actually-up-no-red",
+                           relay_plan=lambda n: "up", home_plan=lambda n: "ok",
+                           sample_delays_s=[0, 1, 3], preseed_cache={"up": False, "relayOk": True})
+        ok14 = r14["final_green"] and not r14["red_at"] and not r14["warn_at"]
+        results.append(("cache-down-server-actually-up-no-red", ok14, r14,
+                        "stale cached down → never a red flash, greens via live probe"))
+
     print("\n" + "=" * 72)
-    print(f"VERDICT (real browser E2E — v8 single-probe model) — base={PWA_BASE}")
+    print(f"VERDICT (real browser E2E — v8.7 confirm-before-red model) — base={PWA_BASE}")
     print("=" * 72)
     all_ok = True
     for name, ok, r, want in results:

@@ -7,7 +7,7 @@ state machine.
 
 | File | What | Speed |
 |---|---|---|
-| `state-machine-sim.py` | Deterministic Python sim of the app.js v8 timer/fetch logic. `OldCascade` (v7 baseline) vs `V8App` on the status scenarios + a contrast check. Also models the v8.3 power-button honesty (`BuggyButtonApp` baseline vs the fixed button) — the confident green "Serveur allumé" only on a FRESH verdict, never off a cache pre-paint or a relay `stale=true`. | ~50 ms |
+| `state-machine-sim.py` | Deterministic Python sim of the app.js v8 timer/fetch logic. `OldCascade` (v7 baseline) vs `V8App` on the status scenarios + a contrast check. Also models the v8.4 power-button honesty (`BuggyButtonApp` baseline vs the fixed button) — the confident green "Serveur allumé" lights once a live probe settles, never off a cache pre-paint; a relay `stale=true` up is trusted as up (a healthy home is almost always served stale → v8.3 gating on `!stale` stuck the button orange, fixed here). | ~50 ms |
 | `cold-radio-e2e.py` | Playwright headless drives Chromium against the PWA with mocked network + spoofed visibilitychange. 12 scenarios. | ~30 s |
 | `screenshots/` | E2E output, gitignored. | — |
 

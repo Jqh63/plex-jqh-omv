@@ -29,15 +29,17 @@ a generation guard. So this sim is now just two implementations side by side:
     counter drops a stale in-flight probe that resolves after a resume (the
     Android suspend-mid-fetch race). One relay attempt (PROBE_TIMEOUT), and on
     its failure one direct-home fallback (HOME_TIMEOUT). No retry, no hold, no
-    streak. As of v8.3 it also models power-button honesty: the confident green
-    "Serveur allumé" lights ONLY on a FRESH up (relay stale=false, or a live
-    direct-home probe); a cache pre-paint or a relay stale=true verdict paints
-    the neutral "Vérification…" button instead.
+    streak. As of v8.4 it also models power-button honesty: the confident green
+    "Serveur allumé" lights once a LIVE probe has settled this session (relay or
+    home answered, regardless of the relay's SWR `stale` flag); only a cache
+    pre-paint (before the first probe) paints the neutral "Vérification…" button.
+    (v8.3 also gated on `not stale`, which left the button stuck orange because a
+    healthy home is almost always served `stale:true` — fixed in v8.4.)
   - BuggyButtonApp: V8App's card logic verbatim, but with the PRE-v8.3 power
-    button — it asserts the confident green on ANY up verdict, ignoring
-    freshness. The side-by-side baseline for the `button_contrast` scenarios: it
-    paints the false green from a cache pre-paint or a relay stale=true verdict
-    exactly where the fixed V8App now shows "Vérification…".
+    button — it asserts the confident green on ANY up verdict, including straight
+    from a cache pre-paint. The side-by-side baseline for the `button_contrast`
+    scenarios: it paints the false green from a cache pre-paint exactly where the
+    fixed V8App shows "Vérification…" until the first live probe lands.
 
 A scenario passes for V8App if the final state matches the spec, no forbidden
 paint (red / warn / checking) was emitted, the orange "Vérification…" card was
@@ -388,9 +390,13 @@ class V8App(BaseApp):
 
     def _relay_done(self, gen, ok, up, answered, stale=False):
         if ok:
-            # A relay success is fresh only if the relay's own SWR cache wasn't
-            # stale — a stale up keeps the button honest (not a confident green).
-            self._settle(gen, up=up, relay_ok=True, fresh=not stale)
+            # A live relay verdict is confirmed-this-session regardless of the
+            # relay's SWR `stale` flag (v8.4 — see app.js verdictFresh note): the
+            # PWA polls every 15 s vs the relay's 5 s fresh window, so a healthy
+            # home is almost always served `stale:true`. Gating the button on
+            # `not stale` (v8.3) left it stuck orange. Only up:false (60 s
+            # ceiling) moves the button off green. `stale` kept for tape parity.
+            self._settle(gen, up=up, relay_ok=True, fresh=True)
             return
         # Relay failed. answered → alive but degraded (keep reachable);
         # transport → unreachable. Either way, one direct-home fallback.
@@ -751,34 +757,33 @@ SCENARIOS = [
         horizon=50.0,
     ),
     Scenario(
-        # v8.3 BUTTON — the reported bug. Reopen with a <60 s localStorage cache
-        # (up). The cache pre-paints the card green (anti-strobe, kept), but the
-        # BUTTON must NOT assert "Serveur allumé" off a cache: it shows
-        # "Vérification…" until the probe lands a FRESH up, then flips to "on".
-        # Fixed: first button paint = "checking", then "on". BuggyButton: first
-        # paint = "on" (the false confident green while the card still verifies).
-        name="button-cache-up-honest-until-fresh",
-        relay_outcomes=[FetchOutcome(0.3, ok=True, up=True)],   # fresh (stale=False)
+        # v8.4 BUTTON — the reported bug AND the regression in one scenario.
+        # Reopen with a <60 s localStorage cache (up); the relay answers up but
+        # SWR-STALE (the steady state: PWA polls /15 s vs the relay's 5 s fresh
+        # window). The cache pre-paint must NOT assert a confident green → first
+        # button "checking". The probe then lands a live relay up (stale) and the
+        # button MUST go green — it must NOT stay orange just because the relay
+        # flagged stale (that was the v8.3 regression: stuck orange ~30 s+).
+        # Fixed: checking → on. BuggyButton (pre-v8.3): on straight from cache.
+        name="button-cache-up-stale-relay-honest-then-green",
+        relay_outcomes=[FetchOutcome(0.3, ok=True, up=True, stale=True)],
         oracle_cache={"up": True, "relay_ok": True},
         expect_final_online=True,
         expect_first_button="checking",
-        expect_confident_button=True,   # it DOES reach green — but only when fresh
+        expect_confident_button=True,
         button_contrast=True,
         horizon=5.0,
     ),
     Scenario(
-        # v8.3 BUTTON — relay serves a STALE up (home went down inside the 60 s
-        # SWR ceiling; relay still answers up=true, stale=true). The card trusts
-        # the up value (stays green, no red flash), but the button must stay
-        # honest "checking" the WHOLE time — never a confident "on" — because the
-        # home may already be off. Tape repeats the stale up, so "on" must never
-        # appear. BuggyButton paints "on" throughout (the false green).
-        name="button-relay-stale-up-stays-honest",
+        # v8.4 BUTTON — regression guard. No cache; the relay answers up but
+        # SWR-stale on every poll (the steady state for a healthy home). The
+        # button MUST light the confident green — a stale-but-up relay is a real
+        # server-side confirmation. The v8.3 bug left it stuck "checking" here.
+        name="button-stale-relay-up-greens",
         relay_outcomes=[FetchOutcome(0.3, ok=True, up=True, stale=True)],
         expect_final_online=True,
-        expect_first_button="checking",
-        expect_confident_button=False,  # never a confident green on a stale verdict
-        button_contrast=True,
+        expect_first_button="on",
+        expect_confident_button=True,
         horizon=20.0,
     ),
     Scenario(

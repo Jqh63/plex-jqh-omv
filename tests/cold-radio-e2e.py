@@ -40,9 +40,9 @@ Scenarios (mirror state-machine-sim.py):
                                          NEVER warn, WoL stays enabled (debounce payoff)
  11. watchdog-reclaims-wedged-checking — stuck checking=true + server down → a
                                          re-probe reclaims the flag → red, not frozen green
- 12. button-relay-stale-up-honest      — relay serves a stale up → card green but
-                                         the power button stays "Vérification…",
-                                         never the confident green (v8.3 honesty)
+ 12. button-stale-relay-up-greens      — relay serves a stale up (steady state) →
+                                         button lights the confident green (v8.4;
+                                         guards the v8.3 stuck-orange regression)
 
 Note: scenarios 3 and 4 sample past T+30 s because the v8.2 relay-down debounce
 only hardens the warn on the THIRD consecutive miss, i.e. after two 15 s
@@ -422,19 +422,19 @@ def main():
         results.append(("watchdog-reclaims-wedged-checking", ok11, r11,
                         "wedged checking reclaimed on re-probe → red, not frozen green"))
 
-        # v8.3 button honesty: the relay serves a STALE up (home may have gone
-        # down inside the 60 s SWR ceiling). The card trusts the up value (green,
-        # no red), but the power button must stay honest "Vérification…" — NEVER
-        # the confident green "Serveur allumé" — for the whole stale window. This
-        # is the "vert sur le bouton d'allumage pendant que le check tourne" bug.
-        r12 = run_scenario(p, "button-relay-stale-up-honest",
+        # v8.4 button honesty + regression guard: the relay serves a STALE up —
+        # the STEADY STATE on a healthy home (the PWA polls /15 s vs the relay's
+        # 5 s fresh window, so almost every poll is stale:true). The button MUST
+        # light the confident green: a stale-but-up relay is a real server-side
+        # confirmation. v8.3 gated the green on !stale and left the button stuck
+        # orange ~30 s+ on a perfectly up home — the regression this guards.
+        r12 = run_scenario(p, "button-stale-relay-up-greens",
                            relay_plan=lambda n: "up-stale", home_plan=lambda n: "ok",
                            sample_delays_s=[1, 3])
         ok12 = (r12["final_green"] and not r12["red_at"] and not r12["final_wol_disabled"]
-                and r12["final_button_checking"] and not r12["final_button_confident"]
-                and not r12["button_confident_at"])
-        results.append(("button-relay-stale-up-honest", ok12, r12,
-                        "green card, button stays 'Vérification…' (never confident green) on a stale verdict"))
+                and r12["final_button_confident"] and not r12["final_button_checking"])
+        results.append(("button-stale-relay-up-greens", ok12, r12,
+                        "green card + confident green button on a stale-but-up relay (no stuck orange)"))
 
     print("\n" + "=" * 72)
     print(f"VERDICT (real browser E2E — v8 single-probe model) — base={PWA_BASE}")

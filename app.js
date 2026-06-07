@@ -333,7 +333,7 @@ function buildLinks(){
         // During an active WoL boot the server is in transition, not "off" —
         // the generic "allume-le" message is misleading and frustrating
         // ("but I just did!"). Differentiate the two cases.
-        if(wolSent)showToast('⏳ Serveur en cours de réveil — patiente quelques instants',true);
+        if(wolSent)showToast('⏳ Réveil en cours — patiente',true);
         else showToast('⚠ Serveur éteint — allume-le d\'abord',true);
       });
     }
@@ -550,7 +550,7 @@ function setRechecking(){
   document.getElementById('statusDot').className='status-dot checking';
   document.getElementById('statusCard').className='status-card';
   document.getElementById('statusLabel').textContent='Vérification...';
-  document.getElementById('statusSub').textContent='le serveur ne répond pas — nouvelle tentative…';
+  document.getElementById('statusSub').textContent='nouvelle tentative…';
   setButtonChecking();
 }
 
@@ -619,7 +619,7 @@ function setFallbackState(){
   if(!relayReachable){
     if(isOnline){
       link.classList.add('warn');
-      a.textContent='⚠ Relais WoL injoignable — Réveil manuel';
+      a.textContent='⚠ Relais injoignable — Réveil manuel';
     }else{
       link.classList.add('promoted');
       a.textContent='Réveil ne marche pas ? Réveil manuel';
@@ -699,7 +699,7 @@ function startCountdown(){
   var tick=function(){
     var diff=Math.round((countdownEndsAt-Date.now())/1000);
     if(isOnline||!wolSent){stopCountdown();return;}
-    if(diff<-30)pl.textContent='Démarrage un peu plus long — patiente encore';
+    if(diff<-30)pl.textContent='Démarrage un peu long — patiente…';
     else if(diff<=0)pl.textContent='Réveil… presque prêt';
     else pl.textContent='Réveil… environ '+diff+'s';
   };
@@ -735,7 +735,7 @@ function postWol(isRetry){
   }).then(function(r){
     if(r.ok||isRetry)return;
     wolSent=false;wolStartTime=0;stopCountdown();clearWolPoll();clearWolRetries();
-    var msg=(r.status===401||r.status===403)?'Authentification refusée par le relais':'Erreur relais HTTP '+r.status;
+    var msg=(r.status===401||r.status===403)?'Relais : accès refusé':'Erreur relais HTTP '+r.status;
     if(navigator.vibrate)navigator.vibrate(300);
     showToast('⚠ '+msg+' — utilise le réveil manuel ↓',true,5000);
     setOffline();
@@ -749,7 +749,7 @@ function postWol(isRetry){
     // confirmed-down ceiling so a following miss keeps it down.
     relayReachable=false;relayMissStreak=RELAY_DOWN_MISSES;
     if(navigator.vibrate)navigator.vibrate(300);
-    showToast('⚠ Relais injoignable — utilise le réveil manuel ↓',true,5000);
+    showToast('⚠ Relais injoignable — réveil manuel ↓',true,5000);
     setOffline();
   });
 }
@@ -773,14 +773,14 @@ function setOffline(){
   if(wolReady()){
     var btn=document.getElementById('powerBtn'),lbl=document.getElementById('powerLabel');
     if(relayReachable){btn.className='power-btn';lbl.textContent='Allumer le serveur';lbl.className='power-label';}
-    else{btn.className='power-btn unavailable';lbl.textContent='Réveil indisponible — utilise le réveil manuel ↓';lbl.className='power-label unavailable';}
+    else{btn.className='power-btn unavailable';lbl.textContent='Réveil indisponible — voir ↓';lbl.className='power-label unavailable';}
     setFallbackState();
   }
 }
 
 function sendWol(){
   if(isOnline||wolSent||!wolReady())return;
-  if(!relayReachable){showToast('⚠ Relais WoL injoignable — utilise le réveil manuel ↓',true,5000);return;}
+  if(!relayReachable){showToast('⚠ Relais injoignable — réveil manuel ↓',true,5000);return;}
   if(navigator.vibrate)navigator.vibrate(50);
   wolSent=true;
   wolStartTime=Date.now();
@@ -813,7 +813,7 @@ function sendWol(){
       // Surface the timeout — silent failure (vibration + flip to red) used to
       // leave family members wondering whether the app was broken. Toast tells
       // them what happened and points to the manual fallback.
-      showToast('⚠ Le serveur n\'a pas démarré — réessaie ou utilise le réveil manuel ↓',true,5000);
+      showToast('⚠ Pas démarré — réessaie ou réveil manuel ↓',true,5000);
       setOffline();
       return;
     }

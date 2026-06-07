@@ -115,7 +115,7 @@
   .link-text{line-height:1.3}
   .link-sub{font-size:11px;color:var(--text-dim);font-family:'JetBrains Mono',monospace}
 
-  .toast{position:fixed;bottom:max(24px,env(safe-area-inset-bottom,24px));left:50%;transform:translateX(-50%) translateY(80px);background:var(--surface);border:1px solid var(--green);border-radius:12px;padding:12px 20px;font-size:13px;color:var(--green);box-shadow:0 8px 32px rgba(0,0,0,.5);opacity:0;transition:all .4s cubic-bezier(.16,1,.3,1);z-index:10;pointer-events:none;white-space:nowrap}
+  .toast{position:fixed;bottom:max(24px,env(safe-area-inset-bottom,24px));left:50%;transform:translateX(-50%) translateY(80px);background:var(--surface);border:1px solid var(--green);border-radius:12px;padding:12px 20px;font-size:13px;color:var(--green);box-shadow:0 8px 32px rgba(0,0,0,.5);opacity:0;transition:all .4s cubic-bezier(.16,1,.3,1);z-index:10;pointer-events:none;max-width:min(340px,calc(100vw - 32px));text-align:center;line-height:1.35}
   .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
   .toast.warn{border-color:var(--orange);color:var(--orange)}
   .footer{font-size:10px;color:var(--text-dim);font-family:'JetBrains Mono',monospace;opacity:.3}

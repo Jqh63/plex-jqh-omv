@@ -8,7 +8,7 @@ state machine.
 | File | What | Speed |
 |---|---|---|
 | `state-machine-sim.py` | Deterministic Python sim of the app.js v8 timer/fetch logic. `OldCascade` (v7 baseline) vs `V8App` on the status scenarios + a contrast check. Models the v8.4 power-button honesty (`BuggyButtonApp` baseline) AND the v8.5 status-card honesty (`BuggyCardApp` baseline) — the confident green ("Serveur allumé" / "En ligne") lights once a live probe settles, never off a cache pre-paint; a relay `stale=true` up is still trusted as up (a healthy home is almost always served stale → gating green on `!stale` stuck the indicator orange, so honesty keys on "a live probe settled this session", not the stale flag). v8.5 also shortens the self-healing poll (15 s → 8 s) so a just-stopped home corrects to red in ~8 s, asserted via `expect_red_by`. | ~50 ms |
-| `cold-radio-e2e.py` | Playwright headless drives Chromium against the PWA with mocked network + spoofed visibilitychange. 12 scenarios. | ~30 s |
+| `cold-radio-e2e.py` | Playwright headless drives the PWA on Chromium **and WebKit/Safari** (cross-browser, see § Engines) with mocked network + spoofed visibilitychange. 15 scenarios × engine. | ~30 s/engine |
 | `screenshots/` | E2E output, gitignored. | — |
 
 ## The v8 model (what's under test)
@@ -57,7 +57,7 @@ python3 tests/state-machine-sim.py
 #         Button honesty: confirmed  /  Card honesty: confirmed
 ```
 
-Real-browser E2E — needs Playwright + Chromium:
+Real-browser E2E — needs Playwright + a browser:
 
 ```bash
 python3 -m pip install --user playwright
@@ -65,8 +65,38 @@ python3 -m playwright install chromium
 # Validate the WORKING TREE before merge (flat HTML/JS → file:// works):
 PWA_BASE="file:///config/workspace/plex-jqh-omv/index.html" python3 tests/cold-radio-e2e.py
 # Or the live deploy (post-merge gate): leave PWA_BASE unset.
-# expect: ALL PASS (9 scenarios)
+# expect: [chromium] ALL PASS (15 scenarios)  /  ALL ENGINES PASS
 ```
+
+### Engines (cross-browser — Chromium + WebKit/iOS)
+
+The suite runs every scenario on each engine in `PWA_ENGINES`
+(default `chromium,webkit`):
+
+- **chromium** — the Blink baseline = Chrome desktop / Android Chrome.
+- **webkit** — Playwright's WebKit is the same WebCore/JSCore engine Safari
+  ships, so it's the **best headless approximation of iOS Safari** short of a
+  real iPhone (catches `:has()`, `100dvh`, `env(safe-area-inset-*)`, WebKit CSS
+  quirks). It is **not** a real device — a physical iPhone over 4G/WG stays the
+  gold standard, this is the fast first line.
+
+An engine whose browser can't launch (binary or system libs missing) is
+**SKIPPED with a note**, never a hard failure — so the Chromium gate still
+works on a host without the WebKit deps. WebKit needs a heavy lib stack
+(`libgtk-4`, `libgstreamer`, `libwoff2dec`, `libenchant`, …) that requires root:
+
+```bash
+# On a root-capable host (NOT the code-server sandbox, which has no sudo):
+python3 -m playwright install --with-deps webkit
+# Then both engines run from a plain invocation. To run one only:
+PWA_ENGINES=chromium python3 tests/cold-radio-e2e.py
+PWA_ENGINES=webkit   python3 tests/cold-radio-e2e.py
+```
+
+> The code-server sandbox can run **chromium only** (no root to apt-install the
+> WebKit deps). The WebKit lane is wired up and runs wherever those libs exist
+> — a Mac (`p.webkit` = real Safari engine out of the box), a provisioned CI, or
+> the sandbox if the deps are ever baked into the container init.
 
 ## What the E2E actually does
 

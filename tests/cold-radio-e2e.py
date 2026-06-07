@@ -3,17 +3,19 @@ Real-browser E2E validation of plex-jqh-omv v8.7 (single-probe status model
 with v8.7 confirm-before-red: a "down" verdict shows orange and re-probes once
 before committing red; "up" stays instant).
 
-Drives the PWA with Playwright + Chromium headless. The route handler
-intercepts the relay's `/status` endpoint (the single PWA fetch) and the
-direct-home fallback. Paint events are captured via DOM polling; verdict
-printed at the end.
+Drives the PWA with Playwright headless on every engine in PWA_ENGINES
+(default chromium,webkit — Blink baseline + the WebKit/Safari engine for iOS;
+see tests/README.md § Engines). The route handler intercepts the relay's
+`/status` endpoint (the single PWA fetch) and the direct-home fallback. Paint
+events are captured via DOM polling; a verdict is printed per engine. An engine
+whose browser can't launch is skipped with a note, not a failure.
 
 What this E2E covers vs. the offline sim (`state-machine-sim.py`):
 - The sim verifies the v8 state-machine semantics + timing bounds (orange
   never held past one PROBE+HOME) on a synthetic clock — fast, deterministic.
 - This E2E verifies that the actual `app.js` wires into those semantics
-  through real fetch + timer + visibilitychange paths in Chromium. It's the
-  gate before declaring a release usable.
+  through real fetch + timer + visibilitychange paths in a real browser
+  (Chromium + WebKit). It's the gate before declaring a release usable.
 
 Note (same as v7): `route.abort()` rejects the fetch INSTANTLY, whereas the
 real PWA timeout is PROBE_TIMEOUT_MS (8 s) / HOME_FALLBACK_TIMEOUT_MS (5 s).
@@ -80,6 +82,22 @@ PWA_URL = (
     f"&relay=https://{RELAY_HOST}&token=x&apps=seerr,plexweb"
 )
 STATUS_LOCAL_KEY = "plex-jqh-omv-status"
+
+# Engines to validate, in order. Chromium = the Blink baseline (Chrome /
+# Android Chrome); WebKit = the Safari/iOS engine (Playwright's WebKit is the
+# same WebCore/JSCore Safari ships, the best headless iOS approximation short
+# of a real device). Default runs both; override with e.g. PWA_ENGINES=chromium.
+# A WebKit run needs its system libs (libgtk-4, libgstreamer, libwoff2dec, …) —
+# `playwright install-deps webkit` on a root-capable host, see tests/README. An
+# engine that can't launch is SKIPPED with a note, never a hard failure.
+ENGINES = [e.strip() for e in
+           os.environ.get("PWA_ENGINES", "chromium,webkit").split(",") if e.strip()]
+_CURRENT_ENGINE = "chromium"
+
+
+def _launch(p):
+    """Launch the engine selected for the current pass (read by every runner)."""
+    return getattr(p, _CURRENT_ENGINE).launch()
 
 
 def capture_state(page):
@@ -174,7 +192,7 @@ def run_scenario(p, name, relay_plan, home_plan, sample_delays_s, preseed_cache=
             return
         route.continue_()
 
-    b = p.chromium.launch()
+    b = _launch(p)
     ctx = b.new_context(viewport={"width": 390, "height": 844})
     if preseed_cache is not None:
         import json
@@ -259,7 +277,7 @@ def run_resume_scenario(p, name, relay_plan, fg_event, bg_at_s, fg_at_s, sample_
             return
         route.continue_()
 
-    b = p.chromium.launch()
+    b = _launch(p)
     ctx = b.new_context(viewport={"width": 390, "height": 844})
     import json
     payload = json.dumps({"up": bool(preseed_cache.get("up")), "relayOk": bool(preseed_cache.get("relayOk", True)), "t": None})
@@ -326,7 +344,7 @@ def run_watchdog_scenario(p):
             return
         route.continue_()
 
-    b = p.chromium.launch()
+    b = _launch(p)
     ctx = b.new_context(viewport={"width": 390, "height": 844})
     page = ctx.new_page()
     page.route("**/*", handle)
@@ -359,7 +377,10 @@ def run_watchdog_scenario(p):
     }
 
 
-def main():
+def collect_results():
+    """Run the full scenario suite once, on the engine selected via the module
+    global _CURRENT_ENGINE (set by main() before each call). Returns the list of
+    (name, ok, result, want) tuples; main() prints the per-engine verdict."""
     results = []
     with sync_playwright() as p:
         r1 = run_scenario(p, "cold-launch-server-up-fast",
@@ -522,8 +543,13 @@ def main():
         results.append(("cache-down-server-actually-up-no-red", ok14, r14,
                         "stale cached down → never a red flash, greens via live probe"))
 
+    return results
+
+
+def print_verdict(results, engine):
     print("\n" + "=" * 72)
-    print(f"VERDICT (real browser E2E — v8.7 confirm-before-red model) — base={PWA_BASE}")
+    print(f"VERDICT (real browser E2E — v8.7 confirm-before-red model) — "
+          f"engine={engine} base={PWA_BASE}")
     print("=" * 72)
     all_ok = True
     for name, ok, r, want in results:
@@ -532,8 +558,56 @@ def main():
               f"green_at={r.get('green_at')} red_at={r.get('red_at')} "
               f"warn_at={r.get('warn_at', '-')} calls={r['counters']}")
     print("=" * 72)
-    print("ALL PASS" if all_ok else "AT LEAST ONE SCENARIO FAILED")
-    return 0 if all_ok else 1
+    print(f"[{engine}] ALL PASS" if all_ok
+          else f"[{engine}] AT LEAST ONE SCENARIO FAILED")
+    return all_ok
+
+
+def _short(e):
+    """Most informative line of a Playwright launch error (the deps banner is a
+    long box; surface the cause, not just 'BrowserType.launch:')."""
+    lines = [ln.strip().strip("║").strip() for ln in str(e).splitlines()]
+    lines = [ln for ln in lines if ln and "═" not in ln]
+    for ln in lines:  # prefer the human-readable cause if the banner has one
+        low = ln.lower()
+        if "missing dependencies" in low or "executable doesn't exist" in low:
+            return ln[:160]
+    for ln in lines:  # else the first concrete .so / non-label line
+        if ln.endswith(".so") or ".so." in ln:
+            return f"missing lib {ln}"[:160]
+    return (lines[0] if lines else str(e))[:160]
+
+
+def main():
+    # Validate on every requested engine (Chromium baseline + WebKit/Safari for
+    # iOS). An engine whose browser can't launch here (missing system libs, not
+    # installed) is SKIPPED with a note — it does NOT fail the run, so the
+    # Chromium gate still works on a host without the WebKit deps. The real iOS
+    # gold standard stays a physical iPhone; this is the headless first line.
+    global _CURRENT_ENGINE
+    overall_ok = True
+    ran, skipped = [], []
+    for eng in ENGINES:
+        _CURRENT_ENGINE = eng
+        with sync_playwright() as p:
+            try:
+                getattr(p, eng).launch().close()
+            except Exception as e:
+                skipped.append(eng)
+                print(f"\n[SKIP] engine={eng}: cannot launch — {_short(e)}")
+                print(f"       → install it on a root-capable host: "
+                      f"python3 -m playwright install --with-deps {eng}")
+                continue
+        overall_ok = print_verdict(collect_results(), eng) and overall_ok
+        ran.append(eng)
+    print("\n" + "#" * 72)
+    print(f"engines run: {', '.join(ran) or '(none)'}"
+          + (f" | skipped: {', '.join(skipped)}" if skipped else ""))
+    if not ran:
+        print("NO ENGINE COULD RUN — install a browser (see tests/README.md)")
+        return 2
+    print("ALL ENGINES PASS" if overall_ok else "AT LEAST ONE ENGINE FAILED")
+    return 0 if overall_ok else 1
 
 
 if __name__ == "__main__":

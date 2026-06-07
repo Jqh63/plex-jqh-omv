@@ -7,6 +7,9 @@ import os, sys, pathlib
 from playwright.sync_api import sync_playwright
 
 BASE = os.environ.get('PWA_BASE', 'file:///config/workspace/plex-jqh-omv/index.html')
+# chromium (default) | webkit — webkit renders on the Safari engine but needs
+# its system libs (see tests/README.md § Engines); falls back with a clear error.
+ENGINE = os.environ.get('PWA_ENGINE', 'chromium')
 OUT = pathlib.Path(__file__).parent / 'screenshots'
 OUT.mkdir(exist_ok=True)
 CFG = ('?host=myserver.example.com&relay=https://wol.example.com'
@@ -24,7 +27,7 @@ TOASTS = [
 
 def main():
     with sync_playwright() as p:
-        b = p.chromium.launch()
+        b = getattr(p, ENGINE).launch()
         # 360px = a common narrow Android width (Pixel-class); DPR 3 for crispness.
         ctx = b.new_context(viewport={'width': 360, 'height': 780}, device_scale_factor=3)
         page = ctx.new_page()

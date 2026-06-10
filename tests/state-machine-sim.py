@@ -110,6 +110,19 @@ RELAY_DOWN_MISSES = 3    # app.js RELAY_DOWN_MISSES
 DOWN_CONFIRM = 2         # app.js DOWN_CONFIRM
 DOWN_RECHECK = 2.5       # app.js DOWN_RECHECK_MS
 
+# v8.10 — stale-green-on-wake fix (IRL bug 2026-06-10: prolonged device sleep
+# with NO visibilitychange flip → reopen kept yesterday's confident green ~10 s
+# while the home was off). Two pieces, both in V8App:
+#   1. Clock-jump detector: the real app's 1 s visibility poll compares
+#      Date.now() across ticks; a gap > SLEEP_JUMP means the JS was frozen
+#      (device slept) and routes through onForeground() even though
+#      document.hidden never flipped. Modeled as a _resume() scheduled
+#      SLEEP_JUMP_POLL after the (event-less) wake.
+#   2. Staleness guard in check_status(): a confirmed on-screen verdict older
+#      than STATUS_LOCAL_TTL (in-memory last_verdict_at) no longer suppresses
+#      the orange "Vérification…" — never vouch for a verdict we can't trust.
+SLEEP_JUMP_POLL = 1.0    # worst-case detector latency (the 1 s poll cadence)
+
 # OldCascadeApp (v7) constants — the baseline we're proving better than.
 OLD_STATUS_TIMEOUT = 5.0  # v7.1 STATUS_FETCH_TIMEOUT_MS
 OLD_HOLD_RECHECK = 3.0    # v7.6 HOLD_RECHECK_MS
@@ -152,7 +165,10 @@ class Scenario:
     oracle_cache: Optional[dict] = None
     # Background / foreground transitions. background_at hides the app (ticks
     # pause); foreground_at returns it; foreground_event is which event fires
-    # on return ("visibilitychange" | "focus" | "none").
+    # on return ("visibilitychange" | "focus" | "none" | "clockjump").
+    # "clockjump" = no DOM event fires AND document.hidden never flipped (the
+    # screen-off prolonged-sleep quirk) — only the v8.10 clock-jump detector
+    # (V8App) notices the wake, SLEEP_JUMP_POLL after foreground_at.
     background_at: float = 0.0
     foreground_at: float = 0.0
     foreground_event: str = "visibilitychange"
@@ -228,6 +244,10 @@ class BaseApp:
         self._orange_start = None
         self.max_orange = 0.0
         self.down_streak = 0   # v8.7 — consecutive live "down" verdicts so far
+        # v8.10 — sim-clock time of the last confident-verdict paint (live settle
+        # or cache pre-paint). Mirrors app.js lastVerdictAtMs. Far in the past
+        # initially so a never-confirmed state can't read as fresh.
+        self.last_verdict_at = -1e9
 
     # ---- paint bookkeeping -------------------------------------------------
     def paint(self, kind):
@@ -294,6 +314,7 @@ class BaseApp:
         self.checking = False
         self.relay_reachable = relay_ok
         self.has_confirmed_state = True
+        self.last_verdict_at = self.clock.now   # v8.10 — see staleness guard
         self.is_online = up
         self.paint(self._card_for(up))
         self.set_button(self._button_for(up, relay_ok))
@@ -316,11 +337,13 @@ class BaseApp:
         if bool(cache.get("up")):
             self.is_online = True
             self.has_confirmed_state = True
+            self.last_verdict_at = self.clock.now   # v8.10 — cache is <60 s fresh
             self.paint(self._card_for(True))
             self.set_button(self._button_for(True, self.relay_reachable))
         elif self.PRE_PAINT_DOWN == "offline":
             self.is_online = False
             self.has_confirmed_state = True
+            self.last_verdict_at = self.clock.now
             self.paint(self._card_for(False))
             self.set_button(self._button_for(False, self.relay_reachable))
         else:
@@ -350,7 +373,14 @@ class BaseApp:
         self.hidden = False
         if self.scenario.foreground_event in ("focus", "visibilitychange"):
             self._resume()
+        elif self.scenario.foreground_event == "clockjump":
+            self._on_clock_jump()
         # "none": the self-healing tick re-probes within CHECK_INTERVAL.
+
+    def _on_clock_jump(self):
+        # Baseline apps have no clock-jump detector — the wake is event-less
+        # for them, same as "none" (only the self-healing tick re-probes).
+        pass
 
     def _resume(self):
         # app.js onForeground: clear the checking guard, invalidate any
@@ -416,9 +446,20 @@ class V8App(BaseApp):
         # Bump the generation at the START of every check so a stale in-flight
         # probe is dropped when it finally resolves.
         self.probe_gen += 1
+        # v8.10 staleness guard — a confident verdict older than STATUS_LOCAL_TTL
+        # no longer suppresses the orange "Vérification…" (prolonged sleep where
+        # neither events nor the hidden-flip poll fired: the on-screen green is
+        # yesterday's, the re-probe must show as such).
+        if self.has_confirmed_state and (self.clock.now - self.last_verdict_at) > STATUS_LOCAL_TTL:
+            self.has_confirmed_state = False
         if not self.has_confirmed_state:
             self.paint("checking")
         self._start_probe()
+
+    def _on_clock_jump(self):
+        # v8.10 — the 1 s poll notices Date.now() jumped > SLEEP_JUMP_MS and
+        # calls onForeground(); worst case one poll cadence after the wake.
+        self.clock.after(SLEEP_JUMP_POLL, self._resume)
 
     def _invalidate_inflight(self):
         # onForeground bumps probe_gen (belt-and-braces with the bump inside
@@ -878,6 +919,53 @@ SCENARIOS = [
         expect_final_online=False,
         forbid_red_flash=False,
         horizon=30.0,
+    ),
+    Scenario(
+        # v8.10 CLOCK-JUMP DETECTOR (fast path). Prolonged device sleep where
+        # document.hidden NEVER flips (screen-off Android quirk): no focus, no
+        # visibilitychange, no hidden→visible edge for the 1 s poll. The only
+        # wake signal is the Date.now() gap > SLEEP_JUMP_MS noticed by the v8.10
+        # detector, worst case SLEEP_JUMP_POLL after the wake. Live green at
+        # T=0, frozen sleep T=3→120, home died during the sleep. The detector
+        # fires onForeground → drop confirmed-state (no cache) → orange → red
+        # after DOWN_CONFIRM (~T=124). Without the detector (pre-v8.10) the
+        # stale green held until the T=128 tick — and even then kept the green
+        # visual through the re-probe (the reported ~10 s false green).
+        name="prolonged-sleep-clockjump-stale-green-demoted",
+        relay_outcomes=[
+            FetchOutcome(0.3, ok=True, up=True),     # T=0 live check — up
+            FetchOutcome(0.3, ok=True, up=False),    # detector re-probe — down
+            FetchOutcome(0.3, ok=True, up=False),    # DOWN_CONFIRM re-check
+        ],
+        background_at=3.0,
+        foreground_at=120.0,
+        foreground_event="clockjump",
+        expect_final_online=False,
+        expect_red_by=125.0,
+        forbid_red_flash=False,
+        horizon=140.0,
+    ),
+    Scenario(
+        # v8.10 STALENESS GUARD (backstop path). Same prolonged sleep but NO
+        # wake signal at all (foreground_event="none" — even the clock-jump
+        # detector is assumed missed). The first self-healing tick after the
+        # wake (T=128) re-probes; pre-v8.10, hasConfirmedState kept yesterday's
+        # confident green on screen during that re-probe. The guard demotes a
+        # confident verdict older than STATUS_LOCAL_TTL → the tick paints
+        # orange immediately, then red after DOWN_CONFIRM (~T=131).
+        name="prolonged-sleep-no-event-stale-verdict-demoted",
+        relay_outcomes=[
+            FetchOutcome(0.3, ok=True, up=True),     # T=0 live check — up
+            FetchOutcome(0.3, ok=True, up=False),    # T=128 tick — down
+            FetchOutcome(0.3, ok=True, up=False),    # DOWN_CONFIRM re-check
+        ],
+        background_at=3.0,
+        foreground_at=120.0,
+        foreground_event="none",
+        expect_final_online=False,
+        expect_red_by=132.0,
+        forbid_red_flash=False,
+        horizon=140.0,
     ),
     Scenario(
         # Frozen wedge (the "total KO, must kill the app" report). The cold-launch

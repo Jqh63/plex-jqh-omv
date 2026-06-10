@@ -569,6 +569,14 @@ function checkStatus(){
     // stale verdict without touching `checking`, which the newer probe owns.
     if(gen!==probeGen)return;
     checking=false;btn.classList.remove('spinning');
+    // v8.12 — adopt the relay-served uptime window (UPTIME_WINDOW env on the
+    // relay). The relay value wins over a locally-set one: it's the
+    // admin-controlled source of truth, so changing it on the relay updates
+    // every installed client on its next poll — no re-provisioning URL to
+    // resend. Persisted so it survives offline opens and relay outages.
+    if(res.window&&parseWindow(res.window)&&config.window!==res.window){
+      config.window=res.window;storeConfig(config);
+    }
     // N-consecutive-miss debounce on relay reachability (see relayMissStreak
     // comment): a miss stays optimistic until RELAY_DOWN_MISSES in a row; any
     // answered/up probe resets the streak. The home up/down verdict (res.up) is
@@ -645,7 +653,9 @@ function probe(){
     );
   }
   return fetchStatusFromRelay().then(
-    function(j){return {up:j.up,relayReachable:true};},
+    // v8.12 — pass the relay-served uptime window through (see the adoption
+    // logic in checkStatus): the relay is the admin-controlled config channel.
+    function(j){return {up:j.up,relayReachable:true,window:(typeof j.window==='string'?j.window:null)};},
     function(err){
       var relayUp=!!(err&&err.answered);
       return fetchHomeDirectly().then(
@@ -830,14 +840,17 @@ function setOffline(){
   // While a WoL request is being processed, keep the "starting" state — a red
   // "offline" card next to the spinning power button is contradictory.
   if(wolSent){setStarting();return;}
-  document.getElementById('statusDot').className='status-dot offline';
-  document.getElementById('statusCard').className='status-card offline';
   // v8.11 — window-aware red. Outside the configured uptime window a red is
   // the EXPECTED nightly shutdown: say so ("En veille" + the auto-wake time)
   // instead of the alarming "Hors ligne", so the family doesn't read a
   // deliberate sleep as an outage. Inside the window (or no window set) the
   // plain "Hors ligne" stands — there, red IS the anomaly signal.
+  // v8.12 — the expected sleep also gets its own calm blue card/dot style
+  // instead of the alarming outage red.
   var inWin=inUptimeWindow();
+  var sleeping=navigator.onLine&&inWin===false;
+  document.getElementById('statusDot').className='status-dot '+(sleeping?'sleep':'offline');
+  document.getElementById('statusCard').className='status-card '+(sleeping?'sleep':'offline');
   if(!navigator.onLine){
     document.getElementById('statusLabel').textContent='Hors ligne';
     document.getElementById('statusSub').textContent='pas de réseau';
@@ -1063,9 +1076,17 @@ document.getElementById('powerBtn').addEventListener('click',sendWol);
 if(window.caches){
   caches.keys().then(function(names){
     var ours=names.filter(function(n){return n.indexOf('plex-jqh-omv')===0;});
-    var m=ours[0]&&ours[0].match(/-v(\d+\.\d+)$/);
+    // v8.12 — during an SW update both the old and new caches coexist for a
+    // beat; ours[0] could surface the stale one. Pick the highest version.
+    var best=null;
+    ours.forEach(function(n){
+      var m=n.match(/-v(\d+)\.(\d+)$/);
+      if(!m)return;
+      var v=[+m[1],+m[2]];
+      if(!best||v[0]>best.v[0]||(v[0]===best.v[0]&&v[1]>best.v[1]))best={v:v,label:'v'+m[1]+'.'+m[2]};
+    });
     var el=document.getElementById('footerVersion');
-    if(el&&m)el.textContent='v'+m[1];
+    if(el&&best)el.textContent=best.label;
   }).catch(function(){});
 }
 

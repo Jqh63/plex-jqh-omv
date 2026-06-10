@@ -45,7 +45,11 @@ each owned by the relevant service user:
   `ALLOWED_MAC`, `WOL_TOKEN`, `TARGET_HOST`, `TARGET_PORT`. Optional:
   `STATUS_TARGET_URL` (enables `/status`),
   `STATUS_POLL_FIRST_TIMEOUT_S`/`STATUS_POLL_RETRY_TIMEOUT_S`/`STATUS_CACHE_FRESH_S`/`STATUS_CACHE_STALE_S`
-  (tuning).
+  (tuning), `UPTIME_WINDOW` (e.g. `13h50-00h10` or `13:50-00:10` —
+  echoed as a `window` field in `/status`; the PWA adopts it
+  automatically, so every user gets the scheduled-uptime "En veille"
+  display without a new URL. Validated at startup — a malformed value
+  refuses to boot).
 - `/etc/caddy/wol-relay.env` (mode `0640 root:caddy`) — Caddy
   variables referenced in the Caddyfile as `{$VAR}`: `LE_EMAIL`,
   `RELAY_DOMAIN`, `CORS_ORIGIN`.

@@ -30,6 +30,7 @@
     --accent:#7c6aef; --accent-glow:rgba(124,106,239,.25);
     --green:#34d399; --green-glow:rgba(52,211,153,.25);
     --red:#f87171; --red-glow:rgba(248,113,113,.2); --orange:#fbbf24;
+    --sleep:#7c9fd4; --sleep-glow:rgba(124,159,212,.18);
   }
   *{margin:0;padding:0;box-sizing:border-box}
   html{height:100%}
@@ -54,10 +55,12 @@
   .status-card{width:100%;background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:16px 20px;display:flex;align-items:center;justify-content:space-between;transition:border-color .5s,box-shadow .5s}
   .status-card.online{border-color:var(--green);box-shadow:0 0 24px var(--green-glow)}
   .status-card.offline{border-color:var(--red);box-shadow:0 0 24px var(--red-glow)}
+  .status-card.sleep{border-color:var(--sleep);box-shadow:0 0 24px var(--sleep-glow)}
   .status-left{display:flex;align-items:center;gap:14px}
   .status-dot{width:12px;height:12px;border-radius:50%;background:var(--text-dim);transition:background .4s,box-shadow .4s;flex-shrink:0}
   .status-dot.online{background:var(--green);box-shadow:0 0 8px var(--green)}
   .status-dot.offline{background:var(--red);box-shadow:0 0 8px var(--red)}
+  .status-dot.sleep{background:var(--sleep);box-shadow:0 0 8px var(--sleep)}
   .status-dot.checking{background:var(--orange);animation:pulse 1.2s infinite}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
   .status-left > div:last-child{min-width:0;flex:1}

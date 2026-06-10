@@ -13,6 +13,11 @@ var relayReachable=true;
 // misses across two ticks, which painted a false "relais off" on cold open.
 var relayMissStreak=0;
 var wolStartTime=0,wolPollTimer=null,wolRetryTimers=[];
+// v8.10 — epoch ms of the last confident-verdict paint (setOnline / setOffline,
+// live probe settle or cache pre-paint). Read by the checkStatus() staleness
+// guard: a confirmed on-screen verdict older than STATUS_LOCAL_TTL_MS no longer
+// suppresses the orange "Vérification…" (see the guard comment in checkStatus).
+var lastVerdictAtMs=0;
 // True once setOnline / setOffline has fired this session (a cache pre-paint or
 // a live probe settle). Two jobs:
 //   1. Gate the orange "Vérification…" card so we don't strobe orange on every
@@ -493,6 +498,17 @@ function checkStatus(){
   var gen=++probeGen;
   var label=document.getElementById('statusLabel'),sub=document.getElementById('statusSub'),btn=document.getElementById('refreshBtn');
   btn.classList.add('spinning');
+  // v8.10 staleness guard — a confirmed state only earns the "keep the prior
+  // visual" treatment while the last SETTLED verdict is fresh (in-memory
+  // lastVerdictAtMs, same freshness window as the localStorage cache). A stale
+  // verdict means the device likely slept through the poll (IRL bug 2026-06-10:
+  // prolonged sleep with no visibilitychange flip → first 8 s tick re-probed
+  // under yesterday's confident green while the home was off). Demote to the
+  // orange "Vérification…" instead of vouching for a verdict we can no longer
+  // trust. In-memory on purpose (not readLocalStatus()): localStorage can be
+  // unavailable (private mode) and a settled verdict is written every poll, so
+  // the variable is strictly fresher and storage-independent.
+  if(hasConfirmedState&&Date.now()-lastVerdictAtMs>STATUS_LOCAL_TTL_MS)hasConfirmedState=false;
   // Keep the prior visual when we already have a confirmed (or cached)
   // state; orange "Vérification…" only appears when nothing is known yet.
   if(hasConfirmedState){
@@ -632,6 +648,7 @@ function setFallbackState(){
 function setOnline(){
   isOnline=true;
   hasConfirmedState=true;
+  lastVerdictAtMs=Date.now();
   // v8.7 — green cancels any in-progress down-confirmation (streak + pending
   // re-probe), whether this fires from a live probe or a cache pre-paint.
   downStreak=0;if(downRecheckTimer){clearTimeout(downRecheckTimer);downRecheckTimer=null;}
@@ -757,6 +774,7 @@ function postWol(isRetry){
 function setOffline(){
   isOnline=false;
   hasConfirmedState=true;
+  lastVerdictAtMs=Date.now();
   // v8.7 — reaching setOffline means red is committed (either DOWN_CONFIRM live
   // downs agreed, or a confirmed user-triggered WoL failure). Pin the streak at
   // the ceiling so a following status "down" keeps red sticky instead of
@@ -949,10 +967,22 @@ document.addEventListener('visibilitychange',function(){if(!document.hidden)onFo
 // 15 s self-healing interval is still the eventual catch-up; this poll cuts
 // the worst case from CHECK_INTERVAL_MS (15 s) down to ~1 s without depending
 // on any DOM event firing.
-var lastHiddenAtPoll=document.hidden;
+// v8.10 — clock-jump detector folded into the same 1 s poll. A prolonged device
+// sleep can end WITHOUT any hidden→visible flip (screen lock that never fired
+// visibilitychange, so document.hidden stayed false throughout — the IRL bug
+// 2026-06-10: reopen after a long sleep kept yesterday's confident green ~10 s,
+// home off, until the 8 s self-healing tick + DOWN_CONFIRM finally corrected
+// it). JS timers are frozen during the sleep, so a tick-to-tick Date.now() gap
+// well beyond 1 s is a reliable "we just woke up" signal: route it through
+// onForeground(), which already does the right thing (probeGen bump, stale-cache
+// → orange, immediate re-probe). Threshold is generous (5 s) so background-tab
+// timer throttling (~1 min ticks, hidden) can't false-positive while visible.
+var lastHiddenAtPoll=document.hidden,lastPollTickMs=Date.now(),SLEEP_JUMP_MS=5000;
 setInterval(function(){
   var nowHidden=document.hidden;
-  if(lastHiddenAtPoll&&!nowHidden)onForeground();
+  var now=Date.now(),jumped=now-lastPollTickMs>SLEEP_JUMP_MS;
+  lastPollTickMs=now;
+  if(!nowHidden&&(lastHiddenAtPoll||jumped))onForeground();
   lastHiddenAtPoll=nowHidden;
 },1000);
 

@@ -18,6 +18,24 @@ var wolStartTime=0,wolPollTimer=null,wolRetryTimers=[];
 // guard: a confirmed on-screen verdict older than STATUS_LOCAL_TTL_MS no longer
 // suppresses the orange "Vérification…" (see the guard comment in checkStatus).
 var lastVerdictAtMs=0;
+
+// v8.11 — surface that freshness to the user: a small "vérifié à l'instant /
+// il y a Xs" line under the status card, refreshed by the 1 s poll. Makes the
+// trust level of the on-screen verdict visible (the stale-green saga taught us
+// the verdict's AGE is information the user needs, not just its color).
+function fmtAge(ms){
+  var s=Math.round(ms/1000);
+  if(s<5)return "à l'instant";
+  if(s<60)return 'il y a '+s+' s';
+  var m=Math.floor(s/60);
+  if(m<60)return 'il y a '+m+' min';
+  return 'il y a plus d’une heure';
+}
+function updateVerdictAge(){
+  var el=document.getElementById('statusAge');
+  if(!el)return;
+  el.textContent=(hasConfirmedState&&lastVerdictAtMs)?'vérifié '+fmtAge(Date.now()-lastVerdictAtMs):'';
+}
 // True once setOnline / setOffline has fired this session (a cache pre-paint or
 // a live probe settle). Two jobs:
 //   1. Gate the orange "Vérification…" card so we don't strobe orange on every
@@ -155,6 +173,28 @@ function validHost(h){return h.length>0&&h.length<255&&/\./.test(h)&&!h.includes
 function validIp(s){return /^(\d{1,3}\.){3}\d{1,3}$/.test(s)}
 function cleanRelay(u){return u.replace(/\/+$/,'')}
 function validRelay(u){return /^https:\/\/[a-zA-Z0-9.\-]+(:\d+)?(\/.*)?$/.test(u)&&u.length<255}
+// v8.11 — scheduled-uptime window. Format "HH:MM-HH:MM" or "HHhMM-HHhMM"
+// ("13:50-00:10" / "13h50-00h10"), may wrap past midnight. Purely informative:
+// it only rephrases the red card ("En veille" + auto-wake hint vs "Hors ligne")
+// so a deliberate nightly shutdown doesn't read like an outage. It never gates
+// anything — WoL stays available either way (RTC auto-wake ≠ no manual wake).
+function parseWindow(s){
+  var m=/^([01]?\d|2[0-3])[h:]([0-5]\d)\s*-\s*([01]?\d|2[0-3])[h:]([0-5]\d)$/.exec((s||'').trim());
+  if(!m)return null;
+  return {start:(+m[1])*60+(+m[2]),end:(+m[3])*60+(+m[4])};
+}
+// true/false = now inside/outside the configured window; null = no window set.
+function inUptimeWindow(){
+  var w=parseWindow(config&&config.window);
+  if(!w)return null;
+  var d=new Date(),n=d.getHours()*60+d.getMinutes();
+  return w.start<=w.end?(n>=w.start&&n<w.end):(n>=w.start||n<w.end);
+}
+function windowStartLabel(){
+  var w=parseWindow(config&&config.window);
+  if(!w)return '';
+  return ('0'+Math.floor(w.start/60)).slice(-2)+'h'+('0'+(w.start%60)).slice(-2);
+}
 // ms defaults to 3000 — short ack/validation toasts. Pass 5000 for messages
 // that the user needs time to read (success confirmation after a long wait,
 // explanatory failures with a "use the manual fallback" call to action).
@@ -211,6 +251,7 @@ function readUrlParams(){
   var apps=p.get('apps');if(apps)config.apps=apps;
   var status=p.get('status');if(status&&validHost(status))config.status=status;
   var ip=p.get('ip');if(ip&&validIp(ip))config.ip=ip;
+  var win=p.get('window');if(win&&parseWindow(win))config.window=win;
   storeConfig(config);
   return true;
 }
@@ -228,6 +269,7 @@ function showSettings(){
     document.getElementById('cfgRelay').value=config.relay||'';
     document.getElementById('cfgToken').value=config.token||'';
     document.getElementById('cfgApps').value=config.apps||'';
+    document.getElementById('cfgWindow').value=config.window||'';
   }
   if(checkInterval)clearInterval(checkInterval);
   setTimeout(function(){document.getElementById('cfgHost').focus();},50);
@@ -247,6 +289,7 @@ function saveConfig(){
   var relay=document.getElementById('cfgRelay').value.trim();
   var token=document.getElementById('cfgToken').value.trim();
   var apps=document.getElementById('cfgApps').value.trim();
+  var win=document.getElementById('cfgWindow').value.trim();
   // `status` (explicit status-host override) is provisioned via ?status= only —
   // there's no settings field for it. Carry the existing value across a save so
   // editing other fields doesn't silently drop it.
@@ -260,6 +303,7 @@ function saveConfig(){
   var cleanedRelay='';
   if(relay){cleanedRelay=cleanRelay(relay);if(!validRelay(cleanedRelay)){showToast('⚠ Relais invalide (URL HTTPS)',true);return}}
   if(ip&&!validIp(ip)){showToast('⚠ IP invalide (format A.B.C.D)',true);return}
+  if(win&&!parseWindow(win)){showToast('⚠ Plage invalide (format 13h50-00h10)',true);return}
   config={host:host,port:String(portNum)};
   if(cleaned)config.mac=cleaned;
   if(ip)config.ip=ip;
@@ -267,6 +311,7 @@ function saveConfig(){
   if(token)config.token=token;
   if(title)config.title=title;
   if(apps)config.apps=apps;
+  if(win)config.window=win;
   if(prevStatus)config.status=prevStatus;
   storeConfig(config);
   startApp();
@@ -665,6 +710,7 @@ function setOnline(){
   document.getElementById('statusCard').className='status-card online';
   document.getElementById('statusLabel').textContent='En ligne';
   document.getElementById('statusSub').textContent='serveur accessible';
+  updateVerdictAge();
   if(config.mac){
     var pBtn=document.getElementById('powerBtn'),pLbl=document.getElementById('powerLabel');
     pBtn.className='power-btn online';
@@ -786,8 +832,23 @@ function setOffline(){
   if(wolSent){setStarting();return;}
   document.getElementById('statusDot').className='status-dot offline';
   document.getElementById('statusCard').className='status-card offline';
-  document.getElementById('statusLabel').textContent='Hors ligne';
-  document.getElementById('statusSub').textContent=navigator.onLine?'serveur éteint':'pas de réseau';
+  // v8.11 — window-aware red. Outside the configured uptime window a red is
+  // the EXPECTED nightly shutdown: say so ("En veille" + the auto-wake time)
+  // instead of the alarming "Hors ligne", so the family doesn't read a
+  // deliberate sleep as an outage. Inside the window (or no window set) the
+  // plain "Hors ligne" stands — there, red IS the anomaly signal.
+  var inWin=inUptimeWindow();
+  if(!navigator.onLine){
+    document.getElementById('statusLabel').textContent='Hors ligne';
+    document.getElementById('statusSub').textContent='pas de réseau';
+  }else if(inWin===false){
+    document.getElementById('statusLabel').textContent='En veille';
+    document.getElementById('statusSub').textContent='réveil auto à '+windowStartLabel()+(wolReady()?' — ou allume-le ↓':'');
+  }else{
+    document.getElementById('statusLabel').textContent='Hors ligne';
+    document.getElementById('statusSub').textContent=inWin===true?'éteint pendant sa plage d’activité':'serveur éteint';
+  }
+  updateVerdictAge();
   if(wolReady()){
     var btn=document.getElementById('powerBtn'),lbl=document.getElementById('powerLabel');
     if(relayReachable){btn.className='power-btn';lbl.textContent='Allumer le serveur';lbl.className='power-label';}
@@ -984,6 +1045,8 @@ setInterval(function(){
   lastPollTickMs=now;
   if(!nowHidden&&(lastHiddenAtPoll||jumped))onForeground();
   lastHiddenAtPoll=nowHidden;
+  // v8.11 — keep the "vérifié il y a Xs" line ticking while visible.
+  if(!nowHidden)updateVerdictAge();
 },1000);
 
 // Wire up the 5 button handlers (migrated from inline onclick="..." attributes

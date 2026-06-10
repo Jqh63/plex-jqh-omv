@@ -47,6 +47,7 @@ Parameters are read on first visit and stored in localStorage. The app works imm
 | `apps` | no | `seerr,plexweb` | Comma-separated list of app keys (see catalog below) |
 | `status` | no | first subdomain app | Override the host used for the status check |
 | `ip` | no | — | IPv4 address of the server, shown on the manual fallback page as an alternative to the domain. When present, the ready-to-paste PowerShell / `wakeonlan` commands use the IP instead of `host` so they keep working during a DNS outage on the domain. |
+| `window` | no | — | Scheduled-uptime window, `13h50-00h10` or `13:50-00:10` (may wrap past midnight). Purely informative: outside the window a red status reads "En veille" with the auto-wake time instead of "Hors ligne", so a deliberate nightly shutdown doesn't look like an outage. Never gates the power button. |
 
 #### App catalog
 

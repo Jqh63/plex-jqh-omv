@@ -63,6 +63,7 @@
   .status-left > div:last-child{min-width:0;flex:1}
   .status-label{font-size:15px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .status-sub{font-size:12px;color:var(--text-dim);font-family:'JetBrains Mono',monospace;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .status-age{font-size:10px;color:var(--text-dim);opacity:.55;font-family:'JetBrains Mono',monospace;margin-top:2px;min-height:12px;white-space:nowrap}
 
   .refresh-btn{background:none;border:1px solid var(--border);color:var(--text-dim);border-radius:10px;width:40px;height:40px;min-width:40px;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:all .2s}
   .refresh-btn:active{background:var(--surface-hover)}
@@ -192,6 +193,11 @@
     <input type="text" id="cfgApps" placeholder="seerr,jellyfin" autocomplete="off" autocapitalize="off">
     <span class="hint">Mots-clés séparés par virgule : seerr, overseerr, jellyseerr, jellyfin, plexweb</span>
   </div>
+  <div class="field">
+    <label for="cfgWindow">Plage d'activité <span style="font-size:11px;font-weight:400;opacity:.6">(optionnel)</span></label>
+    <input type="text" id="cfgWindow" placeholder="13h50-00h10" autocomplete="off" autocapitalize="off">
+    <span class="hint">Si le serveur s'éteint volontairement la nuit : hors plage, « éteint » s'affiche « En veille » avec l'heure de réveil auto</span>
+  </div>
   <div class="button-row">
     <button class="cancel-btn" id="cancelBtn" type="button" style="display:none">Annuler</button>
     <button class="save-btn" id="saveBtn" type="button">Enregistrer</button>
@@ -211,6 +217,7 @@
       <div>
         <div class="status-label" id="statusLabel">Vérification...</div>
         <div class="status-sub" id="statusSub">ping en cours</div>
+        <div class="status-age" id="statusAge"></div>
       </div>
     </div>
     <button class="refresh-btn" id="refreshBtn" type="button" aria-label="Vérifier le statut">

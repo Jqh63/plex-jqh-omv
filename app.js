@@ -29,7 +29,7 @@ function fmtAge(ms){
   if(s<60)return 'il y a '+s+' s';
   var m=Math.floor(s/60);
   if(m<60)return 'il y a '+m+' min';
-  return 'il y a plus d’une heure';
+  return 'il y a +1 h';
 }
 function updateVerdictAge(){
   var el=document.getElementById('statusAge');
@@ -690,13 +690,13 @@ function setFallbackState(){
   if(!relayReachable){
     if(isOnline){
       link.classList.add('warn');
-      a.textContent='⚠ Relais injoignable — Réveil manuel';
+      a.textContent='⚠ Réveil manuel';
     }else{
       link.classList.add('promoted');
-      a.textContent='Réveil ne marche pas ? Réveil manuel';
+      a.textContent='Réveil manuel';
     }
   }else{
-    a.textContent='Réveil ne marche pas ? Réveil manuel';
+    a.textContent='Réveil manuel';
   }
 }
 
@@ -772,7 +772,7 @@ function startCountdown(){
   var tick=function(){
     var diff=Math.round((countdownEndsAt-Date.now())/1000);
     if(isOnline||!wolSent){stopCountdown();return;}
-    if(diff<-30)pl.textContent='Démarrage un peu long — patiente…';
+    if(diff<-30)pl.textContent='Démarrage long…';
     else if(diff<=0)pl.textContent='Réveil… presque prêt';
     else pl.textContent='Réveil… environ '+diff+'s';
   };
@@ -810,7 +810,7 @@ function postWol(isRetry){
     wolSent=false;wolStartTime=0;stopCountdown();clearWolPoll();clearWolRetries();
     var msg=(r.status===401||r.status===403)?'Relais : accès refusé':'Erreur relais HTTP '+r.status;
     if(navigator.vibrate)navigator.vibrate(300);
-    showToast('⚠ '+msg+' — utilise le réveil manuel ↓',true,5000);
+    showToast('⚠ '+msg+' — réveil manuel ↓',true,5000);
     setOffline();
   }).catch(function(){
     if(isRetry)return;
@@ -856,16 +856,18 @@ function setOffline(){
     document.getElementById('statusSub').textContent='pas de réseau';
   }else if(inWin===false){
     document.getElementById('statusLabel').textContent='En veille';
-    document.getElementById('statusSub').textContent='réveil auto à '+windowStartLabel()+(wolReady()?' — ou allume-le ↓':'');
+    // v8.13 — short copy: the power button sits right below, the "ou
+    // allume-le ↓" hint wrapped on narrow phones (S24) for no added info.
+    document.getElementById('statusSub').textContent='réveil auto à '+windowStartLabel();
   }else{
     document.getElementById('statusLabel').textContent='Hors ligne';
-    document.getElementById('statusSub').textContent=inWin===true?'éteint pendant sa plage d’activité':'serveur éteint';
+    document.getElementById('statusSub').textContent=inWin===true?'éteint — anormal à cette heure':'serveur éteint';
   }
   updateVerdictAge();
   if(wolReady()){
     var btn=document.getElementById('powerBtn'),lbl=document.getElementById('powerLabel');
     if(relayReachable){btn.className='power-btn';lbl.textContent='Allumer le serveur';lbl.className='power-label';}
-    else{btn.className='power-btn unavailable';lbl.textContent='Réveil indisponible — voir ↓';lbl.className='power-label unavailable';}
+    else{btn.className='power-btn unavailable';lbl.textContent='Réveil indisponible';lbl.className='power-label unavailable';}
     setFallbackState();
   }
 }

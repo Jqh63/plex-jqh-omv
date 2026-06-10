@@ -46,6 +46,9 @@ Scenarios (mirror state-machine-sim.py):
   7. relay-degraded-server-down        — /status 503 → home ✕ → red, no warn, WoL on
   8. resume-focus-only-converges-red   — bg → server dies → focus → red
   9. resume-no-event-self-heals-red    — bg → server dies → no event → red ≤3 s
+ 9b. clockjump-wake-stale-green-demoted — Date.now() jump alone (no event, no
+                                         hidden flip) demotes the stale green
+                                         → red (v8.10 prolonged-sleep fix)
  10. relay-single-miss-debounced-no-warn — lone /status ✕ then recover → green,
                                          NEVER warn, WoL stays enabled (debounce payoff)
  11. watchdog-reclaims-wedged-checking — stuck checking=true + server down → a
@@ -316,6 +319,76 @@ def run_resume_scenario(p, name, relay_plan, fg_event, bg_at_s, fg_at_s, sample_
     }
 
 
+def run_clockjump_scenario(p):
+    """v8.10 clock-jump detector. The Android prolonged-sleep wake where
+    document.hidden NEVER flips: no focus, no visibilitychange, no
+    hidden→visible edge for the 1 s poll. The only wake signal is the
+    Date.now() gap between poll ticks. A headless browser can't actually
+    freeze its JS VM, so we simulate the jump by monkey-patching Date.now
+    with a +120 s offset — the real detector in app.js sees the tick-to-tick
+    gap (> SLEEP_JUMP_MS) on its next 1 s poll and routes through
+    onForeground(). The server died "during the sleep" (relay flips to down
+    at the same moment), so the app must demote the stale green to orange
+    and converge to red — the v8.10 fix for the ~10 s false green."""
+    name = "clockjump-wake-stale-green-demoted"
+    print(f"\n## Clock-jump scenario: {name}")
+    counters = {"relay": 0, "home": 0}
+    relay_verdict = {"v": "up"}
+
+    def handle(route: Route):
+        parsed = urlparse(route.request.url)
+        host = parsed.netloc
+        if host == RELAY_HOST and parsed.path == "/status":
+            counters["relay"] += 1
+            _relay_fulfill(route, relay_verdict["v"])
+            return
+        if host == CONFIG_HOST or host.endswith("." + CONFIG_HOST):
+            counters["home"] += 1
+            route.fulfill(status=200, body="")
+            return
+        route.continue_()
+
+    b = _launch(p)
+    ctx = b.new_context(viewport={"width": 390, "height": 844})
+    page = ctx.new_page()
+    page.route("**/*", handle)
+    page.goto(PWA_URL, wait_until="load")
+    page.wait_for_selector("#statusLabel", state="attached", timeout=10000)
+    page.wait_for_timeout(1500)
+    pre = capture_state(page)  # live probe up → confident green
+
+    # "Sleep": the server dies and the JS clock jumps +120 s — with NO
+    # visibility event and document.hidden never having flipped. The next
+    # 1 s poll tick must detect the jump on its own.
+    relay_verdict["v"] = "down"
+    page.evaluate(
+        "() => { const real = Date.now.bind(Date); Date.now = () => real() + 120000; }"
+    )
+
+    samples = []
+    last_t = 0
+    for t in [1.5, 5]:
+        page.wait_for_timeout(int((t - last_t) * 1000))
+        last_t = t
+        s = capture_state(page)
+        samples.append((t, s))
+        flags = [f for f, on in (("RED", is_red(s)), ("orange", is_checking(s)), ("green", is_green(s))) if on]
+        print(f"  wake+{t}s: status={s['statusLabel']!r} -> {','.join(flags) or '(neutral)'}")
+
+    final = samples[-1][1]
+    b.close()
+    return {
+        "name": name,
+        "pre_green": is_green(pre),
+        # The demotion: shortly after the wake the card must no longer be the
+        # stale confident green (orange or already red are both honest).
+        "demoted_early": not is_green(samples[0][1]),
+        "final_red": is_red(final),
+        "final_green": is_green(final),
+        "counters": dict(counters),
+    }
+
+
 def run_watchdog_scenario(p):
     """v8.2 `checking` watchdog. A real headless browser can't reproduce the
     Android suspend-mid-fetch that wedges `checking` (its timers run normally in
@@ -499,6 +572,15 @@ def collect_results():
                 and not r10["final_wol_disabled"])
         results.append(("relay-single-miss-debounced-no-warn", ok10, r10,
                         "lone miss + recover → green, never warn, WoL stays enabled"))
+
+        # v8.10 — prolonged-sleep wake with no event AND no hidden flip: the
+        # clock-jump detector is the only wake signal. Stale green must demote
+        # (orange or red) within ~1 detector tick and converge to red.
+        r9b = run_clockjump_scenario(p)
+        ok9b = (r9b["pre_green"] and r9b["demoted_early"] and r9b["final_red"]
+                and not r9b["final_green"])
+        results.append(("clockjump-wake-stale-green-demoted", ok9b, r9b,
+                        "clock jump alone demotes stale green → red, no event needed"))
 
         r11 = run_watchdog_scenario(p)
         ok11 = r11["pre_green"] and r11["final_red"] and not r11["final_green"]

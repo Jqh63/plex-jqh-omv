@@ -21,6 +21,7 @@ import asyncio
 import hmac
 import logging
 import os
+import re
 import socket
 import threading
 import time
@@ -63,6 +64,17 @@ STATUS_POLL_FIRST_TIMEOUT_S = float(os.environ.get("STATUS_POLL_FIRST_TIMEOUT_S"
 STATUS_POLL_RETRY_TIMEOUT_S = float(os.environ.get("STATUS_POLL_RETRY_TIMEOUT_S", "1.5"))
 STATUS_CACHE_FRESH_S = int(os.environ.get("STATUS_CACHE_FRESH_S", "5"))
 STATUS_CACHE_STALE_S = int(os.environ.get("STATUS_CACHE_STALE_S", "60"))
+
+# Optional scheduled-uptime window, e.g. "13h50-00h10" (also accepts
+# "13:50-00:10"; may wrap past midnight). When set, it's echoed verbatim in
+# every /status response as "window" and the PWA adopts it automatically —
+# the relay acts as the admin-controlled config channel, so installed
+# clients pick up the window on their next poll without re-provisioning.
+# The relay itself never interprets it (purely client-side display logic).
+_WINDOW_RE = re.compile(r"^([01]?\d|2[0-3])[h:]([0-5]\d)\s*-\s*([01]?\d|2[0-3])[h:]([0-5]\d)$")
+UPTIME_WINDOW = os.environ.get("UPTIME_WINDOW", "").strip() or None
+if UPTIME_WINDOW and not _WINDOW_RE.match(UPTIME_WINDOW):
+    raise RuntimeError(f"UPTIME_WINDOW malformed (want HH:MM-HH:MM / HHhMM-HHhMM): {UPTIME_WINDOW!r}")
 
 # Send the magic packet multiple times to compensate for UDP drop. Each
 # packet is ~100 bytes so 3 sends = ~300 bytes total, negligible. The
@@ -338,6 +350,8 @@ async def status():
                 "stale": success_age > STATUS_CACHE_FRESH_S,
                 "age_s": int(success_age),
             }
+    if UPTIME_WINDOW:
+        body["window"] = UPTIME_WINDOW
     return JSONResponse(
         content=body,
         headers={"Cache-Control": "public, max-age=5"},

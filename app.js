@@ -861,7 +861,10 @@ function setOffline(){
     document.getElementById('statusSub').textContent='réveil auto à '+windowStartLabel();
   }else{
     document.getElementById('statusLabel').textContent='Hors ligne';
-    document.getElementById('statusSub').textContent=inWin===true?'éteint — anormal à cette heure':'serveur éteint';
+    // v8.14 — single short copy for both branches: the red card already
+    // signals the anomaly; any longer string collides with the refresh
+    // button on narrow phones once Android font scaling kicks in (S24).
+    document.getElementById('statusSub').textContent='serveur éteint';
   }
   updateVerdictAge();
   if(wolReady()){

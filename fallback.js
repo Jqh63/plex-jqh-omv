@@ -70,9 +70,17 @@ function flagCopyFail(el) {
 if(window.caches){
   caches.keys().then(function(names){
     var ours=names.filter(function(n){return n.indexOf('plex-jqh-omv')===0;});
-    var m=ours[0]&&ours[0].match(/-v(\d+\.\d+)$/);
+    // During an SW update both caches coexist for a beat — pick the highest
+    // version, not ours[0] (same fix as app.js v8.12).
+    var best=null;
+    ours.forEach(function(n){
+      var m=n.match(/-v(\d+)\.(\d+)$/);
+      if(!m)return;
+      var v=[+m[1],+m[2]];
+      if(!best||v[0]>best.v[0]||(v[0]===best.v[0]&&v[1]>best.v[1]))best={v:v,label:'v'+m[1]+'.'+m[2]};
+    });
     var el=document.getElementById('footerVersion');
-    if(el&&m)el.textContent='v'+m[1];
+    if(el&&best)el.textContent=best.label;
   }).catch(function(){});
 }
 

@@ -373,8 +373,8 @@ in <1 s in nominal conditions.
 
 `STATUS_TARGET_URL` must point at a URL that returns an HTTP response
 (any `<500`) when the home is reachable. The DuckDNS wildcard cert
-covers `*.jqh.duckdns.org` but **not** the apex — so the bare
-`https://jqh.duckdns.org` triggers a TLS SAN mismatch and isn't a valid
+covers `*.example.duckdns.org` but **not** the apex — so the bare
+`https://example.duckdns.org` triggers a TLS SAN mismatch and isn't a valid
 target. Use an existing subdomain instead (see
 [`wol-relay.env.example`](wol-relay.env.example) for working examples).
 

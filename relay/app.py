@@ -33,6 +33,16 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+# Web Push (ADR 2026-06-11, knowledge-base) is OPTIONAL: the relay must run
+# identically when pywebpush isn't installed or the VAPID env vars are unset
+# (graceful degradation — a deploy of this file must never crash a VM whose
+# venv hasn't been updated yet).
+try:
+    from pywebpush import webpush, WebPushException
+except ImportError:  # pragma: no cover - venv without pywebpush
+    webpush = None
+    WebPushException = Exception
+
 ALLOWED_MAC = os.environ["ALLOWED_MAC"].lower()
 SHARED_TOKEN = os.environ["WOL_TOKEN"]
 TARGET_HOST = os.environ["TARGET_HOST"]
@@ -76,6 +86,21 @@ UPTIME_WINDOW = os.environ.get("UPTIME_WINDOW", "").strip() or None
 if UPTIME_WINDOW and not _WINDOW_RE.match(UPTIME_WINDOW):
     raise RuntimeError(f"UPTIME_WINDOW malformed (want HH:MM-HH:MM / HHhMM-HHhMM): {UPTIME_WINDOW!r}")
 
+# Web Push "server ready" (ADR 2026-06-11). Ephemeral, storage-less design:
+# the push subscription rides the /wol POST, an asyncio task polls the home
+# until it answers, sends ONE notification, and forgets the subscription.
+# Enabled only when pywebpush is importable AND all three env vars are set.
+# Free-tier sizing: single-flight task (a 2nd wake REPLACES the running one),
+# poll reuses _poll_home()'s HEADs, one ~2-4 KB HTTPS push per wake.
+VAPID_PRIVATE_KEY = os.environ.get("VAPID_PRIVATE_KEY")
+VAPID_PUBLIC_KEY = os.environ.get("VAPID_PUBLIC_KEY")
+VAPID_SUB = os.environ.get("VAPID_SUB")  # e.g. mailto:admin@example.com
+PUSH_ENABLED = bool(webpush and VAPID_PRIVATE_KEY and VAPID_PUBLIC_KEY and VAPID_SUB)
+WOL_NOTIFY_POLL_S = float(os.environ.get("WOL_NOTIFY_POLL_S", "5.0"))
+# Mirrors the PWA's WOL_TIMEOUT_MS (5 min): past it the boot has failed
+# client-side too, so a failure notification is sent and the task ends.
+WOL_NOTIFY_BUDGET_S = float(os.environ.get("WOL_NOTIFY_BUDGET_S", "300"))
+
 # Send the magic packet multiple times to compensate for UDP drop. Each
 # packet is ~100 bytes so 3 sends = ~300 bytes total, negligible. The
 # 500 ms gap leaves room for transient network blips without piling up
@@ -114,8 +139,24 @@ logger = logging.getLogger("wol-relay")
 app = FastAPI(title="WoL Relay", docs_url=None, redoc_url=None, openapi_url=None)
 
 
+class PushKeys(BaseModel):
+    p256dh: str = Field(..., min_length=1, max_length=256)
+    auth: str = Field(..., min_length=1, max_length=64)
+
+
+class PushSub(BaseModel):
+    # Browser push-service endpoint (FCM/APNs/Mozilla). Bounded + https-only
+    # so a hostile client can't turn the relay into an arbitrary-URL POSTer
+    # beyond the push-service shape (pywebpush still controls the request).
+    endpoint: str = Field(..., max_length=1024, pattern=r"^https://")
+    keys: PushKeys
+
+
 class WolReq(BaseModel):
     mac: str = Field(..., pattern=r"^([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}$")
+    # Optional Web Push subscription: "notify me when the server answers".
+    # Ephemeral by design — used by one notify task, never stored.
+    push: PushSub | None = None
 
 
 def magic_packet(mac: str) -> bytes:
@@ -217,10 +258,11 @@ _http_client: httpx.AsyncClient | None = None
 
 @app.on_event("startup")
 async def _status_startup() -> None:
-    global _http_client
+    global _http_client, _loop
     # The retry timeout is the client default (warm-path budget); _poll_home()
     # overrides per call to give the first attempt the cold-handshake budget.
     _http_client = httpx.AsyncClient(http2=True, timeout=STATUS_POLL_RETRY_TIMEOUT_S)
+    _loop = asyncio.get_running_loop()
 
 
 @app.on_event("shutdown")
@@ -362,10 +404,79 @@ async def status(request: Request, x_token: str | None = Header(None)):
             }
     if UPTIME_WINDOW:
         body["window"] = UPTIME_WINDOW
+    # Relay-as-config-channel (v8.12 pattern): the VAPID *public* key is not
+    # a secret — serving it here lets every installed client adopt Web Push
+    # on its next poll, with no re-provisioning URL.
+    if PUSH_ENABLED:
+        body["vapid"] = VAPID_PUBLIC_KEY
     return JSONResponse(
         content=body,
         headers={"Cache-Control": "public, max-age=5"},
     )
+
+
+def _send_push(sub: PushSub, title: str, body: str) -> None:
+    # Sync (pywebpush uses requests) — always called via asyncio.to_thread.
+    # Payload is generic on purpose; the endpoint/keys are never logged.
+    import json
+
+    try:
+        webpush(
+            subscription_info={
+                "endpoint": sub.endpoint,
+                "keys": {"p256dh": sub.keys.p256dh, "auth": sub.keys.auth},
+            },
+            data=json.dumps({"title": title, "body": body}),
+            vapid_private_key=VAPID_PRIVATE_KEY,
+            vapid_claims={"sub": VAPID_SUB},
+            ttl=600,
+        )
+        logger.info("push status=sent")
+    except WebPushException as e:
+        # 404/410 = subscription expired/revoked browser-side — nothing to
+        # clean up (we store nothing), just log and move on.
+        logger.warning("push status=failed reason=%s", e)
+    except Exception:
+        logger.exception("push status=failed reason=unexpected")
+
+
+_notify_task: "asyncio.Task | None" = None
+# Captured at startup so the sync /wol handler (threadpool) can schedule the
+# notify coroutine on the event loop.
+_loop: "asyncio.AbstractEventLoop | None" = None
+
+
+async def _notify_when_up(sub: PushSub) -> None:
+    deadline = time.monotonic() + WOL_NOTIFY_BUDGET_S
+    while time.monotonic() < deadline:
+        try:
+            if await _poll_home():
+                await asyncio.to_thread(
+                    _send_push, sub, "✓ Serveur prêt", "Le serveur a démarré — Plex et les apps sont accessibles."
+                )
+                return
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("notify poll failed")
+        await asyncio.sleep(WOL_NOTIFY_POLL_S)
+    await asyncio.to_thread(
+        _send_push, sub, "⚠ Réveil non confirmé", "Le serveur n'a pas répondu en 5 min — réessaie ou utilise le réveil manuel."
+    )
+
+
+def _schedule_notify(sub: PushSub) -> None:
+    # Single-flight (free-tier guard): a 2nd wake replaces the running task
+    # instead of stacking polls. Thread-safe via call_soon_threadsafe — /wol
+    # runs in FastAPI's threadpool, not on the loop.
+    def _start() -> None:
+        global _notify_task
+        if _notify_task is not None and not _notify_task.done():
+            _notify_task.cancel()
+        _notify_task = asyncio.get_running_loop().create_task(_notify_when_up(sub))
+
+    if _loop is not None:
+        _loop.call_soon_threadsafe(_start)
 
 
 @app.post("/wol")
@@ -398,5 +509,11 @@ def wol(req: WolReq, request: Request, x_token: str = Header(...)):
                 time.sleep(PACKET_GAP_S)
     finally:
         s.close()
+    # Web Push "server ready": needs the status oracle to know when the home
+    # answers. Silently skipped when push is disabled (env/lib missing) or no
+    # subscription was sent — the PWA's countdown remains the baseline UX.
+    if req.push is not None and PUSH_ENABLED and STATUS_TARGET_URL:
+        _schedule_notify(req.push)
+        logger.info("wol ip=%s push=scheduled", ip)
     logger.info("wol ip=%s status=200", ip)
     return {"sent": True, "to": target_ip, "port": TARGET_PORT, "repeats": PACKET_REPEATS}

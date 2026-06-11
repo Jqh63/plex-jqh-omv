@@ -308,7 +308,17 @@ def _maybe_background_refresh() -> None:
 
 
 @app.get("/status")
-async def status():
+async def status(request: Request, x_token: str | None = Header(None)):
+    # Same shared token as /wol (the PWA already holds it). Closes the
+    # anonymous "is the home up?" info disclosure: before this, anyone who
+    # knew the relay domain could read the home's up/down state. Checked
+    # BEFORE the config-state branch so an unauthenticated caller learns
+    # nothing (not even whether STATUS_TARGET_URL is configured). Clients
+    # without a token fall back to their direct-home probe (the 401 is an
+    # "answered" rejection on the PWA side — relay alive, oracle denied).
+    if x_token is None or not hmac.compare_digest(x_token, SHARED_TOKEN):
+        logger.warning("status ip=%s status=401 reason=bad_token", client_ip(request))
+        raise HTTPException(status_code=401, detail="bad token")
     if not STATUS_TARGET_URL:
         # Config-missing → degraded mode, surface as 503 so the PWA falls
         # back to its direct-home check path.

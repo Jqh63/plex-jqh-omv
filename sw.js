@@ -1,4 +1,4 @@
-var CACHE = 'plex-jqh-omv-v8.19';
+var CACHE = 'plex-jqh-omv-v8.20';
 var FILES = ['./', './app.js', './preconnect.js', './fallback.html', './fallback.js', './debug.html', './debug.js', './manifest.json', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', function(e) {
@@ -40,25 +40,4 @@ self.addEventListener('fetch', function(e) {
       return r || fetch(e.request, { cache: 'reload' });
     })
   );
-});
-
-// v8.18 — Web Push "serveur prêt" (ADR 2026-06-11, knowledge-base). The relay
-// sends one notification when the home answers after a WoL (ephemeral design:
-// the subscription rides the /wol POST). tag dedupes a late duplicate.
-self.addEventListener('push', function(e) {
-  var d = {};
-  try { d = e.data ? e.data.json() : {}; } catch (err) {}
-  e.waitUntil(self.registration.showNotification(d.title || 'Serveur', {
-    body: d.body || '',
-    icon: './icon-192.png',
-    badge: './icon-192.png',
-    tag: 'wol-status'
-  }));
-});
-self.addEventListener('notificationclick', function(e) {
-  e.notification.close();
-  e.waitUntil(clients.matchAll({ type: 'window', includeUncontrolled: true }).then(function(ws) {
-    for (var i = 0; i < ws.length; i++) { if ('focus' in ws[i]) return ws[i].focus(); }
-    return clients.openWindow('./');
-  }));
 });

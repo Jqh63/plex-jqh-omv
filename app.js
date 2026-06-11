@@ -303,7 +303,6 @@ function saveConfig(){
   // there's no settings field for it. Carry the existing value across a save so
   // editing other fields doesn't silently drop it.
   var prevStatus=(config&&config.status)||'';
-  var prevVapid=(config&&config.vapid)||'';
   if(!host){showToast('⚠ Domaine requis',true);return}
   if(!validHost(host)){showToast('⚠ Domaine invalide',true);return}
   var cleaned='';
@@ -323,8 +322,6 @@ function saveConfig(){
   if(apps)config.apps=apps;
   if(win)config.window=win;
   if(prevStatus)config.status=prevStatus;
-  // vapid is relay-served (adopted in checkStatus) — carry it across a save.
-  if(prevVapid)config.vapid=prevVapid;
   storeConfig(config);
   startApp();
 }
@@ -450,40 +447,6 @@ function releaseWakeLock(){
   if(wakeLock){wakeLock.release().catch(function(){});wakeLock=null;}
 }
 
-// v8.18 — Web Push "serveur prêt" (ADR 2026-06-11). Ephemeral design: the
-// subscription rides the /wol POST (wolPushSub below); the relay notifies on
-// the down→up flip then forgets it. The VAPID public key arrives via /status
-// (relay-as-config-channel, v8.12 pattern). v8.19 — zero-manipulation: no
-// settings opt-in; the permission prompt fires on the first wake tap (a user
-// gesture, contextually relevant), once the relay serves a vapid key. The
-// browser "Allow" is the one irreducible user step.
-var wolPushSub=null;
-function pushSupported(){
-  return 'serviceWorker' in navigator&&'PushManager' in window&&'Notification' in window;
-}
-function urlB64ToUint8Array(s){
-  var pad='='.repeat((4-s.length%4)%4);
-  var raw=atob((s+pad).replace(/-/g,'+').replace(/_/g,'/'));
-  var arr=new Uint8Array(raw.length);
-  for(var i=0;i<raw.length;i++)arr[i]=raw.charCodeAt(i);
-  return arr;
-}
-// Resolves to a PushSubscription or null — never rejects. Reuses an existing
-// subscription; only subscribes (and prompts) when opted in + key known.
-function ensurePushSub(){
-  if(!pushSupported()||!config||!config.vapid)return Promise.resolve(null);
-  if(Notification.permission==='denied')return Promise.resolve(null);
-  return navigator.serviceWorker.ready.then(function(reg){
-    return reg.pushManager.getSubscription().then(function(sub){
-      if(sub)return sub;
-      return Notification.requestPermission().then(function(p){
-        if(p!=='granted')return null;
-        return reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:urlB64ToUint8Array(config.vapid)});
-      });
-    });
-  }).catch(function(){return null;});
-}
-
 function startApp(){
   document.getElementById('settingsScreen').style.display='none';
   document.getElementById('mainScreen').style.display='flex';
@@ -500,7 +463,6 @@ function startApp(){
   clearWolPoll();
   clearWolRetries();
   releaseWakeLock();
-  wolPushSub=null;
   isOnline=false;wolSent=false;checking=false;checkStartedAt=0;relayReachable=true;relayMissStreak=0;hasConfirmedState=false;
   downStreak=0;if(downRecheckTimer){clearTimeout(downRecheckTimer);downRecheckTimer=null;}
   // Reuse the localStorage cache (<60 s) for an instant paint so back-to-back
@@ -646,11 +608,6 @@ function checkStatus(){
     if(res.window&&parseWindow(res.window)&&config.window!==res.window){
       config.window=res.window;storeConfig(config);
     }
-    // v8.18 — adopt the relay-served VAPID public key the same way (it only
-    // appears when the relay has push enabled). Not a secret.
-    if(res.vapid&&config.vapid!==res.vapid){
-      config.vapid=res.vapid;storeConfig(config);
-    }
     // N-consecutive-miss debounce on relay reachability (see relayMissStreak
     // comment): a miss stays optimistic until RELAY_DOWN_MISSES in a row; any
     // answered/up probe resets the streak. The home up/down verdict (res.up) is
@@ -729,7 +686,7 @@ function probe(){
   return fetchStatusFromRelay().then(
     // v8.12 — pass the relay-served uptime window through (see the adoption
     // logic in checkStatus): the relay is the admin-controlled config channel.
-    function(j){return {up:j.up,relayReachable:true,window:(typeof j.window==='string'?j.window:null),vapid:(typeof j.vapid==='string'?j.vapid:null)};},
+    function(j){return {up:j.up,relayReachable:true,window:(typeof j.window==='string'?j.window:null)};},
     function(err){
       var relayUp=!!(err&&err.answered);
       return fetchHomeDirectly().then(
@@ -784,7 +741,9 @@ function setOnline(){
   stopCountdown();
   clearWolPoll();
   clearWolRetries();
-  releaseWakeLock();
+  // v8.20 — wake-lock release is deferred to the end of this function: after a
+  // successful wake we keep the screen on a few more seconds so the green card
+  // + success toast are actually seen before the screen may re-lock.
   applyLinksState();
   // Confident green. setOnline fires either from a cache pre-paint (open/resume
   // with a <60 s verdict — reused, with the refresh spinner already running from
@@ -810,6 +769,9 @@ function setOnline(){
     showToast('✓ Serveur démarré avec succès',false,5000);
     if(navigator.vibrate)navigator.vibrate([100,50,100]);
     wolSent=false;
+    setTimeout(releaseWakeLock,10000);
+  }else{
+    releaseWakeLock();
   }
 }
 
@@ -879,11 +841,7 @@ function postWol(isRetry){
     method:'POST',
     cache:'no-store',
     headers:{'Content-Type':'application/json','X-Token':config.token},
-    // wolPushSub lands asynchronously (ensurePushSub in sendWol) — the initial
-    // POST usually goes without it and the 15 s+ retry POSTs carry it, well
-    // before the ~80 s median boot. The relay schedules its notify task on the
-    // first POST that includes it (single-flight, replaces a previous task).
-    body:JSON.stringify(wolPushSub?{mac:macToColon(config.mac),push:wolPushSub}:{mac:macToColon(config.mac)})
+    body:JSON.stringify({mac:macToColon(config.mac)})
   }).then(function(r){
     if(r.ok||isRetry)return;
     wolSent=false;wolStartTime=0;stopCountdown();clearWolPoll();clearWolRetries();releaseWakeLock();
@@ -964,12 +922,6 @@ function sendWol(){
   wolSent=true;
   wolStartTime=Date.now();
   acquireWakeLock();
-  // Resolve the push subscription in parallel with the wake (never blocks the
-  // first magic packet). On an opted-in repeat wake it resolves in ~ms; on the
-  // very first one the permission prompt may appear — either way the retry
-  // POSTs pick wolPushSub up once set.
-  wolPushSub=null;
-  ensurePushSub().then(function(s){if(s&&wolSent)wolPushSub=s.toJSON();});
   document.getElementById('powerBtn').className='power-btn sent';
   document.getElementById('powerLabel').className='power-label sent';
   setStarting();

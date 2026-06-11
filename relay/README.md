@@ -308,7 +308,7 @@ sudo useradd -r -s /usr/sbin/nologin -d /opt/wol-relay -m wol || true
 sudo chown -R wol:wol /opt/wol-relay
 sudo -u wol python3 -m venv /opt/wol-relay/venv
 sudo -u wol /opt/wol-relay/venv/bin/pip install --upgrade pip wheel
-sudo -u wol /opt/wol-relay/venv/bin/pip install fastapi 'uvicorn[standard]' 'httpx[http2]'
+sudo -u wol /opt/wol-relay/venv/bin/pip install fastapi 'uvicorn[standard]' 'httpx[http2]' pywebpush py-vapid
 
 # Optional UFW (defense in depth; cloud firewall is primary)
 sudo ufw default deny incoming && sudo ufw default allow outgoing
@@ -392,6 +392,28 @@ and falls back to a direct HEAD against the home — same UX as a GCP
 outage. This means deploying the v7.0 backend before configuring the
 env var is safe (no `/wol` regression).
 
+## Web Push "server ready" (v8.18+, optional)
+
+Ephemeral, storage-less design (ADR 2026-06-11, operator's private
+knowledge-base): the PWA attaches its push subscription to the `POST
+/wol` body; the relay polls the home (reusing the `/status` poll
+machinery) until it answers, sends **one** notification via
+[pywebpush](https://github.com/web-push-libs/pywebpush), and forgets the
+subscription. No `/subscribe` endpoint, no subscription store, no
+cleanup. Single-flight: a second wake replaces the running notify task
+(free-tier guard — bounded CPU/egress per wake).
+
+Enable it by installing the deps (`pip install pywebpush py-vapid` in
+the venv) and setting `VAPID_PRIVATE_KEY` / `VAPID_PUBLIC_KEY` /
+`VAPID_SUB` in `/etc/wol-relay.env` (see `wol-relay.env.example` for the
+keygen one-shot). Unset / missing lib = the feature is silently off and
+everything else works unchanged. The public key is served to clients in
+`/status` responses (`vapid` field) — same config-channel pattern as
+`window`.
+
+iOS caveat: the Push API requires iOS 16.4+ AND the PWA installed on the
+home screen; a plain Safari tab never receives anything.
+
 ## Hardening notes
 
 | Measure | Why |
@@ -413,6 +435,7 @@ env var is safe (no `/wol` regression).
 | `EnvironmentFile` mode `0640 root:<service-user>` | Tokens readable only by root and the service user |
 | MAC allowlist (`ALLOWED_MAC` env) | A leaked token can only wake the listed MAC, no other machines |
 | `TARGET_HOST` resolved server-side | Clients cannot redirect packets to an arbitrary IP |
+| Push subscription: ephemeral, schema-bounded (`https://` endpoint ≤1024 chars), never stored or logged | The relay can't be turned into a generic POSTer; a VM compromise leaks no subscriptions |
 | 3 magic packets spaced 500 ms | Compensates for transient UDP drops (excellent gain/cost ratio) |
 
 ## References

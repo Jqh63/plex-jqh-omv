@@ -279,7 +279,11 @@ function showSettings(){
     document.getElementById('cfgToken').value=config.token||'';
     document.getElementById('cfgApps').value=config.apps||'';
     document.getElementById('cfgWindow').value=config.window||'';
+    document.getElementById('cfgNotify').checked=!!config.notify;
   }
+  // Notification opt-in only where Web Push can work (API present). On iOS
+  // the API only exists once the PWA is installed — the field self-reveals.
+  document.getElementById('notifyField').style.display=pushSupported()?'block':'none';
   if(checkInterval)clearInterval(checkInterval);
   setTimeout(function(){document.getElementById('cfgHost').focus();},50);
 }
@@ -303,6 +307,8 @@ function saveConfig(){
   // there's no settings field for it. Carry the existing value across a save so
   // editing other fields doesn't silently drop it.
   var prevStatus=(config&&config.status)||'';
+  var prevVapid=(config&&config.vapid)||'';
+  var notify=document.getElementById('cfgNotify').checked;
   if(!host){showToast('⚠ Domaine requis',true);return}
   if(!validHost(host)){showToast('⚠ Domaine invalide',true);return}
   var cleaned='';
@@ -322,7 +328,13 @@ function saveConfig(){
   if(apps)config.apps=apps;
   if(win)config.window=win;
   if(prevStatus)config.status=prevStatus;
+  // vapid is relay-served (adopted in checkStatus) — carry it across a save.
+  if(prevVapid)config.vapid=prevVapid;
+  if(notify)config.notify=true;
   storeConfig(config);
+  // The save click is a user gesture: request the notification permission /
+  // subscription now (fire-and-forget — sendWol re-ensures it per wake).
+  if(notify)ensurePushSub();
   startApp();
 }
 
@@ -430,6 +442,55 @@ function buildLinks(){
 
 function wolReady(){return !!(config&&config.mac&&config.relay&&config.token);}
 
+// v8.18 — Screen Wake Lock during a WoL boot (ADR 2026-06-11, knowledge-base).
+// The screen used to auto-lock ~30 s into the ~80 s boot, killing the countdown
+// mid-wake. Held only while a wake is in progress; the OS releases it on
+// background, onForeground() re-acquires it if the wake is still running.
+// Graceful no-op where the API is missing (pre-18.4 Safari).
+var wakeLock=null;
+function acquireWakeLock(){
+  if(!('wakeLock' in navigator)||!wolSent)return;
+  navigator.wakeLock.request('screen').then(function(l){
+    if(!wolSent){l.release().catch(function(){});return;}
+    wakeLock=l;
+  }).catch(function(){});
+}
+function releaseWakeLock(){
+  if(wakeLock){wakeLock.release().catch(function(){});wakeLock=null;}
+}
+
+// v8.18 — Web Push "serveur prêt" (ADR 2026-06-11). Ephemeral design: the
+// subscription rides the /wol POST (wolPushSub below); the relay notifies on
+// the down→up flip then forgets it. The VAPID public key arrives via /status
+// (relay-as-config-channel, v8.12 pattern); the opt-in lives in Settings
+// (config.notify) so requestPermission() runs on the save-button gesture.
+var wolPushSub=null;
+function pushSupported(){
+  return 'serviceWorker' in navigator&&'PushManager' in window&&'Notification' in window;
+}
+function urlB64ToUint8Array(s){
+  var pad='='.repeat((4-s.length%4)%4);
+  var raw=atob((s+pad).replace(/-/g,'+').replace(/_/g,'/'));
+  var arr=new Uint8Array(raw.length);
+  for(var i=0;i<raw.length;i++)arr[i]=raw.charCodeAt(i);
+  return arr;
+}
+// Resolves to a PushSubscription or null — never rejects. Reuses an existing
+// subscription; only subscribes (and prompts) when opted in + key known.
+function ensurePushSub(){
+  if(!pushSupported()||!config||!config.notify||!config.vapid)return Promise.resolve(null);
+  if(Notification.permission==='denied')return Promise.resolve(null);
+  return navigator.serviceWorker.ready.then(function(reg){
+    return reg.pushManager.getSubscription().then(function(sub){
+      if(sub)return sub;
+      return Notification.requestPermission().then(function(p){
+        if(p!=='granted')return null;
+        return reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:urlB64ToUint8Array(config.vapid)});
+      });
+    });
+  }).catch(function(){return null;});
+}
+
 function startApp(){
   document.getElementById('settingsScreen').style.display='none';
   document.getElementById('mainScreen').style.display='flex';
@@ -445,6 +506,8 @@ function startApp(){
   buildLinks();
   clearWolPoll();
   clearWolRetries();
+  releaseWakeLock();
+  wolPushSub=null;
   isOnline=false;wolSent=false;checking=false;checkStartedAt=0;relayReachable=true;relayMissStreak=0;hasConfirmedState=false;
   downStreak=0;if(downRecheckTimer){clearTimeout(downRecheckTimer);downRecheckTimer=null;}
   // Reuse the localStorage cache (<60 s) for an instant paint so back-to-back
@@ -590,6 +653,11 @@ function checkStatus(){
     if(res.window&&parseWindow(res.window)&&config.window!==res.window){
       config.window=res.window;storeConfig(config);
     }
+    // v8.18 — adopt the relay-served VAPID public key the same way (it only
+    // appears when the relay has push enabled). Not a secret.
+    if(res.vapid&&config.vapid!==res.vapid){
+      config.vapid=res.vapid;storeConfig(config);
+    }
     // N-consecutive-miss debounce on relay reachability (see relayMissStreak
     // comment): a miss stays optimistic until RELAY_DOWN_MISSES in a row; any
     // answered/up probe resets the streak. The home up/down verdict (res.up) is
@@ -668,7 +736,7 @@ function probe(){
   return fetchStatusFromRelay().then(
     // v8.12 — pass the relay-served uptime window through (see the adoption
     // logic in checkStatus): the relay is the admin-controlled config channel.
-    function(j){return {up:j.up,relayReachable:true,window:(typeof j.window==='string'?j.window:null)};},
+    function(j){return {up:j.up,relayReachable:true,window:(typeof j.window==='string'?j.window:null),vapid:(typeof j.vapid==='string'?j.vapid:null)};},
     function(err){
       var relayUp=!!(err&&err.answered);
       return fetchHomeDirectly().then(
@@ -723,6 +791,7 @@ function setOnline(){
   stopCountdown();
   clearWolPoll();
   clearWolRetries();
+  releaseWakeLock();
   applyLinksState();
   // Confident green. setOnline fires either from a cache pre-paint (open/resume
   // with a <60 s verdict — reused, with the refresh spinner already running from
@@ -817,17 +886,21 @@ function postWol(isRetry){
     method:'POST',
     cache:'no-store',
     headers:{'Content-Type':'application/json','X-Token':config.token},
-    body:JSON.stringify({mac:macToColon(config.mac)})
+    // wolPushSub lands asynchronously (ensurePushSub in sendWol) — the initial
+    // POST usually goes without it and the 15 s+ retry POSTs carry it, well
+    // before the ~80 s median boot. The relay schedules its notify task on the
+    // first POST that includes it (single-flight, replaces a previous task).
+    body:JSON.stringify(wolPushSub?{mac:macToColon(config.mac),push:wolPushSub}:{mac:macToColon(config.mac)})
   }).then(function(r){
     if(r.ok||isRetry)return;
-    wolSent=false;wolStartTime=0;stopCountdown();clearWolPoll();clearWolRetries();
+    wolSent=false;wolStartTime=0;stopCountdown();clearWolPoll();clearWolRetries();releaseWakeLock();
     var msg=(r.status===401||r.status===403)?'Relais : accès refusé':'Erreur relais HTTP '+r.status;
     if(navigator.vibrate)navigator.vibrate(300);
     showToast('⚠ '+msg+' — réveil manuel ↓',true,5000);
     setOffline();
   }).catch(function(){
     if(isRetry)return;
-    wolSent=false;wolStartTime=0;stopCountdown();clearWolPoll();clearWolRetries();
+    wolSent=false;wolStartTime=0;stopCountdown();clearWolPoll();clearWolRetries();releaseWakeLock();
     // Flip relayReachable manually — a checkStatus() right now would race
     // the WoL POST, and we already know the relay just failed. This is a
     // CONFIRMED failure (the user actually tried to wake), so bypass the
@@ -897,6 +970,13 @@ function sendWol(){
   if(navigator.vibrate)navigator.vibrate(50);
   wolSent=true;
   wolStartTime=Date.now();
+  acquireWakeLock();
+  // Resolve the push subscription in parallel with the wake (never blocks the
+  // first magic packet). On an opted-in repeat wake it resolves in ~ms; on the
+  // very first one the permission prompt may appear — either way the retry
+  // POSTs pick wolPushSub up once set.
+  wolPushSub=null;
+  ensurePushSub().then(function(s){if(s&&wolSent)wolPushSub=s.toJSON();});
   document.getElementById('powerBtn').className='power-btn sent';
   document.getElementById('powerLabel').className='power-label sent';
   setStarting();
@@ -921,7 +1001,7 @@ function sendWol(){
   wolPollTimer=setInterval(function(){
     if(!wolSent||isOnline){clearWolPoll();return;}
     if(Date.now()-wolStartTime>WOL_TIMEOUT_MS){
-      wolSent=false;wolStartTime=0;clearWolPoll();clearWolRetries();stopCountdown();checkStatus();
+      wolSent=false;wolStartTime=0;clearWolPoll();clearWolRetries();stopCountdown();releaseWakeLock();checkStatus();
       if(navigator.vibrate)navigator.vibrate(300);
       // Surface the timeout — silent failure (vibration + flip to red) used to
       // leave family members wondering whether the app was broken. Toast tells
@@ -1029,6 +1109,9 @@ function onForeground(){
     hasConfirmedState=false;
   }
   checkStatus();
+  // v8.18 — the OS released the wake lock on background; re-hold it if the
+  // wake is still in progress.
+  if(wolSent)acquireWakeLock();
   // Countdown text self-corrects from Date.now() on the next tick, but the
   // CSS progress bar transition does NOT — it was started once with a
   // duration of etaMs and is frozen-then-resumed by the suspend, so on

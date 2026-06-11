@@ -175,7 +175,7 @@ function cleanRelay(u){return u.replace(/\/+$/,'')}
 function validRelay(u){return /^https:\/\/[a-zA-Z0-9.\-]+(:\d+)?(\/.*)?$/.test(u)&&u.length<255}
 // v8.11 — scheduled-uptime window. Format "HH:MM-HH:MM" or "HHhMM-HHhMM"
 // ("13:50-00:10" / "13h50-00h10"), may wrap past midnight. Purely informative:
-// it only rephrases the red card ("En veille" + auto-wake hint vs "Hors ligne")
+// it only rephrases the red card ("Éteint (prévu)" + auto-wake hint vs "Hors ligne")
 // so a deliberate nightly shutdown doesn't read like an outage. It never gates
 // anything — WoL stays available either way (RTC auto-wake ≠ no manual wake).
 function parseWindow(s){
@@ -841,7 +841,7 @@ function setOffline(){
   // "offline" card next to the spinning power button is contradictory.
   if(wolSent){setStarting();return;}
   // v8.11 — window-aware red. Outside the configured uptime window a red is
-  // the EXPECTED nightly shutdown: say so ("En veille" + the auto-wake time)
+  // the EXPECTED nightly shutdown: say so ("Éteint (prévu)" + the auto-wake time)
   // instead of the alarming "Hors ligne", so the family doesn't read a
   // deliberate sleep as an outage. Inside the window (or no window set) the
   // plain "Hors ligne" stands — there, red IS the anomaly signal.
@@ -855,7 +855,10 @@ function setOffline(){
     document.getElementById('statusLabel').textContent='Hors ligne';
     document.getElementById('statusSub').textContent='pas de réseau';
   }else if(inWin===false){
-    document.getElementById('statusLabel').textContent='En veille';
+    // v8.15 — "En veille" implied a suspend; the box actually powers OFF
+    // (autoshutdown + RTC wake). "Éteint (prévu)" matches reality while the
+    // blue card + auto-wake time keep the calm "this is expected" framing.
+    document.getElementById('statusLabel').textContent='Éteint (prévu)';
     // v8.13 — short copy: the power button sits right below, the "ou
     // allume-le ↓" hint wrapped on narrow phones (S24) for no added info.
     document.getElementById('statusSub').textContent='réveil auto à '+windowStartLabel();

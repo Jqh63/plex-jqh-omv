@@ -15,6 +15,11 @@
 	header @from_pwa Access-Control-Allow-Origin "{$CORS_ORIGIN}"
 	header @from_pwa Access-Control-Allow-Methods "GET, POST, OPTIONS"
 	header @from_pwa Access-Control-Allow-Headers "Content-Type, X-Token"
+	# Cache the preflight verdict client-side: /status now carries X-Token
+	# (non-simple GET), and without this every 8 s PWA poll would pay an
+	# extra OPTIONS round-trip (browsers default to ~5 s preflight cache).
+	# Browsers cap the value anyway (Chrome 2 h, Firefox 24 h).
+	header @from_pwa Access-Control-Max-Age "86400"
 	header @from_pwa Vary "Origin"
 
 	# Handle OPTIONS preflight at the Caddy level so it succeeds even

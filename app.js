@@ -519,7 +519,11 @@ function fetchStatusFromRelay(){
   //     DNS): the relay is genuinely unreachable, /wol would fail too.
   // See ADR 2026-05-27 (relay-as-oracle) addendum.
   var answered=function(msg){var e=new Error(msg);e.answered=true;return Promise.reject(e);};
-  return fetchOnce(config.relay+'/status').then(function(r){
+  // v8.17 — /status is token-protected on the relay (same shared token as
+  // /wol). Send it when configured; without a token the relay answers 401,
+  // which lands on the answered-rejection path → direct-home fallback.
+  var opts=config.token?{headers:{'X-Token':config.token}}:undefined;
+  return fetchOnce(config.relay+'/status',opts).then(function(r){
     if(!r.ok)return answered('HTTP '+r.status);
     return r.json().catch(function(){return answered('bad json');});
   }).then(function(j){

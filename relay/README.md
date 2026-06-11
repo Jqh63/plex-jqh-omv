@@ -345,6 +345,12 @@ templates and posts the dispatcher.
 up?". The PWA does one `fetch` to the relay and gets a decisive answer
 in <1 s in nominal conditions.
 
+Since v8.17 the endpoint requires the same shared `X-Token` header as
+`/wol` — an unauthenticated caller gets a `401` and learns nothing (not
+even whether a status target is configured). A PWA without a configured
+token treats the 401 as a degraded oracle and falls back to its direct
+home probe.
+
 ### Response shape
 
 ```json
@@ -401,7 +407,7 @@ env var is safe (no `/wol` regression).
 | uvicorn `--no-access-log` | The token never ends up in a log |
 | Sliding-window rate limit on `/wol` (10 req/min/IP, in-memory) | Caps scan / brute force velocity before any other check; refuses with 429 |
 | Audit log on `/wol` (`journalctl -u wol-relay`) | Every attempt is logged with source IP + status (200/401/403/429/502). Token and MAC are **never** logged. Lets you spot unauthorized scans |
-| `/status` is unauthenticated, returns no MAC/token, fixed shape | Public-readable: an attacker only learns the up/down of the configured target (which they can also infer with a TCP probe). No new exposure surface |
+| `/status` requires the shared `X-Token` (since v8.17), returns no MAC/token, fixed shape | Closes the anonymous up/down info disclosure; the token check runs before any config-state branch, so a 401 reveals nothing |
 | systemd `NoNewPrivileges` + `ProtectSystem=strict` + `PrivateTmp` | Limits the blast radius of a hypothetical RCE in FastAPI |
 | user `wol` (non-priv, no shell) | uvicorn doesn't run as root |
 | `EnvironmentFile` mode `0640 root:<service-user>` | Tokens readable only by root and the service user |

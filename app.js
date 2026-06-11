@@ -279,11 +279,7 @@ function showSettings(){
     document.getElementById('cfgToken').value=config.token||'';
     document.getElementById('cfgApps').value=config.apps||'';
     document.getElementById('cfgWindow').value=config.window||'';
-    document.getElementById('cfgNotify').checked=!!config.notify;
   }
-  // Notification opt-in only where Web Push can work (API present). On iOS
-  // the API only exists once the PWA is installed — the field self-reveals.
-  document.getElementById('notifyField').style.display=pushSupported()?'block':'none';
   if(checkInterval)clearInterval(checkInterval);
   setTimeout(function(){document.getElementById('cfgHost').focus();},50);
 }
@@ -308,7 +304,6 @@ function saveConfig(){
   // editing other fields doesn't silently drop it.
   var prevStatus=(config&&config.status)||'';
   var prevVapid=(config&&config.vapid)||'';
-  var notify=document.getElementById('cfgNotify').checked;
   if(!host){showToast('⚠ Domaine requis',true);return}
   if(!validHost(host)){showToast('⚠ Domaine invalide',true);return}
   var cleaned='';
@@ -330,11 +325,7 @@ function saveConfig(){
   if(prevStatus)config.status=prevStatus;
   // vapid is relay-served (adopted in checkStatus) — carry it across a save.
   if(prevVapid)config.vapid=prevVapid;
-  if(notify)config.notify=true;
   storeConfig(config);
-  // The save click is a user gesture: request the notification permission /
-  // subscription now (fire-and-forget — sendWol re-ensures it per wake).
-  if(notify)ensurePushSub();
   startApp();
 }
 
@@ -462,8 +453,10 @@ function releaseWakeLock(){
 // v8.18 — Web Push "serveur prêt" (ADR 2026-06-11). Ephemeral design: the
 // subscription rides the /wol POST (wolPushSub below); the relay notifies on
 // the down→up flip then forgets it. The VAPID public key arrives via /status
-// (relay-as-config-channel, v8.12 pattern); the opt-in lives in Settings
-// (config.notify) so requestPermission() runs on the save-button gesture.
+// (relay-as-config-channel, v8.12 pattern). v8.19 — zero-manipulation: no
+// settings opt-in; the permission prompt fires on the first wake tap (a user
+// gesture, contextually relevant), once the relay serves a vapid key. The
+// browser "Allow" is the one irreducible user step.
 var wolPushSub=null;
 function pushSupported(){
   return 'serviceWorker' in navigator&&'PushManager' in window&&'Notification' in window;
@@ -478,7 +471,7 @@ function urlB64ToUint8Array(s){
 // Resolves to a PushSubscription or null — never rejects. Reuses an existing
 // subscription; only subscribes (and prompts) when opted in + key known.
 function ensurePushSub(){
-  if(!pushSupported()||!config||!config.notify||!config.vapid)return Promise.resolve(null);
+  if(!pushSupported()||!config||!config.vapid)return Promise.resolve(null);
   if(Notification.permission==='denied')return Promise.resolve(null);
   return navigator.serviceWorker.ready.then(function(reg){
     return reg.pushManager.getSubscription().then(function(sub){

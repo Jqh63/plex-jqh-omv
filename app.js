@@ -18,6 +18,10 @@ var wolStartTime=0,wolPollTimer=null,wolRetryTimers=[];
 // guard: a confirmed on-screen verdict older than STATUS_LOCAL_TTL_MS no longer
 // suppresses the orange "Vérification…" (see the guard comment in checkStatus).
 var lastVerdictAtMs=0;
+// Declared here (was an implicit global until v8.16): true once setOnline /
+// setOffline has fired this session — full semantics on the comment block
+// above startApp()'s cache pre-paint.
+var hasConfirmedState=false;
 
 // v8.11 — surface that freshness to the user: a small "vérifié à l'instant /
 // il y a Xs" line under the status card, refreshed by the 1 s poll. Makes the
@@ -253,6 +257,11 @@ function readUrlParams(){
   var ip=p.get('ip');if(ip&&validIp(ip))config.ip=ip;
   var win=p.get('window');if(win&&parseWindow(win))config.window=win;
   storeConfig(config);
+  // Strip the provisioning params from the address bar once adopted: the URL
+  // carries the relay token in clear, and it would otherwise persist in the
+  // browser history / share sheet / screenshots. The config now lives in
+  // localStorage; preconnect.js already ran at parse time so it saw the param.
+  try{history.replaceState(null,'',location.pathname);}catch(e){}
   return true;
 }
 

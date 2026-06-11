@@ -47,5 +47,22 @@ Cmnd_Alias HOME_WATCH_SYSTEMCTL = \
 Cmnd_Alias HOME_WATCH_LOGS = \
   /usr/bin/journalctl -u home-watch -n 100 --no-pager
 
+# pock-sync — per-app JSON blob store (apply-pock-sync / logs-pock-sync /
+# pock-dump). Same isolation: exact verbs, literal paths, no wildcards.
+# The tar dump is read-only by construction (-cf - to stdout, fixed dir).
+Cmnd_Alias POCK_SYNC_INSTALL = \
+  /usr/bin/install -o pock -g pock -m 0644 /tmp/wol-relay-staging/pock-sync-app.py /opt/pock-sync/app.py, \
+  /usr/bin/install -m 0644 /tmp/wol-relay-staging/pock-sync.service /etc/systemd/system/pock-sync.service
+
+Cmnd_Alias POCK_SYNC_SYSTEMCTL = \
+  /bin/systemctl restart pock-sync
+
+Cmnd_Alias POCK_SYNC_LOGS = \
+  /usr/bin/journalctl -u pock-sync -n 100 --no-pager
+
+Cmnd_Alias POCK_SYNC_DUMP = \
+  /usr/bin/tar -C /var/lib/pock-sync -cf - .
+
 deploy ALL=(root) NOPASSWD: WOL_RELAY_INSTALL, WOL_RELAY_SYSTEMCTL, WOL_RELAY_LOGS, \
-                            HOME_WATCH_INSTALL, HOME_WATCH_SYSTEMCTL, HOME_WATCH_LOGS
+                            HOME_WATCH_INSTALL, HOME_WATCH_SYSTEMCTL, HOME_WATCH_LOGS, \
+                            POCK_SYNC_INSTALL, POCK_SYNC_SYSTEMCTL, POCK_SYNC_LOGS, POCK_SYNC_DUMP

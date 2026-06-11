@@ -141,6 +141,26 @@ egress. The two secret files (`/etc/msmtprc` with a dedicated Gmail
 app-password, `/etc/home-watch.env`) are posted manually (0600).
 Deploy is driven from the private repo's `deploy-home-watch.sh`.
 
+### Third service on this channel: `pock-sync`
+
+The channel also carries **`pock-sync`**, a per-app JSON blob store for
+the [Pock PWAs](https://github.com/Jqh63/pock) (code public in that
+repo under `sync/`, exposed behind this Caddy on the `/pock/*` path —
+see that repo's `sync/README.md` for the service itself and its
+one-shot bootstrap):
+
+```bash
+ssh wol-relay-deploy push-pock-sync-{app,service}  # stage (stdin)
+ssh wol-relay-deploy apply-pock-sync               # install + restart
+ssh wol-relay-deploy pock-sync-status              # is-active + /pock/health
+ssh wol-relay-deploy logs-pock-sync                # journalctl -n 100
+ssh wol-relay-deploy pock-dump                     # tar of the blobs → stdout
+```
+
+`pock-dump` is read-only and pulled daily by the home server, which
+feeds the blobs to its regular backup — the VM is never the sole holder
+of the data. Deploy is driven from the Pock repo's `sync/deploy.sh`.
+
 ### One-shot bootstrap (DR or first install)
 
 Run UNCE to activate the channel. If the VM already exists but

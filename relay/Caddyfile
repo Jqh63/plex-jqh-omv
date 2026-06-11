@@ -13,8 +13,8 @@
 	# misinterprets "relay down" as a CORS issue.
 	@from_pwa header Origin {$CORS_ORIGIN}
 	header @from_pwa Access-Control-Allow-Origin "{$CORS_ORIGIN}"
-	header @from_pwa Access-Control-Allow-Methods "GET, POST, OPTIONS"
-	header @from_pwa Access-Control-Allow-Headers "Content-Type, X-Token"
+	header @from_pwa Access-Control-Allow-Methods "GET, POST, PUT, OPTIONS"
+	header @from_pwa Access-Control-Allow-Headers "Content-Type, X-Token, Authorization"
 	# Cache the preflight verdict client-side: /status now carries X-Token
 	# (non-simple GET), and without this every 8 s PWA poll would pay an
 	# extra OPTIONS round-trip (browsers default to ~5 s preflight cache).
@@ -37,6 +37,17 @@
 	# value an external client cannot forge. app.py reads X-Real-IP for the
 	# rate limiter + audit log. Without this, a rotating spoofed XFF bypasses
 	# the per-IP /wol rate limit and poisons the audit log.
+	# Pock sync — per-app JSON blob store (Jqh63/pock, sync/), third service
+	# on this VM. Path route on the same vhost (no new vhost/cert); every
+	# other path still falls through to the relay below. Same X-Real-IP
+	# sanitization (its rate limiter keys on it too).
+	handle /pock/* {
+		reverse_proxy localhost:8001 {
+			header_up -X-Forwarded-For
+			header_up X-Real-IP {remote_host}
+		}
+	}
+
 	reverse_proxy localhost:8000 {
 		header_up -X-Forwarded-For
 		header_up X-Real-IP {remote_host}

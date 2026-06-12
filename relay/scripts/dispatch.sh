@@ -33,6 +33,13 @@
 #   ssh wol-relay-deploy pock-dump               # tar of /var/lib/pock-sync → stdout (read-only,
 #                                                #   pulled daily by the home server for backup)
 #
+# pat-offsite (encrypted patrimoine backup pushed by the home server —
+# knowledge-base ADR 2026-06-12, blobs opaque to this VM by construction):
+#   ssh wol-relay-deploy pat-receive daily       # stdin (age blob) → ~deploy/pat-offsite, keep 7
+#   ssh wol-relay-deploy pat-receive weekly      # idem, keep 4
+#   ssh wol-relay-deploy pat-list                # list stored blobs (read-only)
+#   ssh wol-relay-deploy pat-dump-latest         # newest blob → stdout (restore path, read-only)
+#
 # Standard usage pattern: `relay/scripts/deploy.sh` on the deploying host
 # pipes the 3 push commands from the local repo, then triggers apply.
 # home-watch is deployed analogously by knowledge-base's deploy-home-watch.sh.
@@ -166,11 +173,45 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
     # and feeds it to its regular backup. Never prints the token.
     sudo /usr/bin/tar -C /var/lib/pock-sync -cf - .
     ;;
+  "pat-receive daily"|"pat-receive weekly")
+    # Off-site patrimoine backup: the home server PUSHES an age-encrypted
+    # blob on stdin. Public-key encryption — the private key never leaves
+    # home, so this VM stores ciphertext it cannot read. Two literal case
+    # patterns: the static-enum property is preserved (no free args).
+    # Stored under ~deploy (no sudo involved), rotation per class.
+    class="${SSH_ORIGINAL_COMMAND#pat-receive }"
+    dir="$HOME/pat-offsite"
+    mkdir -p "$dir" && chmod 700 "$dir"
+    f="$dir/pat-$class-$(date -u +%Y%m%dT%H%M%SZ).age"
+    cat > "$f.tmp"
+    sz=$(wc -c < "$f.tmp")
+    # A bare age header is ~200 bytes — anything at or below is a broken pipe.
+    if [ "$sz" -le 200 ]; then
+      rm -f "$f.tmp"
+      echo "ERR payload too small ($sz bytes) — refusing to store" >&2
+      exit 65
+    fi
+    mv "$f.tmp" "$f"
+    keep=7; [ "$class" = "weekly" ] && keep=4
+    ls -1t "$dir"/pat-"$class"-*.age 2>/dev/null | tail -n +$((keep + 1)) | xargs -r rm -f
+    echo "OK $sz bytes -> $(basename "$f")"
+    ;;
+  pat-list)
+    ls -lh "$HOME/pat-offsite" 2>/dev/null || echo "(no backups yet)"
+    ;;
+  pat-dump-latest)
+    # Restore path: newest blob (any class) to stdout. Decryption happens
+    # at home with the age private key — the VM never sees cleartext.
+    f=$(ls -1t "$HOME/pat-offsite"/pat-*.age 2>/dev/null | head -1 || true)
+    [ -n "$f" ] || { echo "ERR no backup stored" >&2; exit 66; }
+    cat "$f"
+    ;;
   *)
     echo "dispatch.sh: unknown command '${SSH_ORIGINAL_COMMAND:-}'" >&2
     echo "Expected: push-app, push-caddyfile, push-service, apply, status, health, logs-wol-relay, logs-caddy," >&2
     echo "          push-home-watch{,-service,-timer}, apply-home-watch, home-watch-status, logs-home-watch," >&2
-    echo "          push-pock-sync-{app,service}, apply-pock-sync, pock-sync-status, logs-pock-sync, pock-dump." >&2
+    echo "          push-pock-sync-{app,service}, apply-pock-sync, pock-sync-status, logs-pock-sync, pock-dump," >&2
+    echo "          pat-receive {daily,weekly}, pat-list, pat-dump-latest." >&2
     exit 64
     ;;
 esac

@@ -1,5 +1,5 @@
-var CACHE = 'plex-jqh-omv-v8.21';
-var FILES = ['./', './app.js', './preconnect.js', './fallback.html', './fallback.js', './debug.html', './debug.js', './manifest.json', './icon-192.png', './icon-512.png'];
+var CACHE = 'plex-jqh-omv-v8.22';
+var FILES = ['./', './app.js', './preconnect.js', './fallback.html', './fallback.js', './debug.html', './debug.js', './manifest.json', './icon-192-v2.png', './icon-512-v2.png', './icon-maskable-v2.png', './icon-monochrome-v2.png'];
 
 // Two non-obvious requirements stacked here:
 // 1. addAll is all-or-nothing — a single 404/timeout/network blip kills

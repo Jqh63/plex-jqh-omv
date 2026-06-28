@@ -167,6 +167,15 @@ var ETA_FALLBACK_MS=80000;
 // opens; it might be ready) rather than blocking. ~90 s covers the common case.
 var APP_WARMUP_MS=90000;
 var serverReadyHintUntil=0;
+// v8.28 — canonical boot ETA served by the relay (`eta_s` in /status), in ms.
+// The relay measures the wall-clock from /wol to the next "up" flip and serves
+// the median, so EVERY open PWA seeds its wake countdown from the same value —
+// the timer is identical across devices instead of each running its own local
+// boot-history median (the desync the user saw: one device 80 s fallback, another
+// 70 s). Preferred by getEta() when present (and sane); the local boot history
+// below stays the offline / no-relay fallback. Adopted on each /status poll and
+// persisted (config.eta) so an offline open still seeds a sane countdown.
+var relayEtaMs=0;
 var BOOT_HISTORY_KEY='plex-jqh-omv-boot-history';
 var BOOT_HISTORY_MAX=10;
 // Exclude outliers: <10s = false positive (server was already up when we
@@ -248,6 +257,10 @@ function recordBootTime(ms){
   try{localStorage.setItem(BOOT_HISTORY_KEY,JSON.stringify(h))}catch(e){}
 }
 function getEta(){
+  // Prefer the relay-served canonical ETA (shared across devices) when present
+  // and within sane bounds; fall back to the local boot-history median, then the
+  // hardcoded fallback. This is what syncs the wake countdown between devices.
+  if(relayEtaMs>=BOOT_MIN_MS&&relayEtaMs<=BOOT_MAX_MS)return relayEtaMs;
   var h=getBootHistory();
   if(h.length===0)return ETA_FALLBACK_MS;
   var sorted=h.slice().sort(function(a,b){return a-b;});
@@ -509,6 +522,9 @@ function startApp(){
   clearWolRetries();
   releaseWakeLock();
   isOnline=false;wolSent=false;remoteWaking=false;checking=false;checkStartedAt=0;relayReachable=true;relayMissStreak=0;hasConfirmedState=false;
+  // v8.28 — restore the persisted relay-served ETA so a wake fired right after an
+  // offline open still seeds a shared-value countdown before the first poll lands.
+  relayEtaMs=(config&&typeof config.eta==='number'&&config.eta*1000>=BOOT_MIN_MS&&config.eta*1000<=BOOT_MAX_MS)?config.eta*1000:0;
   downStreak=0;if(downRecheckTimer){clearTimeout(downRecheckTimer);downRecheckTimer=null;}
   // Reuse the localStorage cache (<60 s) for an instant paint so back-to-back
   // reopens don't strobe orange. v8.7: only an "up" cache is pre-painted (the
@@ -656,6 +672,12 @@ function checkStatus(){
     if(res.window&&parseWindow(res.window)&&config.window!==res.window){
       config.window=res.window;storeConfig(config);
     }
+    // v8.28 — adopt the relay's canonical boot ETA (see relayEtaMs). Bounded like
+    // the local history; persisted so an offline open seeds the same countdown.
+    if(res.etaS>0&&res.etaS*1000>=BOOT_MIN_MS&&res.etaS*1000<=BOOT_MAX_MS){
+      relayEtaMs=res.etaS*1000;
+      if(config.eta!==res.etaS){config.eta=res.etaS;storeConfig(config);}
+    }
     // N-consecutive-miss debounce on relay reachability (see relayMissStreak
     // comment): a miss stays optimistic until RELAY_DOWN_MISSES in a row; any
     // answered/up probe resets the streak. The home up/down verdict (res.up) is
@@ -745,7 +767,7 @@ function probe(){
     // v8.25 — thread the relay's wake-in-progress signal through (see the
     // remoteWaking branch in checkStatus): `waking` true while a /wol fired
     // recently and the home is still down, `wake_age_s` its age for the ETA.
-    function(j){return {up:j.up,relayReachable:true,window:(typeof j.window==='string'?j.window:null),waking:j.waking===true,wakeAgeS:(typeof j.wake_age_s==='number'?j.wake_age_s:0)};},
+    function(j){return {up:j.up,relayReachable:true,window:(typeof j.window==='string'?j.window:null),waking:j.waking===true,wakeAgeS:(typeof j.wake_age_s==='number'?j.wake_age_s:0),etaS:(typeof j.eta_s==='number'?j.eta_s:0)};},
     function(err){
       var relayUp=!!(err&&err.answered);
       return fetchHomeDirectly().then(

@@ -170,9 +170,13 @@ backend that honours it is interchangeable with the reference.
 
 ```
 GET /status
+  Headers: X-Token: <shared-token>, X-Client-Id: <opaque-uuid> (optional)
   → 200 {"up":bool, "stale":bool, "age_s":int}   (the PWA's steady-state oracle —
         relay polls the home server itself and caches the verdict; one fetch tells
         the app both "home up?" and "relay reachable?")
+        + "window":str   if the relay has UPTIME_WINDOW set (adopted by the PWA)
+        + "waking":true, "wake_age_s":int   while a recent POST /wol is booting the
+          home and it's not up yet — lets any open PWA show the wake countdown
   → 503 if the relay has no STATUS_TARGET_URL configured
 
 GET /health
@@ -182,6 +186,7 @@ GET /health
 POST /wol
   Headers: Content-Type: application/json
            X-Token: <shared-token>
+           X-Client-Id: <opaque-uuid> (optional — device telemetry, logged not stored)
   Body:    {"mac":"AA:BB:CC:DD:EE:FF"}
   → 200 on success, 401 on bad token, 403 on disallowed MAC,
     422 on malformed body, 4xx/5xx otherwise.

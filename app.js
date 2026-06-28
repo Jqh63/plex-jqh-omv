@@ -159,6 +159,14 @@ var WOL_RETRY_DELAYS_MS=[15000, 30000, 60000, 90000];
 // packet to first HTTPS response), which the median will converge on after a
 // few wakes anyway.
 var ETA_FALLBACK_MS=80000;
+// v8.27 — app-warm-up grace after a wake. The status flips green as soon as the
+// HOST answers HTTP, but the Docker apps (Seerr, Plex…) can still be starting for
+// a minute or two post-boot (the home's documented ~1-3 min post-boot service
+// spin-up). So for this long after a wake-driven green, tapping an app shows a
+// non-blocking "le serveur vient de démarrer" hint — optimistic (the link still
+// opens; it might be ready) rather than blocking. ~90 s covers the common case.
+var APP_WARMUP_MS=90000;
+var serverReadyHintUntil=0;
 var BOOT_HISTORY_KEY='plex-jqh-omv-boot-history';
 var BOOT_HISTORY_MAX=10;
 // Exclude outliers: <10s = false positive (server was already up when we
@@ -417,12 +425,19 @@ function buildLinks(){
       a.classList.add('server-dependent');
       if(!isOnline)a.classList.add('offline');
       a.addEventListener('click',function(e){
-        if(isOnline)return;
+        if(isOnline){
+          // v8.27 — server up but maybe just woken: the host answers while the
+          // apps still spin up. Non-blocking heads-up (the link opens anyway)
+          // so a "j'ai cliqué et ça charge dans le vide" right after a wake is
+          // explained rather than confusing. Only within the warm-up window.
+          if(Date.now()<serverReadyHintUntil)showToast('⏳ Serveur tout juste démarré — l\'app peut mettre quelques secondes',false,4000);
+          return;
+        }
         e.preventDefault();
         // During an active WoL boot the server is in transition, not "off" —
         // the generic "allume-le" message is misleading and frustrating
         // ("but I just did!"). Differentiate the two cases.
-        if(wolSent)showToast('⏳ Réveil en cours — patiente',true);
+        if(wolSent||remoteWaking)showToast('⏳ Réveil en cours — patiente',true);
         else showToast('⚠ Serveur éteint — allume-le d\'abord',true);
       });
     }
@@ -776,6 +791,10 @@ function setFallbackState(){
 }
 
 function setOnline(){
+  // v8.27 — capture whether we got here off the back of a wake (local or remote)
+  // BEFORE the flags are cleared below: if so, arm the app-warm-up grace so a tap
+  // in the next APP_WARMUP_MS gets the "apps still starting" heads-up.
+  if(wolSent||remoteWaking)serverReadyHintUntil=Date.now()+APP_WARMUP_MS;
   isOnline=true;
   remoteWaking=false;
   hasConfirmedState=true;

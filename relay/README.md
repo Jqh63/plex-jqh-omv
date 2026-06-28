@@ -26,6 +26,13 @@ while the home is still down. This lets *any* open PWA — not just the device
 that fired the wake — show the boot countdown, and deduplicates a wake across
 devices. The signal clears implicitly once the home answers (`up` wins).
 
+`/status` also serves `eta_s`: the relay measures each boot's wall-clock (from
+`/wol` to the next observed `up` flip), keeps a small in-memory ring, and serves
+its median. Every open PWA seeds its wake countdown from this single value, so the
+timer is identical across devices instead of each running its own local
+boot-history median. Ephemeral (resets on relay restart → `ETA_FALLBACK_S`,
+default 80 s, until a few wakes reconverge).
+
 **Device / usage telemetry** (log-only, no persistence): the PWA sends an opaque
 `X-Client-Id` (a random UUID it persists locally — not a secret, no PII) on
 `/status` and `/wol`. The relay derives a coarse device class from the

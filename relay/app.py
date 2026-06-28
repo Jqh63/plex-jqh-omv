@@ -71,6 +71,22 @@ STATUS_CACHE_STALE_S = int(os.environ.get("STATUS_CACHE_STALE_S", "60"))
 # countdown. Cleared implicitly once the home answers (an `up` verdict wins).
 # Sized a bit above a typical J5005 cold boot (~80 s) plus slack.
 WAKE_SIGNAL_TTL_S = int(os.environ.get("WAKE_SIGNAL_TTL_S", "150"))
+# Shared boot-ETA (multi-device timer sync). The relay measures the wall-clock
+# from a /wol to the next observed "up" flip and keeps a small ring of the last
+# few, serving their median as `eta_s` in every /status. Every open PWA seeds its
+# wake countdown from that single value, so the timer is identical across devices
+# instead of each running its own local boot-history median. In-memory (ephemeral
+# on relay restart → falls back to ETA_FALLBACK_S until a few wakes reconverge),
+# mirroring the PWA's own client-side history bounds.
+BOOT_MIN_MS = 10_000
+BOOT_MAX_MS = 300_000
+BOOT_HISTORY_MAX = 10
+ETA_FALLBACK_S = int(os.environ.get("ETA_FALLBACK_S", "80"))
+_boot_history: deque = deque(maxlen=BOOT_HISTORY_MAX)
+# True from a /wol until the next "up" flip consumes it for a boot measurement,
+# so a steady-state up (no wake) is never mis-recorded as a boot.
+_wake_pending: bool = False
+
 # Usage-log dedupe window: a given client-id's /status poll is logged at most
 # once per this interval, turning the 8 s self-healing poll of every open PWA
 # into a coarse "PWA was open around time T on device X" signal without flooding
@@ -327,16 +343,37 @@ async def _poll_home() -> bool:
     return False
 
 
+def _current_eta_s() -> int:
+    # Median of the observed boot durations, in seconds, for the shared wake
+    # countdown. Empty ring (cold relay) → fallback. Mirrors the PWA's getEta().
+    if not _boot_history:
+        return ETA_FALLBACK_S
+    s = sorted(_boot_history)
+    n = len(s)
+    mid = n // 2
+    med = (s[mid - 1] + s[mid]) / 2 if n % 2 == 0 else s[mid]
+    return max(1, round(med / 1000))
+
+
 async def _poll_home_and_update() -> None:
     # Run one poll and fold the verdict into the cache. Shared by the blocking
     # path (cold/expired cache) and the background SWR refresh. Caller holds
     # _status_poll_lock.
+    global _wake_pending
     ok = await _poll_home()
     polled_at = time.monotonic()
     _status_cache.last_poll_at = polled_at
     if ok:
         _status_cache.last_state = True
         _status_cache.last_success_at = polled_at
+        # Shared-ETA measurement: a wake was pending and the home just answered →
+        # record the boot duration (bounded like the PWA's own history; a wake
+        # fired against an already-up server measures <BOOT_MIN_MS and is dropped).
+        if _wake_pending and _last_wol_at:
+            boot_ms = (polled_at - _last_wol_at) * 1000.0
+            if BOOT_MIN_MS <= boot_ms <= BOOT_MAX_MS:
+                _boot_history.append(boot_ms)
+            _wake_pending = False
     elif _status_cache.last_state is None:
         # First-ever poll failed → bootstrap with a real verdict so the cache
         # isn't stuck on "no opinion".
@@ -434,6 +471,9 @@ async def status(request: Request, x_token: str | None = Header(None)):
             body["wake_age_s"] = int(wake_age)
     if UPTIME_WINDOW:
         body["window"] = UPTIME_WINDOW
+    # Canonical shared boot ETA — served on every /status (cheap) so every open
+    # PWA seeds its wake countdown from the same value, synced across devices.
+    body["eta_s"] = _current_eta_s()
     note_usage(clean_cid(request.headers.get("x-client-id")),
                request.headers.get("user-agent"), client_ip(request))
     return JSONResponse(
@@ -472,8 +512,9 @@ def wol(req: WolReq, request: Request, x_token: str = Header(...)):
                 time.sleep(PACKET_GAP_S)
     finally:
         s.close()
-    global _last_wol_at
+    global _last_wol_at, _wake_pending
     _last_wol_at = time.monotonic()
+    _wake_pending = True
     logger.info("wol ip=%s device=%s cid=%s status=200", ip,
                 device_class(request.headers.get("user-agent")),
                 clean_cid(request.headers.get("x-client-id")))

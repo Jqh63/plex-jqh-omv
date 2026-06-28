@@ -65,6 +65,18 @@ STATUS_POLL_RETRY_TIMEOUT_S = float(os.environ.get("STATUS_POLL_RETRY_TIMEOUT_S"
 STATUS_CACHE_FRESH_S = int(os.environ.get("STATUS_CACHE_FRESH_S", "5"))
 STATUS_CACHE_STALE_S = int(os.environ.get("STATUS_CACHE_STALE_S", "60"))
 
+# Wake-in-progress signal (shared wake-state). After a /wol POST, /status
+# advertises `waking: true` for this long while the home is still down, so ANY
+# open PWA — not just the device that fired the wake — can show the boot
+# countdown. Cleared implicitly once the home answers (an `up` verdict wins).
+# Sized a bit above a typical J5005 cold boot (~80 s) plus slack.
+WAKE_SIGNAL_TTL_S = int(os.environ.get("WAKE_SIGNAL_TTL_S", "150"))
+# Usage-log dedupe window: a given client-id's /status poll is logged at most
+# once per this interval, turning the 8 s self-healing poll of every open PWA
+# into a coarse "PWA was open around time T on device X" signal without flooding
+# journalctl. In-memory, bounded like the rate limiter.
+USAGE_LOG_DEDUPE_S = int(os.environ.get("USAGE_LOG_DEDUPE_S", "600"))
+
 # Optional scheduled-uptime window, e.g. "13h50-00h10" (also accepts
 # "13:50-00:10"; may wrap past midnight). When set, it's echoed verbatim in
 # every /status response as "window" and the PWA adopts it automatically —
@@ -98,6 +110,13 @@ RATE_LIMIT_MAX_REQ = 10
 MAX_TRACKED_IPS = 4096
 _rate_lock = threading.Lock()
 _rate_state: dict[str, deque] = defaultdict(deque)
+
+# Wake-state shared between POST /wol (writer) and GET /status (reader).
+# uvicorn runs a single worker (see wol-relay.service) so a module global is
+# coherent without locking — a stale read at worst flips `waking` one poll late.
+_last_wol_at: float = 0.0
+# client-id -> monotonic ts of its last logged /status open (usage dedupe).
+_usage_seen: dict[str, float] = {}
 
 logging.basicConfig(
     level=logging.INFO,
@@ -135,6 +154,51 @@ def client_ip(request: Request) -> str:
     if real:
         return real.strip()
     return request.client.host if request.client else "unknown"
+
+
+_UA_RULES = (
+    (("iphone", "ipad", "ipod"), "ios"),
+    (("android",), "android"),
+    (("windows",), "windows"),
+    (("macintosh", "mac os"), "mac"),
+    (("linux",), "linux"),
+)
+
+
+def device_class(ua: str | None) -> str:
+    # Coarse device bucket from the User-Agent, for the usage / "who woke it"
+    # audit log. Never parsed for any logic — purely an admin-facing hint.
+    ua = (ua or "").lower()
+    for needles, name in _UA_RULES:
+        if any(n in ua for n in needles):
+            return name
+    return "other"
+
+
+def clean_cid(raw: str | None) -> str:
+    # The X-Client-Id is an opaque random UUID the PWA persists in localStorage.
+    # Not a secret and carries no PII, but it IS client-controlled and lands in
+    # logs, so constrain it to a safe charset + length (anti log-injection).
+    return re.sub(r"[^A-Za-z0-9-]", "", (raw or "")[:36]) or "-"
+
+
+def note_usage(cid: str, ua: str | None, ip: str) -> None:
+    # Coarse usage telemetry: log a client's /status open at most once per
+    # USAGE_LOG_DEDUPE_S so "PWA open" hours show in journalctl without a line
+    # every 8 s. In-memory, bounded; only token-authenticated callers reach this
+    # (the /status token check runs first), so the key space is the family's
+    # devices, not the open internet.
+    if cid == "-":
+        return
+    now = time.monotonic()
+    if now - _usage_seen.get(cid, 0.0) < USAGE_LOG_DEDUPE_S:
+        return
+    _usage_seen[cid] = now
+    if len(_usage_seen) > MAX_TRACKED_IPS:
+        cutoff = now - USAGE_LOG_DEDUPE_S
+        for k in [k for k, t in _usage_seen.items() if t < cutoff]:
+            _usage_seen.pop(k, None)
+    logger.info("open ip=%s device=%s cid=%s", ip, device_class(ua), cid)
 
 
 def rate_limited(ip: str) -> bool:
@@ -360,8 +424,18 @@ async def status(request: Request, x_token: str | None = Header(None)):
                 "stale": success_age > STATUS_CACHE_FRESH_S,
                 "age_s": int(success_age),
             }
+    # Wake-in-progress: advertise a recently-fired /wol so every open PWA can
+    # show the boot countdown, not just the device that initiated it. Only while
+    # still down — once up, the green verdict drives the UI and the signal is moot.
+    if not body["up"] and _last_wol_at:
+        wake_age = time.monotonic() - _last_wol_at
+        if wake_age < WAKE_SIGNAL_TTL_S:
+            body["waking"] = True
+            body["wake_age_s"] = int(wake_age)
     if UPTIME_WINDOW:
         body["window"] = UPTIME_WINDOW
+    note_usage(clean_cid(request.headers.get("x-client-id")),
+               request.headers.get("user-agent"), client_ip(request))
     return JSONResponse(
         content=body,
         headers={"Cache-Control": "public, max-age=5"},
@@ -398,5 +472,9 @@ def wol(req: WolReq, request: Request, x_token: str = Header(...)):
                 time.sleep(PACKET_GAP_S)
     finally:
         s.close()
-    logger.info("wol ip=%s status=200", ip)
+    global _last_wol_at
+    _last_wol_at = time.monotonic()
+    logger.info("wol ip=%s device=%s cid=%s status=200", ip,
+                device_class(request.headers.get("user-agent")),
+                clean_cid(request.headers.get("x-client-id")))
     return {"sent": True, "to": target_ip, "port": TARGET_PORT, "repeats": PACKET_REPEATS}

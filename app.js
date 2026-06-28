@@ -13,6 +13,12 @@ var relayReachable=true;
 // misses across two ticks, which painted a false "relais off" on cold open.
 var relayMissStreak=0;
 var wolStartTime=0,wolPollTimer=null,wolRetryTimers=[];
+// v8.25 — true while a wake fired from ANOTHER device (or an earlier session of
+// ours) is in progress, surfaced by the relay's /status `waking` flag. Distinct
+// from wolSent (this session initiated the wake): remoteWaking shows the same
+// boot countdown WITHOUT firing our own retry POSTs. Cleared on the next settle
+// (setOnline / setOffline) and on startApp.
+var remoteWaking=false;
 // v8.10 — epoch ms of the last confident-verdict paint (setOnline / setOffline,
 // live probe settle or cache pre-paint). Read by the checkStatus() staleness
 // guard: a confirmed on-screen verdict older than STATUS_LOCAL_TTL_MS no longer
@@ -173,6 +179,22 @@ var APP_CATALOG={
   plexweb:    {url:'https://app.plex.tv', label:'Regarder sur Plex',  subText:'app.plex.tv', icon:'▶', cls:'plex', gated:true}
 };
 
+// v8.25 — stable opaque per-device id, generated once and persisted. Sent as
+// X-Client-Id on /status and /wol so the relay's audit log can distinguish
+// devices (which one woke the server, when the PWA is open) WITHOUT any account
+// or PII — it's a random UUID, not a secret. crypto.randomUUID needs a secure
+// context (GitHub Pages is HTTPS); the fallback covers file:// / old engines.
+var CLIENT_ID_KEY='plex-jqh-omv-cid';
+function getClientId(){
+  try{
+    var c=localStorage.getItem(CLIENT_ID_KEY);
+    if(c)return c;
+    c=(window.crypto&&crypto.randomUUID)?crypto.randomUUID():('cid-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,10));
+    localStorage.setItem(CLIENT_ID_KEY,c);
+    return c;
+  }catch(e){return '';}
+}
+var CLIENT_ID=getClientId();
 function loadConfig(){try{var r=localStorage.getItem('plex-jqh-omv-cfg');if(r)return JSON.parse(r)}catch(e){}return null}
 function storeConfig(c){try{localStorage.setItem('plex-jqh-omv-cfg',JSON.stringify(c))}catch(e){}}
 function cleanMac(m){return m.replace(/[:\-\s]/g,'').toLowerCase()}
@@ -471,7 +493,7 @@ function startApp(){
   clearWolPoll();
   clearWolRetries();
   releaseWakeLock();
-  isOnline=false;wolSent=false;checking=false;checkStartedAt=0;relayReachable=true;relayMissStreak=0;hasConfirmedState=false;
+  isOnline=false;wolSent=false;remoteWaking=false;checking=false;checkStartedAt=0;relayReachable=true;relayMissStreak=0;hasConfirmedState=false;
   downStreak=0;if(downRecheckTimer){clearTimeout(downRecheckTimer);downRecheckTimer=null;}
   // Reuse the localStorage cache (<60 s) for an instant paint so back-to-back
   // reopens don't strobe orange. v8.7: only an "up" cache is pre-painted (the
@@ -548,7 +570,10 @@ function fetchStatusFromRelay(){
   // v8.17 — /status is token-protected on the relay (same shared token as
   // /wol). Send it when configured; without a token the relay answers 401,
   // which lands on the answered-rejection path → direct-home fallback.
-  var opts=config.token?{headers:{'X-Token':config.token}}:undefined;
+  // v8.25 — always send X-Client-Id (device telemetry); add X-Token when set.
+  var headers={'X-Client-Id':CLIENT_ID};
+  if(config.token)headers['X-Token']=config.token;
+  var opts={headers:headers};
   return fetchOnce(config.relay+'/status',opts).then(function(r){
     if(!r.ok)return answered('HTTP '+r.status);
     return r.json().catch(function(){return answered('bad json');});
@@ -635,6 +660,14 @@ function checkStatus(){
     if(res.up){
       writeLocalStatus(true,relayReachable);
       setOnline();
+    }else if(res.waking&&!wolSent){
+      // v8.25 — a wake fired elsewhere (another device, or an earlier session of
+      // ours) is in progress per the relay. Show the boot countdown without
+      // firing our own POSTs; the normal poll flips to green when the home
+      // answers, or to the down path once the relay's waking signal expires.
+      // Takes priority over the down-confirmation: waking is a confident
+      // "it's coming up" signal, so don't paint red underneath it.
+      enterRemoteWaking(res.wakeAgeS);
     }else if(++downStreak>=DOWN_CONFIRM){
       writeLocalStatus(false,relayReachable);
       setOffline();
@@ -694,7 +727,10 @@ function probe(){
   return fetchStatusFromRelay().then(
     // v8.12 — pass the relay-served uptime window through (see the adoption
     // logic in checkStatus): the relay is the admin-controlled config channel.
-    function(j){return {up:j.up,relayReachable:true,window:(typeof j.window==='string'?j.window:null)};},
+    // v8.25 — thread the relay's wake-in-progress signal through (see the
+    // remoteWaking branch in checkStatus): `waking` true while a /wol fired
+    // recently and the home is still down, `wake_age_s` its age for the ETA.
+    function(j){return {up:j.up,relayReachable:true,window:(typeof j.window==='string'?j.window:null),waking:j.waking===true,wakeAgeS:(typeof j.wake_age_s==='number'?j.wake_age_s:0)};},
     function(err){
       var relayUp=!!(err&&err.answered);
       return fetchHomeDirectly().then(
@@ -741,6 +777,7 @@ function setFallbackState(){
 
 function setOnline(){
   isOnline=true;
+  remoteWaking=false;
   hasConfirmedState=true;
   lastVerdictAtMs=Date.now();
   // v8.7 — green cancels any in-progress down-confirmation (streak + pending
@@ -790,24 +827,50 @@ function setStarting(){
   document.getElementById('statusSub').textContent='réveil en cours';
 }
 
+// v8.25 — render a wake THIS device didn't initiate (relay `waking`). Mirror the
+// local-wake "Démarrage…" view + boot countdown, but never touch the retry-POST
+// machinery (we didn't fire). Idempotent across polls: while waking persists each
+// poll re-enters here, but the countdown is only (re)armed when none is running.
+// The user can still tap the power button (sendWol re-fires harmlessly — extra
+// magic packets, idempotent). Cleared on the green/red settle.
+function enterRemoteWaking(wakeAgeS){
+  hasConfirmedState=true;lastVerdictAtMs=Date.now();
+  downStreak=0;if(downRecheckTimer){clearTimeout(downRecheckTimer);downRecheckTimer=null;}
+  remoteWaking=true;
+  setStarting();
+  if(config.mac){
+    var pBtn=document.getElementById('powerBtn'),pLbl=document.getElementById('powerLabel');
+    pBtn.className='power-btn sent';pLbl.className='power-label sent';
+  }
+  if(!countdownTimer){
+    var elapsedMs=(wakeAgeS>0?wakeAgeS:0)*1000;
+    wolStartTime=Date.now()-elapsedMs;
+    startCountdown(elapsedMs);
+  }
+}
+
 var countdownTimer=null,countdownEndsAt=0,wolEtaMs=0;
-function startCountdown(){
+// elapsedMs (default 0) = how far into the boot we already are. 0 for a fresh
+// local wake; >0 when adopting an in-progress remote wake (relay `wake_age_s`),
+// so the countdown + progress bar start from the right position instead of 0.
+function startCountdown(elapsedMs){
   stopCountdown();
   var etaMs=getEta();
   wolEtaMs=etaMs;
-  countdownEndsAt=Date.now()+etaMs;
+  elapsedMs=Math.min(Math.max(elapsedMs||0,0),etaMs);
+  countdownEndsAt=Date.now()+(etaMs-elapsedMs);
   var pl=document.getElementById('powerLabel');
   var bar=document.getElementById('powerProgressBar');
   var box=document.getElementById('powerProgress');
   box.classList.add('active');
-  // Reset to 0 then animate to 100% over etaMs. Force a reflow between the two
-  // width assignments so the browser registers the start state before the
-  // transition begins — otherwise the second assignment collapses with the
-  // first and the bar jumps to 100% with no animation.
+  // Snap to the already-elapsed ratio then animate the remaining time. Force a
+  // reflow between the two width assignments so the browser registers the start
+  // state before the transition begins — otherwise the second assignment
+  // collapses with the first and the bar jumps with no animation.
   bar.style.transition='none';
-  bar.style.width='0%';
+  bar.style.width=(etaMs?elapsedMs/etaMs*100:0)+'%';
   void bar.offsetWidth;
-  bar.style.transition='width '+(etaMs/1000)+'s linear';
+  bar.style.transition='width '+((etaMs-elapsedMs)/1000)+'s linear';
   bar.style.width='100%';
   // Three labels by elapsed time. Past T=0 we used to leave "presque prêt"
   // displayed for up to 5 min (the WoL_TIMEOUT_MS) which made the family
@@ -816,7 +879,7 @@ function startCountdown(){
   // slower than usual — gives the user information without crying wolf.
   var tick=function(){
     var diff=Math.round((countdownEndsAt-Date.now())/1000);
-    if(isOnline||!wolSent){stopCountdown();return;}
+    if(isOnline||(!wolSent&&!remoteWaking)){stopCountdown();return;}
     if(diff<-30)pl.textContent='Démarrage long…';
     else if(diff<=0)pl.textContent='Réveil… presque prêt';
     else pl.textContent='Réveil… environ '+diff+'s';
@@ -848,7 +911,7 @@ function postWol(isRetry){
   fetch(config.relay+'/wol',{
     method:'POST',
     cache:'no-store',
-    headers:{'Content-Type':'application/json','X-Token':config.token},
+    headers:{'Content-Type':'application/json','X-Token':config.token,'X-Client-Id':CLIENT_ID},
     body:JSON.stringify({mac:macToColon(config.mac)})
   }).then(function(r){
     if(r.ok||isRetry)return;
@@ -874,6 +937,7 @@ function postWol(isRetry){
 
 function setOffline(){
   isOnline=false;
+  remoteWaking=false;
   hasConfirmedState=true;
   lastVerdictAtMs=Date.now();
   // v8.7 — reaching setOffline means red is committed (either DOWN_CONFIRM live
@@ -885,6 +949,11 @@ function setOffline(){
   // While a WoL request is being processed, keep the "starting" state — a red
   // "offline" card next to the spinning power button is contradictory.
   if(wolSent){setStarting();return;}
+  // v8.25 — past the wolSent guard a real red is being committed (wolSent is
+  // false here). Stop any countdown left running by an expired remote wake so
+  // the progress bar clears with the red paint rather than on the next tick.
+  // Safe: it cannot kill a local-wake countdown (that path returns above).
+  stopCountdown();
   // v8.11 — window-aware red. Outside the configured uptime window a red is
   // the EXPECTED nightly shutdown: say so ("Éteint (prévu)" + the auto-wake time)
   // instead of the alarming "Hors ligne", so the family doesn't read a
@@ -1072,7 +1141,7 @@ function onForeground(){
   // ending etaMs+(suspend_duration) later than the text countdown. Resync
   // it explicitly: snap to the elapsed-ratio position, then re-arm a fresh
   // transition for the remaining ms.
-  if(wolSent&&countdownTimer&&wolStartTime&&wolEtaMs){
+  if((wolSent||remoteWaking)&&countdownTimer&&wolStartTime&&wolEtaMs){
     var elapsed=Date.now()-wolStartTime;
     var ratio=Math.min(1,Math.max(0,elapsed/wolEtaMs));
     var remainingMs=Math.max(0,countdownEndsAt-Date.now());

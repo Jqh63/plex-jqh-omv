@@ -20,6 +20,22 @@ removing the need for a parallel direct-to-home probe (cf. ADR
 knowledge base). The relay polls the home via HEAD on a configurable
 `STATUS_TARGET_URL`, with a 5 s fresh / 60 s stale in-memory cache.
 
+**Shared wake-state** (since 2026-06): after a `POST /wol`, `/status` also
+returns `waking: true` + `wake_age_s` for `WAKE_SIGNAL_TTL_S` (default 150 s)
+while the home is still down. This lets *any* open PWA — not just the device
+that fired the wake — show the boot countdown, and deduplicates a wake across
+devices. The signal clears implicitly once the home answers (`up` wins).
+
+**Device / usage telemetry** (log-only, no persistence): the PWA sends an opaque
+`X-Client-Id` (a random UUID it persists locally — not a secret, no PII) on
+`/status` and `/wol`. The relay derives a coarse device class from the
+`User-Agent` and logs `wol ip=… device=… cid=… status=200` per wake, plus a
+deduped `open ip=… device=… cid=…` per client at most once every
+`USAGE_LOG_DEDUPE_S` (default 600 s) on `/status` — so "who woke it / when is the
+PWA open, on what kind of device" is visible via `journalctl -u wol-relay`
+without flooding. The client-id is charset/length-constrained before logging
+(anti log-injection). No MAC or token is ever logged.
+
 ## Files in this folder
 
 | File | Runtime destination | Role |
@@ -45,7 +61,9 @@ each owned by the relevant service user:
   `ALLOWED_MAC`, `WOL_TOKEN`, `TARGET_HOST`, `TARGET_PORT`. Optional:
   `STATUS_TARGET_URL` (enables `/status`),
   `STATUS_POLL_FIRST_TIMEOUT_S`/`STATUS_POLL_RETRY_TIMEOUT_S`/`STATUS_CACHE_FRESH_S`/`STATUS_CACHE_STALE_S`
-  (tuning), `UPTIME_WINDOW` (e.g. `13h50-00h10` or `13:50-00:10` —
+  (tuning), `WAKE_SIGNAL_TTL_S` (how long `/status` advertises `waking` after a
+  wake, default 150 s), `USAGE_LOG_DEDUPE_S` (min interval between `open` log
+  lines per client, default 600 s), `UPTIME_WINDOW` (e.g. `13h50-00h10` or `13:50-00:10` —
   echoed as a `window` field in `/status`; the PWA adopts it
   automatically, so every user gets the scheduled-uptime "En veille"
   display without a new URL. Validated at startup — a malformed value

@@ -15,6 +15,7 @@
 #   ssh wol-relay-deploy health            # curl http://127.0.0.1:8000/health
 #   ssh wol-relay-deploy logs-wol-relay    # journalctl -u wol-relay -n 100 (read-only)
 #   ssh wol-relay-deploy logs-caddy        # journalctl -u caddy -n 100 (read-only)
+#   ssh wol-relay-deploy telemetry         # device/usage audit lines, last 3000 (read-only)
 #
 # home-watch (external homelab monitor, content pushed in from the private
 # knowledge-base repo — never stored here):
@@ -110,6 +111,16 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
     # user isn't in the systemd-journal group; the sudoers entry pins
     # the exact arg vector (no user-controlled flags, fixed -n 100).
     sudo /usr/bin/journalctl -u wol-relay -n 100 --no-pager
+    ;;
+  telemetry)
+    # Read-only usage/device view: the last 3000 journal lines filtered to the
+    # telemetry audit lines (per-wake `device=`/`cid=` and the deduped `open`
+    # lines). Wider + cleaner than logs-wol-relay's raw -n 100 for eyeballing
+    # "who woke it / when is the PWA open, on what device". grep runs unprivileged
+    # after the sudo journalctl; `|| true` so an empty match (no telemetry yet)
+    # isn't a pipefail-driven non-zero exit. The -n 3000 arg is fixed (no
+    # user-controlled flags) and pinned in the sudoers entry.
+    sudo /usr/bin/journalctl -u wol-relay -n 3000 --no-pager | grep -E 'device=|open ip=' || true
     ;;
   logs-caddy)
     sudo /usr/bin/journalctl -u caddy -n 100 --no-pager
@@ -208,7 +219,7 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
     ;;
   *)
     echo "dispatch.sh: unknown command '${SSH_ORIGINAL_COMMAND:-}'" >&2
-    echo "Expected: push-app, push-caddyfile, push-service, apply, status, health, logs-wol-relay, logs-caddy," >&2
+    echo "Expected: push-app, push-caddyfile, push-service, apply, status, health, logs-wol-relay, logs-caddy, telemetry," >&2
     echo "          push-home-watch{,-service,-timer}, apply-home-watch, home-watch-status, logs-home-watch," >&2
     echo "          push-pock-sync-{app,service}, apply-pock-sync, pock-sync-status, logs-pock-sync, pock-dump," >&2
     echo "          pat-receive {daily,weekly}, pat-list, pat-dump-latest." >&2

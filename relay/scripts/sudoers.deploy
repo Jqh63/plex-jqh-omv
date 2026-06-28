@@ -12,8 +12,9 @@
 #   - systemctl daemon-reload (needed when wol-relay.service changes)
 #   - systemctl restart wol-relay
 #   - systemctl reload caddy
-#   - journalctl read-only tail (-n 100 --no-pager, fixed args) on the
-#     two services this VM runs, for the dispatch.sh logs-* subcommands
+#   - journalctl read-only tail (fixed args, no user-controlled flags) on the
+#     two services this VM runs: -n 100 for the dispatch.sh logs-* subcommands,
+#     plus -n 3000 on wol-relay for the `telemetry` subcommand (device/usage view)
 #
 # Note: do NOT add `deploy` to the `sudo` group nor authorise arbitrary
 # verbs — the forced-command + minimal sudoers isolation is the whole
@@ -31,7 +32,8 @@ Cmnd_Alias WOL_RELAY_SYSTEMCTL = \
 
 Cmnd_Alias WOL_RELAY_LOGS = \
   /usr/bin/journalctl -u wol-relay -n 100 --no-pager, \
-  /usr/bin/journalctl -u caddy -n 100 --no-pager
+  /usr/bin/journalctl -u caddy -n 100 --no-pager, \
+  /usr/bin/journalctl -u wol-relay -n 3000 --no-pager
 
 # home-watch — external homelab monitor (apply-home-watch / logs-home-watch).
 # Same isolation: exact verbs, literal paths, no wildcards. (daemon-reload is

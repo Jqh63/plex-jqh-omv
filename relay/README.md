@@ -125,11 +125,19 @@ ssh wol-relay-deploy status         # systemctl is-active wol-relay caddy
 ssh wol-relay-deploy health         # curl http://127.0.0.1:8000/health
 ssh wol-relay-deploy logs-wol-relay # journalctl -u wol-relay -n 100 --no-pager
 ssh wol-relay-deploy logs-caddy     # journalctl -u caddy -n 100 --no-pager
+ssh wol-relay-deploy telemetry      # last 3000 lines filtered to device=/open= telemetry
+ssh wol-relay-deploy logs-wol-relay | grep -E 'device=|open ip='  # same, client-side, no VM change
 ssh wol-relay-deploy push-app < relay/app.py             # stage only
 ssh wol-relay-deploy push-caddyfile < relay/Caddyfile    # stage only
 ssh wol-relay-deploy push-service < relay/wol-relay.service
 ssh wol-relay-deploy apply          # install + restart (run push-* first)
 ```
+
+> **Deploying `dispatch.sh` / `sudoers.deploy` changes** (e.g. the `telemetry`
+> route above) is **not** done by `deploy.sh` — those files are installed by
+> `bootstrap-wol-relay.sh`. Re-run the bootstrap on the VM (admin via Cloud
+> Shell, idempotent) to pick up a new subcommand or sudoers entry. App/Caddy/
+> service changes go through `deploy.sh` as usual.
 
 Security by construction: forced-command `dispatch.sh` on the VM
 (static enum whitelist, no free-form parsing), minimal sudoers

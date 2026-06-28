@@ -177,6 +177,9 @@ GET /status
         + "window":str   if the relay has UPTIME_WINDOW set (adopted by the PWA)
         + "waking":true, "wake_age_s":int   while a recent POST /wol is booting the
           home and it's not up yet — lets any open PWA show the wake countdown
+        + "eta_s":int   canonical boot ETA (median of relay-measured boot times) —
+          every open PWA seeds its wake countdown from it, so the timer is synced
+          across devices
   → 503 if the relay has no STATUS_TARGET_URL configured
 
 GET /health

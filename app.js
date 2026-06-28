@@ -165,7 +165,12 @@ var APP_CATALOG={
   overseerr:  {sub:'overseerr',  label:'Demander un film / une série', icon:'🎬', cls:'seerr'},
   jellyseerr: {sub:'jellyseerr', label:'Demander un film / une série', icon:'🎬', cls:'seerr'},
   jellyfin:   {sub:'jellyfin',   label:'Regarder sur Jellyfin',        icon:'▶',  cls:'plex'},
-  plexweb:    {url:'https://app.plex.tv', label:'Regarder sur Plex',  subText:'app.plex.tv', icon:'▶', cls:'plex'}
+  // `gated`: an external app.url link that should STILL be blocked while the
+  // home server is offline. app.plex.tv loads fine on its own, but with the
+  // server down it just lands the user on Plex's own "server unavailable"
+  // screen — bypassing the PWA's friendly "wake it first" toast. Gating it
+  // makes the offline behaviour consistent with the server-hosted links.
+  plexweb:    {url:'https://app.plex.tv', label:'Regarder sur Plex',  subText:'app.plex.tv', icon:'▶', cls:'plex', gated:true}
 };
 
 function loadConfig(){try{var r=localStorage.getItem('plex-jqh-omv-cfg');if(r)return JSON.parse(r)}catch(e){}return null}
@@ -382,8 +387,11 @@ function buildLinks(){
     a.rel='noopener';
     a.href=app.url||('https://'+(app.sub?app.sub+'.'+config.host:config.host));
     // Sub-based links live on the user's server; external app.url links don't.
-    // Grey out + block clicks on the former when the server is offline.
-    if(!app.url){
+    // Grey out + block clicks on the former when the server is offline — plus
+    // any `gated` external link (e.g. app.plex.tv) whose target is useless
+    // until the home server is up. The href stays app.url, so once online the
+    // click handler returns early and the link opens normally.
+    if(!app.url||app.gated){
       a.classList.add('server-dependent');
       if(!isOnline)a.classList.add('offline');
       a.addEventListener('click',function(e){

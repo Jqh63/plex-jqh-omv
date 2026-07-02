@@ -513,7 +513,16 @@ def wol(req: WolReq, request: Request, x_token: str = Header(...)):
     finally:
         s.close()
     global _last_wol_at, _wake_pending
-    _last_wol_at = time.monotonic()
+    # Anchor the boot-time measurement to the FIRST POST of a wake cycle. The
+    # PWA fires ~4 retry POSTs over ~60 s to cover UDP loss; if each reset the
+    # anchor, boot_ms (_poll_home_and_update) would measure only the
+    # last-retry->up gap (~14 s) instead of the true ~75 s boot, dragging the
+    # shared eta_s far below reality. Reset only for a genuinely new cycle:
+    # none pending, or the pending one is older than the wake-signal TTL (a
+    # stale/failed wake). Also keeps wake_age_s anchored for cross-device adopt.
+    now = time.monotonic()
+    if not _wake_pending or (now - _last_wol_at) > WAKE_SIGNAL_TTL_S:
+        _last_wol_at = now
     _wake_pending = True
     logger.info("wol ip=%s device=%s cid=%s status=200", ip,
                 device_class(request.headers.get("user-agent")),

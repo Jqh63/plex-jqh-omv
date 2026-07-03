@@ -658,7 +658,11 @@ function checkStatus(){
   // in-flight signal. v8.29 — we used to flip the sub to "vérification…" on every
   // 8 s poll, which strobed the subtitle back and forth under a steady green.
   // Orange "Vérification…" only appears when nothing is known yet (cold open).
-  if(!hasConfirmedState){
+  // v8.30 — never clobber during an active wake: setStarting() painted the
+  // "Démarrage…" card but doesn't set hasConfirmedState, so on a cold-open wake
+  // each 5 s WoL poll fell into this branch and strobed "Démarrage…" ⇄
+  // "Vérification…". The countdown UI owns the card while wolSent/remoteWaking.
+  if(!hasConfirmedState&&!wolSent&&!remoteWaking){
     document.getElementById('statusDot').className='status-dot checking';
     document.getElementById('statusCard').className='status-card';
     label.textContent='Vérification...';sub.textContent='ping en cours';

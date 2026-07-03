@@ -33,11 +33,15 @@ var hasConfirmedState=false;
 // il y a Xs" line under the status card, refreshed by the 1 s poll. Makes the
 // trust level of the on-screen verdict visible (the stale-green saga taught us
 // the verdict's AGE is information the user needs, not just its color).
+// v8.29 — coarse buckets on purpose. In nominal green lastVerdictAtMs is rewritten
+// every 8 s poll, so a per-second label just oscillated 0→8 s forever (the churn
+// the user saw). Buckets keep the line stable at "à l'instant" while the verdict
+// is fresh and only speak up once it genuinely ages (device slept through polls).
 function fmtAge(ms){
   var s=Math.round(ms/1000);
-  if(s<5)return "à l'instant";
-  if(s<60)return 'il y a '+s+' s';
-  var m=Math.floor(s/60);
+  if(s<30)return "à l'instant";
+  if(s<90)return "il y a moins d'une minute";
+  var m=Math.round(s/60);
   if(m<60)return 'il y a '+m+' min';
   return 'il y a +1 h';
 }
@@ -649,11 +653,12 @@ function checkStatus(){
   // unavailable (private mode) and a settled verdict is written every poll, so
   // the variable is strictly fresher and storage-independent.
   if(hasConfirmedState&&Date.now()-lastVerdictAtMs>STATUS_LOCAL_TTL_MS)hasConfirmedState=false;
-  // Keep the prior visual when we already have a confirmed (or cached)
-  // state; orange "Vérification…" only appears when nothing is known yet.
-  if(hasConfirmedState){
-    sub.textContent='vérification…';
-  }else{
+  // Keep the prior visual when we already have a confirmed (or cached) state:
+  // the card text is left UNTOUCHED and the spinning refresh button is the only
+  // in-flight signal. v8.29 — we used to flip the sub to "vérification…" on every
+  // 8 s poll, which strobed the subtitle back and forth under a steady green.
+  // Orange "Vérification…" only appears when nothing is known yet (cold open).
+  if(!hasConfirmedState){
     document.getElementById('statusDot').className='status-dot checking';
     document.getElementById('statusCard').className='status-card';
     label.textContent='Vérification...';sub.textContent='ping en cours';

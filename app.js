@@ -430,8 +430,18 @@ function buildLinks(){
   parseApps(config.apps||'seerr,plexweb').forEach(function(app){
     var a=document.createElement('a');
     a.className='link-btn';
-    a.target='_blank';
-    a.rel='noopener';
+    // Server-hosted apps (Seerr…, sub-based, no app.url) must open as a
+    // top-level navigation, NOT target="_blank". From an installed PWA,
+    // _blank lands in an ephemeral in-app browser context with its own
+    // cookie jar, so the app's login session never persists → relogin on
+    // every visit (reported on both iOS standalone Safari and Android S24).
+    // A top-level nav breaks out to the real browser, whose persistent
+    // cookie jar keeps the session. External links (app.url) keep _blank so
+    // the launcher stays available behind them.
+    if(app.url){
+      a.target='_blank';
+      a.rel='noopener';
+    }
     a.href=app.url||('https://'+(app.sub?app.sub+'.'+config.host:config.host));
     // Sub-based links live on the user's server; external app.url links don't.
     // Grey out + block clicks on the former when the server is offline — plus

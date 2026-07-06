@@ -1133,7 +1133,11 @@ if('serviceWorker' in navigator){
 // (which may need scrolling on short viewports).
 (function(){
   var lpTimer=null;
-  var start=function(e){if(e.cancelable)e.preventDefault();lpTimer=setTimeout(function(){window.open('debug.html','_blank','noopener');},2000);};
+  // Navigate top-level instead of window.open: from a setTimeout the popup
+  // has lost user activation, so iOS Safari blocks window.open (worked on
+  // Android, not Apple). location.href is a same-origin navigation — no
+  // popup, no activation requirement, fires reliably from the timer.
+  var start=function(e){if(e.cancelable)e.preventDefault();lpTimer=setTimeout(function(){window.location.href='debug.html';},2000);};
   var cancel=function(){if(lpTimer){clearTimeout(lpTimer);lpTimer=null;}};
   document.querySelectorAll('.header h1').forEach(function(el){
     el.addEventListener('pointerdown',start);

@@ -131,8 +131,11 @@
   .install-hint{width:100%;background:var(--surface);border:1px solid var(--accent);border-radius:12px;padding:12px 16px;font-size:12px;color:var(--text-dim);text-align:center;display:none}
   .install-hint strong{color:var(--text)}
 
+  .section{display:flex;flex-direction:column;gap:16px;width:100%}
+  .section-title{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--text-dim);opacity:.75;border-bottom:1px solid var(--border);padding-bottom:7px}
   .field{display:flex;flex-direction:column;gap:6px;width:100%}
   .field label{font-size:13px;font-weight:500;color:var(--text-dim)}
+  .field label .req{font-size:11px;font-weight:600;color:var(--accent)}
   .field input{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px 16px;color:var(--text);font-family:'JetBrains Mono',monospace;font-size:14px;outline:none;transition:border-color .2s;-webkit-user-select:text;user-select:text;width:100%}
   .field input:focus{border-color:var(--accent)}
   .field input::placeholder{color:var(--text-dim);opacity:.5}
@@ -163,50 +166,59 @@
     <h2 style="font-size:20px;font-weight:700">Configuration</h2>
     <p>Paramètres de connexion</p>
   </div>
-  <div class="field">
-    <label for="cfgTitle">Titre <span style="font-size:11px;font-weight:400;opacity:.6">(optionnel)</span></label>
-    <input type="text" id="cfgTitle" placeholder="Mon serveur" autocomplete="off">
+  <div class="section">
+    <div class="section-title">Serveur</div>
+    <div class="field">
+      <label for="cfgTitle">Titre <span style="font-size:11px;font-weight:400;opacity:.6">(optionnel)</span></label>
+      <input type="text" id="cfgTitle" placeholder="Mon serveur" autocomplete="off">
+    </div>
+    <div class="field">
+      <label for="cfgHost">Domaine <span class="req">(requis)</span></label>
+      <input type="text" id="cfgHost" placeholder="monserveur.exemple.com" autocomplete="off" autocapitalize="off">
+    </div>
   </div>
-  <div class="field">
-    <label for="cfgHost">Domaine</label>
-    <input type="text" id="cfgHost" placeholder="monserveur.exemple.com" autocomplete="off" autocapitalize="off">
+  <div class="section">
+    <div class="section-title">Réveil (Wake-on-LAN)</div>
+    <div class="field">
+      <label for="cfgMac">Adresse MAC <span style="font-size:11px;font-weight:400;opacity:.6">(optionnel — WoL)</span></label>
+      <input type="text" id="cfgMac" placeholder="AABBCCDDEEFF" autocomplete="off" autocapitalize="off">
+    </div>
+    <div class="field">
+      <label for="cfgPort">Port WoL</label>
+      <input type="number" id="cfgPort" placeholder="9" autocomplete="off">
+    </div>
+    <div class="field">
+      <label for="cfgIp">IP du serveur <span style="font-size:11px;font-weight:400;opacity:.6">(optionnel — utilisée en cas de panne DNS sur le domaine)</span></label>
+      <input type="text" id="cfgIp" placeholder="192.0.2.1" autocomplete="off" autocapitalize="off" inputmode="numeric">
+      <span class="hint">Affichée sur la page de réveil manuel comme alternative au domaine</span>
+    </div>
+    <div class="field">
+      <label for="cfgRelay">Relais WoL <span style="font-size:11px;font-weight:400;opacity:.6">(optionnel — URL HTTPS)</span></label>
+      <input type="url" id="cfgRelay" placeholder="https://wol.exemple.com" autocomplete="off" autocapitalize="off">
+      <span class="hint">URL du relais self-hosted qui envoie le magic packet (laisser vide si pas de WoL)</span>
+    </div>
+    <div class="field">
+      <label for="cfgToken">Token relais <span style="font-size:11px;font-weight:400;opacity:.6">(optionnel)</span></label>
+      <input type="password" id="cfgToken" placeholder="" autocomplete="off">
+      <span class="hint">Secret partagé envoyé au relais (header X-Token)</span>
+    </div>
+    <div class="field">
+      <button class="test-btn" id="testRelayBtn" type="button">Tester le relais</button>
+      <div id="relayTestStatus" class="test-status"></div>
+    </div>
   </div>
-  <div class="field">
-    <label for="cfgMac">Adresse MAC <span style="font-size:11px;font-weight:400;opacity:.6">(optionnel — WoL)</span></label>
-    <input type="text" id="cfgMac" placeholder="AABBCCDDEEFF" autocomplete="off" autocapitalize="off">
-  </div>
-  <div class="field">
-    <label for="cfgPort">Port WoL</label>
-    <input type="number" id="cfgPort" placeholder="9" autocomplete="off">
-  </div>
-  <div class="field">
-    <label for="cfgIp">IP du serveur <span style="font-size:11px;font-weight:400;opacity:.6">(optionnel — utilisée en cas de panne DNS sur le domaine)</span></label>
-    <input type="text" id="cfgIp" placeholder="192.0.2.1" autocomplete="off" autocapitalize="off" inputmode="numeric">
-    <span class="hint">Affichée sur la page de réveil manuel comme alternative au domaine</span>
-  </div>
-  <div class="field">
-    <label for="cfgRelay">Relais WoL <span style="font-size:11px;font-weight:400;opacity:.6">(optionnel — URL HTTPS)</span></label>
-    <input type="url" id="cfgRelay" placeholder="https://wol.exemple.com" autocomplete="off" autocapitalize="off">
-    <span class="hint">URL du relais self-hosted qui envoie le magic packet (laisser vide si pas de WoL)</span>
-  </div>
-  <div class="field">
-    <label for="cfgToken">Token relais <span style="font-size:11px;font-weight:400;opacity:.6">(optionnel)</span></label>
-    <input type="password" id="cfgToken" placeholder="" autocomplete="off">
-    <span class="hint">Secret partagé envoyé au relais (header X-Token)</span>
-  </div>
-  <div class="field">
-    <button class="test-btn" id="testRelayBtn" type="button">Tester le relais</button>
-    <div id="relayTestStatus" class="test-status"></div>
-  </div>
-  <div class="field">
-    <label for="cfgApps">Applications <span style="font-size:11px;font-weight:400;opacity:.6">(optionnel)</span></label>
-    <input type="text" id="cfgApps" placeholder="seerr,jellyfin" autocomplete="off" autocapitalize="off">
-    <span class="hint">Mots-clés séparés par virgule : seerr, overseerr, jellyseerr, jellyfin, plexweb</span>
-  </div>
-  <div class="field">
-    <label for="cfgWindow">Plage d'activité <span style="font-size:11px;font-weight:400;opacity:.6">(optionnel)</span></label>
-    <input type="text" id="cfgWindow" placeholder="13h50-00h10" autocomplete="off" autocapitalize="off">
-    <span class="hint">Si le serveur s'éteint volontairement la nuit : hors plage, l'arrêt s'affiche « Éteint (prévu) » en bleu avec l'heure de réveil auto</span>
+  <div class="section">
+    <div class="section-title">Apps &amp; affichage</div>
+    <div class="field">
+      <label for="cfgApps">Applications <span style="font-size:11px;font-weight:400;opacity:.6">(optionnel)</span></label>
+      <input type="text" id="cfgApps" placeholder="seerr,jellyfin" autocomplete="off" autocapitalize="off">
+      <span class="hint">Mots-clés séparés par virgule : seerr, overseerr, jellyseerr, jellyfin, plexweb</span>
+    </div>
+    <div class="field">
+      <label for="cfgWindow">Plage d'activité <span style="font-size:11px;font-weight:400;opacity:.6">(optionnel)</span></label>
+      <input type="text" id="cfgWindow" placeholder="13h50-00h10" autocomplete="off" autocapitalize="off">
+      <span class="hint">Si le serveur s'éteint volontairement la nuit : hors plage, l'arrêt s'affiche « Éteint (prévu) » en bleu avec l'heure de réveil auto</span>
+    </div>
   </div>
   <div class="button-row">
     <button class="cancel-btn" id="cancelBtn" type="button" style="display:none">Annuler</button>

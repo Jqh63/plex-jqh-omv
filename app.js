@@ -321,6 +321,7 @@ function showSettings(){
   document.getElementById('mainScreen').style.display='none';
   document.getElementById('settingsScreen').style.display='flex';
   document.getElementById('cancelBtn').style.display=config?'block':'none';
+  document.getElementById('backBtn').style.display=config?'flex':'none';
   if(config){
     document.getElementById('cfgTitle').value=config.title||'';
     document.getElementById('cfgMac').value=config.mac||'';
@@ -1254,6 +1255,7 @@ setInterval(function(){
 // "Content-Security-Policy"> in index.html).
 document.getElementById('testRelayBtn').addEventListener('click',function(){testRelay(this);});
 document.getElementById('cancelBtn').addEventListener('click',cancelSettings);
+document.getElementById('backBtn').addEventListener('click',cancelSettings);
 document.getElementById('saveBtn').addEventListener('click',saveConfig);
 document.getElementById('refreshBtn').addEventListener('click',checkStatus);
 document.getElementById('powerBtn').addEventListener('click',sendWol);

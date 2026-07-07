@@ -53,6 +53,8 @@
   .header p{font-size:13px;color:var(--text-dim);font-family:'JetBrains Mono',monospace}
   .back-btn{position:absolute;left:0;top:50%;transform:translateY(-50%);background:none;border:1px solid var(--border);color:var(--text-dim);border-radius:10px;width:40px;height:40px;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:all .2s;-webkit-tap-highlight-color:transparent}
   .back-btn:active{background:var(--surface-hover);color:var(--text)}
+  /* reserve symmetric side room so the centered title never runs under the back arrow */
+  #settingsScreen .header{padding:0 48px}
 
   .status-card{width:100%;background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:16px 20px;display:flex;align-items:center;justify-content:space-between;transition:border-color .5s,box-shadow .5s}
   .status-card.online{border-color:var(--green);box-shadow:0 0 24px var(--green-glow)}

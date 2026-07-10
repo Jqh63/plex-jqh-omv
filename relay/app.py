@@ -320,15 +320,27 @@ class _StatusCache:
     # separately so a streak of failures eventually expires the cached
     # "up" state past STATUS_CACHE_STALE_S.
     last_success_at: float = 0.0
+    # Host reachable but STATUS_TARGET_URL answered 5xx: the box is awake and
+    # its reverse proxy is serving, the probed app behind it is not. Orthogonal
+    # to last_state — a degraded home is an UP home.
+    last_degraded: bool = False
 
 
 _status_cache = _StatusCache()
 _status_poll_lock = asyncio.Lock()
 
 
-async def _poll_home() -> bool:
-    # HEAD + 1 retry. Anything <500 counts as "the host is serving" — the
-    # exact status (200, 302, 401, 444) doesn't matter for liveness.
+async def _poll_home() -> tuple[bool, bool]:
+    # HEAD + 1 retry. Returns (up, degraded).
+    #
+    # ANY HTTP response means the host is serving — it answered the TCP+TLS
+    # handshake and spoke HTTP, which is the only thing WoL cares about. The
+    # status code says nothing about the *host*, only about the app behind the
+    # reverse proxy. A 5xx (typically SWAG's 502 while the probed container is
+    # stopped or still booting) therefore means up=True, degraded=True: don't
+    # send a magic packet to an awake machine, but don't pretend all is well.
+    # Only a transport failure (timeout, DNS, refused) means the home is down.
+    #
     # First attempt gets the cold-handshake budget; retry uses the warm
     # one (by then the TCP+TLS session is up even if the first response
     # was aborted — the handshake bytes hit the wire before the cancel).
@@ -336,11 +348,17 @@ async def _poll_home() -> bool:
     for attempt, timeout in enumerate(timeouts):
         try:
             r = await _http_client.head(STATUS_TARGET_URL, timeout=timeout)
-            return r.status_code < 500
+            degraded = r.status_code >= 500
+            if degraded:
+                logger.warning(
+                    "status target degraded: %s returned %s (host is up)",
+                    STATUS_TARGET_URL, r.status_code,
+                )
+            return True, degraded
         except httpx.HTTPError:
             if attempt == len(timeouts) - 1:
-                return False
-    return False
+                return False, False
+    return False, False
 
 
 def _current_eta_s() -> int:
@@ -360,9 +378,10 @@ async def _poll_home_and_update() -> None:
     # path (cold/expired cache) and the background SWR refresh. Caller holds
     # _status_poll_lock.
     global _wake_pending
-    ok = await _poll_home()
+    ok, degraded = await _poll_home()
     polled_at = time.monotonic()
     _status_cache.last_poll_at = polled_at
+    _status_cache.last_degraded = degraded
     if ok:
         _status_cache.last_state = True
         _status_cache.last_success_at = polled_at
@@ -461,6 +480,10 @@ async def status(request: Request, x_token: str | None = Header(None)):
                 "stale": success_age > STATUS_CACHE_FRESH_S,
                 "age_s": int(success_age),
             }
+            # Only meaningful alongside up=True: the box answers, the probed
+            # app doesn't. The PWA stays green (no pointless WoL) and warns.
+            if _status_cache.last_state and _status_cache.last_degraded:
+                body["degraded"] = True
     # Wake-in-progress: advertise a recently-fired /wol so every open PWA can
     # show the boot countdown, not just the device that initiated it. Only while
     # still down — once up, the green verdict drives the UI and the signal is moot.

@@ -712,6 +712,11 @@ function checkStatus(){
     // red without flickering back to orange. The cache is written only on a
     // settled verdict so an unconfirmed down never persists a premature "down".
     if(res.up){
+      // degraded = host awake, reverse proxy serving, but the probed app
+      // (Seerr) returned 5xx. Stay green — no pointless WoL on an awake box —
+      // and arm the same warm-up hint the post-wake grace uses, so tapping an
+      // app link warns "still starting" instead of silently landing on a 502.
+      if(res.degraded)serverReadyHintUntil=Date.now()+APP_WARMUP_MS;
       writeLocalStatus(true,relayReachable);
       setOnline();
     }else if(res.waking&&!wolSent){
@@ -784,7 +789,7 @@ function probe(){
     // v8.25 — thread the relay's wake-in-progress signal through (see the
     // remoteWaking branch in checkStatus): `waking` true while a /wol fired
     // recently and the home is still down, `wake_age_s` its age for the ETA.
-    function(j){return {up:j.up,relayReachable:true,window:(typeof j.window==='string'?j.window:null),waking:j.waking===true,wakeAgeS:(typeof j.wake_age_s==='number'?j.wake_age_s:0),etaS:(typeof j.eta_s==='number'?j.eta_s:0)};},
+    function(j){return {up:j.up,relayReachable:true,window:(typeof j.window==='string'?j.window:null),waking:j.waking===true,wakeAgeS:(typeof j.wake_age_s==='number'?j.wake_age_s:0),etaS:(typeof j.eta_s==='number'?j.eta_s:0),degraded:j.degraded===true};},
     function(err){
       var relayUp=!!(err&&err.answered);
       return fetchHomeDirectly().then(

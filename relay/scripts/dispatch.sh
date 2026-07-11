@@ -11,6 +11,8 @@
 #   ssh wol-relay-deploy push-caddyfile    # stdin → /tmp/wol-relay-staging/Caddyfile
 #   ssh wol-relay-deploy push-service      # stdin → /tmp/wol-relay-staging/wol-relay.service
 #   ssh wol-relay-deploy apply             # install the 3 files + restart services
+#   ssh wol-relay-deploy push-window       # stdin (1 line HH:MM-HH:MM) → staging
+#   ssh wol-relay-deploy apply-window      # install /opt/wol-relay/window (hot, no restart)
 #   ssh wol-relay-deploy status            # systemctl is-active wol-relay caddy
 #   ssh wol-relay-deploy health            # curl http://127.0.0.1:8000/health
 #   ssh wol-relay-deploy logs-wol-relay    # journalctl -u wol-relay -n 100 (read-only)
@@ -82,6 +84,29 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
   push-home-watch-timer)
     cat > "$STAGING_DIR/home-watch.timer"
     echo "[push-home-watch-timer] OK ($(wc -c < "$STAGING_DIR/home-watch.timer") bytes)"
+    ;;
+  push-window)
+    # Scheduled-uptime window, single line on stdin ("HH:MM-HH:MM" or
+    # "HHhMM-HHhMM"). Strictly validated BEFORE staging: the only free-form
+    # input this route accepts is a value matching the time-window shape,
+    # so the static-enum property of the whitelist is preserved in spirit.
+    IFS= read -r line || true
+    if ! [[ "$line" =~ ^([01]?[0-9]|2[0-3])[h:][0-5][0-9]-([01]?[0-9]|2[0-3])[h:][0-5][0-9]$ ]]; then
+      echo "[push-window] FAIL — want HH:MM-HH:MM or HHhMM-HHhMM, got: '$line'" >&2
+      exit 65
+    fi
+    printf '%s\n' "$line" > "$STAGING_DIR/window"
+    echo "[push-window] OK ($line)"
+    ;;
+  apply-window)
+    # Installs the staged window for app.py's current_window() — picked up
+    # on the next /status poll (mtime re-read), no service restart needed.
+    if [[ ! -s "$STAGING_DIR/window" ]]; then
+      echo "[apply-window] FAIL — $STAGING_DIR/window missing or empty. Run push-window first." >&2
+      exit 1
+    fi
+    sudo /usr/bin/install -o wol -g wol -m 0644 "$STAGING_DIR/window" /opt/wol-relay/window
+    echo "[apply-window] OK — live on next /status poll ($(cat "$STAGING_DIR/window"))"
     ;;
   apply)
     # Pre-condition: the 3 staged files must exist.
@@ -208,7 +233,7 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
     ;;
   *)
     echo "dispatch.sh: unknown command '${SSH_ORIGINAL_COMMAND:-}'" >&2
-    echo "Expected: push-app, push-caddyfile, push-service, apply, status, health, logs-wol-relay, logs-caddy," >&2
+    echo "Expected: push-app, push-caddyfile, push-service, apply, push-window, apply-window, status, health, logs-wol-relay, logs-caddy," >&2
     echo "          push-home-watch{,-service,-timer}, apply-home-watch, home-watch-status, logs-home-watch," >&2
     echo "          push-pock-sync-{app,service}, apply-pock-sync, pock-sync-status, logs-pock-sync, pock-dump," >&2
     echo "          pat-receive {daily,weekly}, pat-list, pat-dump-latest." >&2

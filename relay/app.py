@@ -104,6 +104,33 @@ UPTIME_WINDOW = os.environ.get("UPTIME_WINDOW", "").strip() or None
 if UPTIME_WINDOW and not _WINDOW_RE.match(UPTIME_WINDOW):
     raise RuntimeError(f"UPTIME_WINDOW malformed (want HH:MM-HH:MM / HHhMM-HHhMM): {UPTIME_WINDOW!r}")
 
+# Deployable window file — pushed through the GitOps channel (dispatch.sh
+# `push-window` / `apply-window`), sourced at home from the versioned
+# autoshutdown config: one source of truth for every consumer (PWA clients
+# via /status, home-watch window, auto-WoL trigger). Takes precedence over
+# the UPTIME_WINDOW env fallback, and is re-read on mtime change so an
+# apply-window is live on the next /status poll without a service restart.
+WINDOW_FILE = os.environ.get("WINDOW_FILE", "/opt/wol-relay/window").strip()
+_window_file_cache: tuple[float, str | None] = (0.0, None)
+
+
+def current_window() -> str | None:
+    global _window_file_cache
+    try:
+        mtime = os.stat(WINDOW_FILE).st_mtime
+    except OSError:
+        return UPTIME_WINDOW
+    if mtime != _window_file_cache[0]:
+        try:
+            raw = open(WINDOW_FILE, encoding="utf-8").read().strip()
+        except OSError:
+            return UPTIME_WINDOW
+        val = raw if raw and _WINDOW_RE.match(raw) else None
+        if raw and val is None:
+            logger.warning("window file %s malformed (%r) — ignored", WINDOW_FILE, raw)
+        _window_file_cache = (mtime, val)
+    return _window_file_cache[1] or UPTIME_WINDOW
+
 # Send the magic packet multiple times to compensate for UDP drop. Each
 # packet is ~100 bytes so 3 sends = ~300 bytes total, negligible. The
 # 500 ms gap leaves room for transient network blips without piling up
@@ -492,8 +519,9 @@ async def status(request: Request, x_token: str | None = Header(None)):
         if wake_age < WAKE_SIGNAL_TTL_S:
             body["waking"] = True
             body["wake_age_s"] = int(wake_age)
-    if UPTIME_WINDOW:
-        body["window"] = UPTIME_WINDOW
+    window = current_window()
+    if window:
+        body["window"] = window
     # Canonical shared boot ETA — served on every /status (cheap) so every open
     # PWA seeds its wake countdown from the same value, synced across devices.
     body["eta_s"] = _current_eta_s()

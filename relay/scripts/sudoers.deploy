@@ -21,6 +21,7 @@
 
 Cmnd_Alias WOL_RELAY_INSTALL = \
   /usr/bin/install -o wol -g wol -m 0644 /tmp/wol-relay-staging/app.py /opt/wol-relay/app.py, \
+  /usr/bin/install -o wol -g wol -m 0644 /tmp/wol-relay-staging/window /opt/wol-relay/window, \
   /usr/bin/install -m 0644 /tmp/wol-relay-staging/Caddyfile /etc/caddy/Caddyfile, \
   /usr/bin/install -m 0644 /tmp/wol-relay-staging/wol-relay.service /etc/systemd/system/wol-relay.service
 

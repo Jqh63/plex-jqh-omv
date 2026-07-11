@@ -17,6 +17,7 @@
 #   ssh wol-relay-deploy health            # curl http://127.0.0.1:8000/health
 #   ssh wol-relay-deploy logs-wol-relay    # journalctl -u wol-relay -n 100 (read-only)
 #   ssh wol-relay-deploy logs-caddy        # journalctl -u caddy -n 100 (read-only)
+#   ssh wol-relay-deploy log-footprint     # journald size + log dirs + df (read-only)
 #
 # home-watch (external homelab monitor, content pushed in from the private
 # knowledge-base repo — never stored here):
@@ -139,6 +140,17 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
   logs-caddy)
     sudo /usr/bin/journalctl -u caddy -n 100 --no-pager
     ;;
+  log-footprint)
+    # Janitorial measurement (read-only): journald size + pinned log dirs +
+    # disk headroom. Decides whether the e2-micro needs a journald cap
+    # (knowledge-base ADR 2026-07-07-housekeeping-janitorial §6).
+    echo "=== JOURNALD ==="
+    sudo /usr/bin/journalctl --disk-usage
+    echo "=== LOG DIRS (du -shx) ==="
+    sudo /usr/bin/du -shx /var/log /var/lib/caddy
+    echo "=== DISK ==="
+    /bin/df -h /
+    ;;
   apply-home-watch)
     # home-watch = external homelab monitor (private content pushed via stdin
     # from the knowledge-base repo). Pre-condition: the 3 staged files exist.
@@ -233,7 +245,7 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
     ;;
   *)
     echo "dispatch.sh: unknown command '${SSH_ORIGINAL_COMMAND:-}'" >&2
-    echo "Expected: push-app, push-caddyfile, push-service, apply, push-window, apply-window, status, health, logs-wol-relay, logs-caddy," >&2
+    echo "Expected: push-app, push-caddyfile, push-service, apply, push-window, apply-window, status, health, logs-wol-relay, logs-caddy, log-footprint," >&2
     echo "          push-home-watch{,-service,-timer}, apply-home-watch, home-watch-status, logs-home-watch," >&2
     echo "          push-pock-sync-{app,service}, apply-pock-sync, pock-sync-status, logs-pock-sync, pock-dump," >&2
     echo "          pat-receive {daily,weekly}, pat-list, pat-dump-latest." >&2

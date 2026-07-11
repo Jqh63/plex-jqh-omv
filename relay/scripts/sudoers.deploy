@@ -34,6 +34,13 @@ Cmnd_Alias WOL_RELAY_LOGS = \
   /usr/bin/journalctl -u wol-relay -n 100 --no-pager, \
   /usr/bin/journalctl -u caddy -n 100 --no-pager
 
+# log-footprint — janitorial measurement (knowledge-base ADR
+# 2026-07-07-housekeeping-janitorial §6): journal size + pinned log dirs,
+# read-only exact arg vectors, no wildcards.
+Cmnd_Alias WOL_RELAY_LOG_FOOTPRINT = \
+  /usr/bin/journalctl --disk-usage, \
+  /usr/bin/du -shx /var/log /var/lib/caddy
+
 # home-watch — external homelab monitor (apply-home-watch / logs-home-watch).
 # Same isolation: exact verbs, literal paths, no wildcards. (daemon-reload is
 # already covered by WOL_RELAY_SYSTEMCTL above.)
@@ -64,6 +71,6 @@ Cmnd_Alias POCK_SYNC_LOGS = \
 Cmnd_Alias POCK_SYNC_DUMP = \
   /usr/bin/tar -C /var/lib/pock-sync -cf - .
 
-deploy ALL=(root) NOPASSWD: WOL_RELAY_INSTALL, WOL_RELAY_SYSTEMCTL, WOL_RELAY_LOGS, \
+deploy ALL=(root) NOPASSWD: WOL_RELAY_INSTALL, WOL_RELAY_SYSTEMCTL, WOL_RELAY_LOGS, WOL_RELAY_LOG_FOOTPRINT, \
                             HOME_WATCH_INSTALL, HOME_WATCH_SYSTEMCTL, HOME_WATCH_LOGS, \
                             POCK_SYNC_INSTALL, POCK_SYNC_SYSTEMCTL, POCK_SYNC_LOGS, POCK_SYNC_DUMP

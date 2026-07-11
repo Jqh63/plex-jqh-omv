@@ -74,7 +74,11 @@ each owned by the relevant service user:
   echoed as a `window` field in `/status`; the PWA adopts it
   automatically, so every user gets the scheduled-uptime "En veille"
   display without a new URL. Validated at startup — a malformed value
-  refuses to boot).
+  refuses to boot. Since the deployable window file this env is only a
+  fallback: `/opt/wol-relay/window` — pushed via `ssh wol-relay-deploy
+  push-window` + `apply-window`, sourced from the home server's
+  versioned autoshutdown config — wins when present, and is re-read on
+  change without a restart).
 - `/etc/caddy/wol-relay.env` (mode `0640 root:caddy`) — Caddy
   variables referenced in the Caddyfile as `{$VAR}`: `LE_EMAIL`,
   `RELAY_DOMAIN`, `CORS_ORIGIN`.

@@ -82,6 +82,10 @@ BOOT_MIN_MS = 10_000
 BOOT_MAX_MS = 300_000
 BOOT_HISTORY_MAX = 10
 ETA_FALLBACK_S = int(os.environ.get("ETA_FALLBACK_S", "80"))
+# A boot sample is only trusted when the up-flip was observed by tight polling
+# (an open PWA polls /status every ~8 s). Wider gap ⇒ the flip timestamp mostly
+# measures how long the relay went unpolled, not the boot — drop the sample.
+BOOT_SAMPLE_MAX_POLL_GAP_S = int(os.environ.get("BOOT_SAMPLE_MAX_POLL_GAP_S", "30"))
 _boot_history: deque = deque(maxlen=BOOT_HISTORY_MAX)
 # True from a /wol until the next "up" flip consumes it for a boot measurement,
 # so a steady-state up (no wake) is never mis-recorded as a boot.
@@ -405,6 +409,7 @@ async def _poll_home_and_update() -> None:
     # path (cold/expired cache) and the background SWR refresh. Caller holds
     # _status_poll_lock.
     global _wake_pending
+    prev_poll_at = _status_cache.last_poll_at
     ok, degraded = await _poll_home()
     polled_at = time.monotonic()
     _status_cache.last_poll_at = polled_at
@@ -417,8 +422,20 @@ async def _poll_home_and_update() -> None:
         # fired against an already-up server measures <BOOT_MIN_MS and is dropped).
         if _wake_pending and _last_wol_at:
             boot_ms = (polled_at - _last_wol_at) * 1000.0
-            if BOOT_MIN_MS <= boot_ms <= BOOT_MAX_MS:
+            # Polls only happen on /status traffic (SWR, no periodic loop), so a
+            # wake with no PWA open (e.g. home-watch auto-WoL) sees its up-flip
+            # only at the NEXT poll, minutes later — that measures poll latency,
+            # not the boot. Only record when the previous poll was recent enough
+            # for the flip timestamp to be trustworthy; still consume the pending
+            # wake either way so a later poll can't record an even worse sample.
+            tight_polling = (polled_at - prev_poll_at) <= BOOT_SAMPLE_MAX_POLL_GAP_S
+            if tight_polling and BOOT_MIN_MS <= boot_ms <= BOOT_MAX_MS:
                 _boot_history.append(boot_ms)
+            elif not tight_polling:
+                logger.info(
+                    "boot sample dropped: poll gap %.0fs > %ss (no client polling during wake)",
+                    polled_at - prev_poll_at, BOOT_SAMPLE_MAX_POLL_GAP_S,
+                )
             _wake_pending = False
     elif _status_cache.last_state is None:
         # First-ever poll failed → bootstrap with a real verdict so the cache

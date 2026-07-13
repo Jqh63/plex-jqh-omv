@@ -332,6 +332,13 @@ function showSettings(){
     document.getElementById('cfgToken').value=config.token||'';
     document.getElementById('cfgApps').value=config.apps||'';
     document.getElementById('cfgWindow').value=config.window||'';
+    // Relay-owned window: field is display-only (a manual edit would be
+    // silently overwritten by the next /status poll — the relay wins).
+    var winRelay=!!(config.relay&&config.winSrc==='relay');
+    document.getElementById('cfgWindow').disabled=winRelay;
+    document.getElementById('cfgWindowHint').textContent=winRelay
+      ?'Synchronisée automatiquement depuis le relais (plage d\'extinction du serveur) — non modifiable ici'
+      :'Si le serveur s\'éteint volontairement la nuit : hors plage, l\'arrêt s\'affiche « Éteint (prévu) » en bleu avec l\'heure de réveil auto';
   }
   if(checkInterval)clearInterval(checkInterval);
   setTimeout(function(){document.getElementById('cfgHost').focus();},50);
@@ -356,6 +363,8 @@ function saveConfig(){
   // there's no settings field for it. Carry the existing value across a save so
   // editing other fields doesn't silently drop it.
   var prevStatus=(config&&config.status)||'';
+  var prevWinSrc=(config&&config.winSrc)||'';
+  var prevWindow=(config&&config.window)||'';
   if(!host){showToast('⚠ Domaine requis',true);return}
   if(!validHost(host)){showToast('⚠ Domaine invalide',true);return}
   var cleaned='';
@@ -374,6 +383,9 @@ function saveConfig(){
   if(title)config.title=title;
   if(apps)config.apps=apps;
   if(win)config.window=win;
+  // Relay-owned window survives a save untouched (its field was disabled);
+  // dropping the relay hands the window back to manual editing.
+  if(prevWinSrc==='relay'&&cleanedRelay){config.window=prevWindow;config.winSrc='relay';}
   if(prevStatus)config.status=prevStatus;
   storeConfig(config);
   startApp();
@@ -686,8 +698,11 @@ function checkStatus(){
     // admin-controlled source of truth, so changing it on the relay updates
     // every installed client on its next poll — no re-provisioning URL to
     // resend. Persisted so it survives offline opens and relay outages.
-    if(res.window&&parseWindow(res.window)&&config.window!==res.window){
-      config.window=res.window;storeConfig(config);
+    // winSrc='relay' marks the value as relay-owned: the settings field then
+    // renders read-only (editing it would be a lie — the next poll overwrites).
+    // Cleared implicitly when the user removes the relay (manual editing back).
+    if(res.window&&parseWindow(res.window)&&(config.window!==res.window||config.winSrc!=='relay')){
+      config.window=res.window;config.winSrc='relay';storeConfig(config);
     }
     // v8.28 — adopt the relay's canonical boot ETA (see relayEtaMs). Bounded like
     // the local history; persisted so an offline open seeds the same countdown.
@@ -943,9 +958,17 @@ function startCountdown(elapsedMs){
   var tick=function(){
     var diff=Math.round((countdownEndsAt-Date.now())/1000);
     if(isOnline||(!wolSent&&!remoteWaking)){stopCountdown();return;}
-    if(diff<-30)pl.textContent='Démarrage long…';
-    else if(diff<=0)pl.textContent='Réveil… presque prêt';
-    else pl.textContent='Réveil… environ '+diff+'s';
+    var txt;
+    if(diff<-30)txt='Démarrage long…';
+    else if(diff<=0)txt='Réveil… presque prêt';
+    else txt='Réveil… environ '+diff+'s';
+    pl.textContent=txt;
+    // Status-only devices (no mac/relay/token) have the whole power section
+    // hidden, so the countdown above is invisible to them — a remote wake read
+    // as a bare "réveil en cours" with no ETA (seen 2026-07-13). Mirror the
+    // ticking label into the status-card subtitle for those devices.
+    if(document.getElementById('powerSection').style.display==='none')
+      document.getElementById('statusSub').textContent='réveil en cours · '+txt.replace('Réveil… ','').toLowerCase();
   };
   tick();
   countdownTimer=setInterval(tick,1000);

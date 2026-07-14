@@ -127,6 +127,11 @@ SLEEP_JUMP_POLL = 1.0    # worst-case detector latency (the 1 s poll cadence)
 OLD_STATUS_TIMEOUT = 5.0  # v7.1 STATUS_FETCH_TIMEOUT_MS
 OLD_HOLD_RECHECK = 3.0    # v7.6 HOLD_RECHECK_MS
 
+# v8.31 — boot ETA (app.js getEta() / the relay's shared eta_s) and the grace
+# past it before an adopted remote wake is declared failed (REMOTE_WAKE_GRACE_MS).
+BOOT_ETA = 80.0
+REMOTE_WAKE_GRACE = 30.0
+
 
 @dataclass
 class FetchOutcome:
@@ -151,6 +156,13 @@ class FetchOutcome:
     # is to reclaim that stuck flag; this lets the sim exercise it. Overrides
     # latency/ok when True.
     zombie: bool = False
+    # v8.25 relay /status `waking` + `wake_age_s`: a /wol was fired (by ANY device)
+    # less than WAKE_SIGNAL_TTL_S ago and the home is still down — it is booting.
+    # Only ever set on a SUCCESSFUL relay outcome with up=False: the direct-home
+    # fallback structurally CANNOT carry this flag, which is the whole point of the
+    # v8.31 scenarios.
+    waking: bool = False
+    wake_age: float = 0.0
 
 
 @dataclass
@@ -190,6 +202,9 @@ class Scenario:
     # (the shipped single-probe-down baseline) paints the forbidden red that
     # V8App's confirm-before-red avoids. Pairs with forbid_red_flash=True.
     is_falsered_contrast: bool = False
+    # v8.31 — when True, assert NoWakeGuardApp (the shipped v8.30 baseline) commits
+    # the false red on a booting home that the wake guard now prevents.
+    is_wakeguard_contrast: bool = False
     horizon: float = 60.0
     # If set, an "offline" (red) card paint must land at or before this time.
     # Locks the v8.5 faster-correction (8 s poll): a "just stopped" home must
@@ -255,7 +270,9 @@ class BaseApp:
         if kind == "checking":
             if self._orange_start is None:
                 self._orange_start = self.clock.now
-        elif kind in ("online", "offline"):
+        elif kind in ("online", "offline", "starting"):
+            # "starting" (the wake countdown card) ends an orange stretch just like
+            # a settled verdict: the user is being told something definite.
             if self._orange_start is not None:
                 self.max_orange = max(self.max_orange, self.clock.now - self._orange_start)
                 self._orange_start = None
@@ -421,6 +438,9 @@ class V8App(BaseApp):
 
     # v8.7 — a stale cached "down" shows orange, never a confident red.
     PRE_PAINT_DOWN = "checking"
+    # v8.31 — does an in-flight remote wake protect the card from a red commit?
+    # False reproduces the shipped v8.30 bug (see NoWakeGuardApp).
+    WAKE_GUARD = True
 
     def __init__(self, clock, scenario):
         super().__init__(clock, scenario)
@@ -428,6 +448,40 @@ class V8App(BaseApp):
         self.check_started_at = 0.0
         # Consecutive relay-miss counter feeding the relay-down debounce.
         self.relay_miss_streak = 0
+        # v8.25 / v8.31 — a wake fired by ANOTHER device, adopted from the relay's
+        # `waking` flag, and the deadline past which it is deemed to have failed.
+        self.remote_waking = False
+        self.remote_wake_deadline = 0.0
+
+    def _wake_held(self):
+        """True while an adopted remote wake still owns the card (mirrors the
+        guards in app.js setOffline / setRechecking)."""
+        return (self.WAKE_GUARD and self.remote_waking
+                and self.clock.now < self.remote_wake_deadline)
+
+    def _enter_remote_waking(self, wake_age):
+        # Mirrors enterRemoteWaking(): adopt the boot, show the countdown card, and
+        # (re)anchor the failure deadline on the relay's authoritative wake age.
+        self.checking = False
+        self.has_confirmed_state = True
+        self.last_verdict_at = self.clock.now
+        self.down_streak = 0
+        self.remote_waking = True
+        self.remote_wake_deadline = (self.clock.now + max(BOOT_ETA - wake_age, 0.0)
+                                     + REMOTE_WAKE_GRACE)
+        self.paint("starting")
+
+    def _apply(self, up, relay_ok):
+        # v8.31 — the setOffline() guard: a wake in flight owns the card until its
+        # deadline, so a probe that carries no `waking` info (the direct-home
+        # fallback, or a relay timeout) cannot commit red on a booting home.
+        if not up and self._wake_held():
+            self.checking = False   # the probe DID settle (app.js clears it in .then)
+            self.paint("starting")
+            return
+        self.remote_waking = False
+        self.remote_wake_deadline = 0.0
+        super()._apply(up, relay_ok)
 
     def check_status(self):
         if not self.config:
@@ -475,13 +529,16 @@ class V8App(BaseApp):
         if out.zombie:
             return  # wedged probe — never resolves; leaves checking=True stuck
         if out.latency is None or out.latency >= PROBE_TIMEOUT:
-            self.clock.after(PROBE_TIMEOUT, lambda: self._relay_done(gen, False, None, False))
+            self.clock.after(PROBE_TIMEOUT,
+                             lambda: self._relay_done(gen, False, None, False, out))
         else:
-            self.clock.after(out.latency, lambda: self._relay_done(gen, out.ok, out.up, out.answered))
+            self.clock.after(out.latency,
+                             lambda: self._relay_done(gen, out.ok, out.up, out.answered, out))
 
-    def _relay_done(self, gen, ok, up, answered):
+    def _relay_done(self, gen, ok, up, answered, out):
         if ok:
-            self._settle(gen, up=up, relay_ok=True)
+            self._settle(gen, up=up, relay_ok=True,
+                         waking=out.waking, wake_age=out.wake_age)
             return
         # Relay failed. answered → alive but degraded (keep reachable);
         # transport → unreachable. Either way, one direct-home fallback.
@@ -494,7 +551,7 @@ class V8App(BaseApp):
         else:
             self.clock.after(out.latency, lambda: self._settle(gen, up=out.ok, relay_ok=relay_ok))
 
-    def _settle(self, gen, up, relay_ok):
+    def _settle(self, gen, up, relay_ok, waking=False, wake_age=0.0):
         if gen != self.probe_gen:
             return  # superseded by a newer probe (resume race) — drop it
         # N-consecutive-miss debounce on the relay-down cosmetic only (mirrors
@@ -517,6 +574,13 @@ class V8App(BaseApp):
             self.down_streak = 0
             self._apply(True, eff)
             return
+        # v8.25 — the relay reports a wake in progress (fired by another device, or
+        # an earlier session of ours). Adopt it: show the boot countdown instead of
+        # walking the down-confirmation. Takes priority — "waking" is a confident
+        # "it's coming up", so don't paint red underneath it.
+        if waking:
+            self._enter_remote_waking(wake_age)
+            return
         self.down_streak += 1
         if self.down_streak >= DOWN_CONFIRM:
             self._apply(False, eff)
@@ -524,8 +588,26 @@ class V8App(BaseApp):
             # Unconfirmed down → orange "Vérification…" + one fast re-probe. Clear
             # `checking` ourselves (we are NOT settling) so the re-probe runs.
             self.checking = False
-            self.paint("checking")
+            # v8.31 — the setRechecking() guard: don't strobe a booting home's
+            # "Démarrage…" card to orange on the first down of the boot.
+            self.paint("starting" if self._wake_held() else "checking")
             self.clock.after(DOWN_RECHECK, self.check_status)
+
+
+class NoWakeGuardApp(V8App):
+    """Contrast baseline = the shipped v8.30 behaviour on an ADOPTED remote wake.
+    The relay's `waking` flag paints the countdown, but nothing protects it: the
+    first probe that carries no waking info walks the down-confirmation and
+    setOffline() commits a confident red — killing the countdown on a home that is
+    booting perfectly well. That verdict cannot carry `waking` by construction (the
+    direct-home fallback has no such field; a relay timeout has no body at all), so
+    a single cold-radio miss was enough. Reported IRL 2026-07-14 ("compteur à 62 s
+    qui disparaît après 10 s en disant que le homelab est off"), and specific to
+    wakes fired by ANOTHER device — a locally-fired wake was already immune via
+    setOffline's wolSent guard, which is why it showed up "surtout après un
+    allumage par l'AM5" (its logon task fires the /wol)."""
+
+    WAKE_GUARD = False
 
 
 class RawDownApp(V8App):
@@ -539,7 +621,9 @@ class RawDownApp(V8App):
     # Shipped behaviour: a stale cached "down" pre-painted a confident red.
     PRE_PAINT_DOWN = "offline"
 
-    def _settle(self, gen, up, relay_ok):
+    # This baseline predates the wake-state signal entirely: it ignores `waking`
+    # and commits the raw verdict, which is precisely the behaviour under test.
+    def _settle(self, gen, up, relay_ok, waking=False, wake_age=0.0):
         if gen != self.probe_gen:
             return
         if relay_ok:
@@ -657,6 +741,45 @@ def evaluate(app, scenario):
 
 
 SCENARIOS = [
+    # ---- v8.31: an adopted remote wake must survive a probe that can't see it --
+    Scenario(
+        name="remote-wake-survives-relay-miss-no-false-red",
+        # The AM5's logon task fired the /wol; this device only learns about the
+        # boot from the relay's `waking` flag. Mid-boot the relay probe times out
+        # (cold mobile radio) and the direct-home fallback answers "down" — a
+        # verdict that CANNOT carry `waking`. Pre-fix, two of those walked the
+        # down-confirmation and committed red on a home that was booting fine,
+        # killing the countdown ~10 s in. The wake guard must hold "Démarrage…"
+        # until the relay is heard from again, then settle green on the up-flip.
+        relay_outcomes=[
+            FetchOutcome(0.3, ok=True, up=False, waking=True, wake_age=18),
+            FetchOutcome(None, ok=False, answered=False),   # transport timeout
+            FetchOutcome(None, ok=False, answered=False),   # ...and the re-check
+            FetchOutcome(0.3, ok=True, up=False, waking=True, wake_age=32),
+            FetchOutcome(0.3, ok=True, up=True),            # home finished booting
+        ],
+        home_outcomes=[FetchOutcome(0.5, ok=False)],        # still booting → down
+        expect_final_online=True,
+        forbid_red_flash=True,
+        is_wakeguard_contrast=True,
+        horizon=60.0,
+    ),
+    Scenario(
+        name="remote-wake-that-never-boots-still-commits-red",
+        # The guard must be BOUNDED: a wake adopted at wake_age=140 s is already
+        # past the boot ETA, so its deadline is only REMOTE_WAKE_GRACE away. Once
+        # it lapses without an up-flip, the wake is deemed failed and red IS
+        # committed — we replaced a false red with a held countdown, not with an
+        # optimistic lie that never resolves.
+        relay_outcomes=[
+            FetchOutcome(0.3, ok=True, up=False, waking=True, wake_age=140),
+            FetchOutcome(0.3, ok=True, up=False),  # relay: wake signal expired
+        ],
+        expect_final_online=False,
+        forbid_red_flash=False,
+        expect_red_by=45.0,
+        horizon=60.0,
+    ),
     Scenario(
         # Happy path: relay says home is up → green in <500 ms.
         name="cold-launch-server-up-fast",
@@ -1028,6 +1151,7 @@ def main():
     v8_pass = True
     contrast_ok = True
     falsered_ok = True
+    wakeguard_ok = True
     for sc in SCENARIOS:
         print(f"\n## {sc.name}")
         v8 = evaluate(run(sc, V8App), sc)
@@ -1052,6 +1176,18 @@ def main():
                 reds = [t for t, k in raw["paints"] if k == "offline"]
                 print(f"  [falsered   ] OK    RawDown flashes the false red at {reds} "
                       f"(v8.7 avoids it)")
+        # v8.31 wake-guard contrast: the shipped v8.30 baseline must commit the
+        # false red on a booting home that the guard now holds.
+        if sc.is_wakeguard_contrast:
+            nog = evaluate(run(sc, NoWakeGuardApp), sc)
+            nog_reds = [t for t, k in nog["paints"] if k == "offline"]
+            if not nog_reds:
+                wakeguard_ok = False
+                print(f"  [wakeguard  ] FAIL  expected NoWakeGuard to commit the false "
+                      f"red, but none seen — paints: {fmt_paints(nog['paints'])}")
+            else:
+                print(f"  [wakeguard  ] OK    NoWakeGuard kills the countdown and reds "
+                      f"at {nog_reds} on a booting home (v8.31 holds)")
         # Cold-radio contrast: the v7 cascade must do measurably worse — longer
         # orange and/or a forbidden paint v8 avoids.
         if sc.is_contrast:
@@ -1072,7 +1208,9 @@ def main():
           f"{'confirmed' if falsered_ok else 'BROKEN — see [falsered] lines'}")
     print(f"Contrast (v8 better than v7 on cold-radio): "
           f"{'confirmed' if contrast_ok else 'BROKEN — see [contrast] lines'}")
-    return 0 if (v8_pass and contrast_ok and falsered_ok) else 1
+    print(f"Wake guard (v8.31 holds the countdown NoWakeGuard reds through): "
+          f"{'confirmed' if wakeguard_ok else 'BROKEN — see [wakeguard] lines'}")
+    return 0 if (v8_pass and contrast_ok and falsered_ok and wakeguard_ok) else 1
 
 
 if __name__ == "__main__":

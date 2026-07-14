@@ -157,19 +157,6 @@ var WOL_POLL_MS=5000, WOL_TIMEOUT_MS=300000;
 // cache has usually started to expire on the affected hop, and a
 // retry stands a much better chance of being broadcast through.
 var WOL_RETRY_DELAYS_MS=[15000, 30000, 60000, 90000];
-// v8.32 — wall-clock ceiling past which a scheduled retry is NOT fired. Android
-// FREEZES a backgrounded PWA: pending setTimeouts don't run, they queue, and they
-// all fire at once when the page is resumed — possibly many hours later (observed
-// 2026-07-14: three retries POSTed within the same 0.11 s on resume). A thawed
-// retry checking only `wolSent` (a flag frozen mid-wake alongside the timers) sent
-// a magic packet nobody asked for, and — the damaging part — re-armed the relay's
-// `waking` signal, so EVERY open PWA painted a boot countdown for a wake that had
-// never been requested. That is the "phantom countdown matching an AM5 wake from
-// ~24 h earlier" report: the retries were the previous evening's, thawed on the
-// next morning's open. Flags survive a freeze; the wall clock does not lie — a
-// retry is only legitimate inside the window it was scheduled for (last delay +
-// grace).
-var WOL_RETRY_MAX_AGE_MS=WOL_RETRY_DELAYS_MS[WOL_RETRY_DELAYS_MS.length-1]+30000;
 
 // Fallback ETA before any boot history is recorded. Calibrated to the actual
 // observed boot time on the author's J5005 OMV (~80 s wall-clock from magic
@@ -1110,11 +1097,6 @@ function sendWol(){
   WOL_RETRY_DELAYS_MS.forEach(function(delay){
     wolRetryTimers.push(setTimeout(function(){
       if(!wolSent||isOnline)return;
-      // v8.32 — see WOL_RETRY_MAX_AGE_MS: `wolSent` alone is not enough. It is a
-      // flag, and a frozen page thaws its flags and its timers together, so a
-      // retry deferred by a background freeze would still pass this check hours
-      // later and fire a phantom wake. Anchor on the wall clock instead.
-      if(Date.now()-wolStartTime>WOL_RETRY_MAX_AGE_MS)return;
       postWol(true);
     },delay));
   });
@@ -1210,32 +1192,6 @@ function onForeground(){
   // (common on desktop) so we don't double-probe / double-resync.
   if(Date.now()-lastForegroundMs<1000)return;
   lastForegroundMs=Date.now();
-  // v8.33 — reap a wake that went stale while the page was frozen. Android does not
-  // KILL a backgrounded PWA, it FREEZES it: reopening RESUMES the page, it does not
-  // reload it, so startApp() never re-runs and wolSent/wolStartTime survive with
-  // last night's countdown still painted and the power button locked in its "sent"
-  // state. The user reopens the app and is shown a wake that ended hours ago, on a
-  // home that is off — reported 2026-07-14 ("un compteur à 62 s à l'ouverture, avant
-  // même d'appuyer sur power"). Nothing in this handler used to touch the wake, so
-  // it cleared only once the frozen wolPollTimer thawed and hit its WOL_TIMEOUT_MS
-  // check: a few seconds of a confident lie, and a wake button needlessly disabled.
-  // Settle it on the wall clock, at resume, before anything is painted.
-  // A wake younger than WOL_TIMEOUT_MS is left alone on purpose — that one may still
-  // be genuinely in flight (the user is just peeking mid-boot).
-  // v8.43 — this MUST cover remoteWaking too, and that is the variant the user
-  // actually hits. His habit: keep the PWA open to watch the countdown while the
-  // AM5's logon task wakes the home (that task POSTs /wol to the relay on purpose,
-  // so every PWA shows the wake — cf. runbook wol-am5-windows-task). The phone is
-  // then pocketed MID-COUNTDOWN and freezes with remoteWaking=true and the progress
-  // bar running. Reopened the next morning, the stale countdown keeps ticking
-  // ("Réveil… environ 62s") until two probes finally settle a red — ~10 s on a cold
-  // mobile radio. Keying the reap on wolSent alone missed it entirely: the phone
-  // never tapped anything, the wake was adopted from the relay.
-  // wolStartTime is the right anchor for both: enterRemoteWaking() sets it too.
-  if((wolSent||remoteWaking)&&Date.now()-wolStartTime>WOL_TIMEOUT_MS){
-    wolSent=false;remoteWaking=false;wolStartTime=0;
-    stopCountdown();clearWolPoll();clearWolRetries();releaseWakeLock();
-  }
   // A fetch in flight when the screen locked may never resolve (Android
   // suspends network) — its `checking=true` flag would then permanently
   // block subsequent checks. Reset it on resume so the next checkStatus()

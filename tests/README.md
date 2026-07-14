@@ -8,8 +8,14 @@ state machine.
 | File | What | Speed |
 |---|---|---|
 | `state-machine-sim.py` | Deterministic Python sim of the app.js v8 timer/fetch logic. `OldCascade` (v7 baseline) vs `V8App` on the status scenarios + a contrast check. Models the v8.4 power-button honesty (`BuggyButtonApp` baseline) AND the v8.5 status-card honesty (`BuggyCardApp` baseline) — the confident green ("Serveur allumé" / "En ligne") lights once a live probe settles, never off a cache pre-paint; a relay `stale=true` up is still trusted as up (a healthy home is almost always served stale → gating green on `!stale` stuck the indicator orange, so honesty keys on "a live probe settled this session", not the stale flag). v8.5 also shortens the self-healing poll (15 s → 8 s) so a just-stopped home corrects to red in ~8 s, asserted via `expect_red_by`. | ~50 ms |
-| `cold-radio-e2e.py` | Playwright headless drives the PWA on Chromium **and WebKit/Safari** (cross-browser, see § Engines) with mocked network + spoofed visibilitychange. 15 scenarios × engine. | ~30 s/engine |
+| `cold-radio-e2e.py` | Playwright headless drives the PWA on Chromium **and WebKit/Safari** (cross-browser, see § Engines) with mocked network + spoofed visibilitychange. 15 scenarios × engine. Covers the **status** machine — it never fires a wake. | ~30 s/engine |
+| `wake-e2e.py` | Playwright headless on the **wake** paths, which `cold-radio-e2e.py` does not touch — and where both 2026-07-14 bugs lived. Pins v8.31 (an adopted remote wake holds its countdown through a probe that cannot see it, and never flashes red on a booting home) and v8.32 (a retry frozen by a background suspend must not thaw into a phantom WoL POST). Uses Playwright's **clock API** to reproduce the Android freeze/thaw: a clock jump runs every pending timer at once, exactly as a resumed PWA does. Carries a **control** scenario (a short freeze must still retry) so "no phantom POST" can't pass for the wrong reason. | ~20 s |
+| `wol-retry-freeze.py` | Deterministic model of the retry freeze/thaw cycle: reproduces the shipped flag-only guard firing 4 phantom POSTs ~24 h after the tap, and pins the wall-clock guard that kills them without weakening the UDP-loss cover. The fast layer under `wake-e2e.py`. | ~10 ms |
 | `screenshots/` | E2E output, gitignored. | — |
+
+> **The wake paths went untested in a browser until 2026-07-14** — which is exactly
+> why two bugs shipped there. If you touch `sendWol()`, the countdown, `setOffline()`
+> or `setRechecking()`, `wake-e2e.py` is the layer that has to stay green.
 
 ## The v8 model (what's under test)
 

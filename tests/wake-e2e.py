@@ -1,30 +1,33 @@
 #!/usr/bin/env python3
-"""Real-browser E2E for the WAKE paths (v8.31 + v8.32) — the mechanics the
-2026-07-14 fixes touched, and which `cold-radio-e2e.py` does NOT cover.
+"""Real-browser E2E for the WAKE paths — the mechanics `cold-radio-e2e.py` does NOT
+cover, and where the 2026-07-14 bug lived.
 
 `cold-radio-e2e.py` drives the status/probe state machine (green/red/orange,
-fallback, resume). It never fires a wake, so the countdown, the adoption of a
-remote wake, and the retry POSTs were entirely untested in a browser. Both
-2026-07-14 bugs lived exactly there. This file closes that gap.
+fallback, resume). It never fires a wake, so the countdown, the wake state and the
+retry POSTs were entirely untested in a browser. That is exactly why the bug shipped.
+
+Everything here turns on one fact about mobile: **Android does not KILL a
+backgrounded PWA, it FREEZES it.** Pending timers do not run — they queue, and fire
+all at once on resume — and reopening RESUMES the page rather than reloading it, so
+`startApp()` never re-runs and the wake state survives. Client-side flags therefore
+outlive a freeze; only the wall clock tells the truth. Playwright's clock API models
+both halves faithfully (`fast_forward` = the thaw, `set_system_time` = time passing
+with nothing having run yet).
 
 ## What it pins
 
-1. `remote-wake-survives-relay-miss` (v8.31) — a wake fired by ANOTHER device is
-   adopted from the relay's `waking` flag. Mid-boot the relay probe fails and the
-   PWA falls back to its direct-home probe, whose verdict CANNOT carry `waking`.
-   The countdown must hold ("Démarrage…"), never flash red, and settle green when
-   the home answers. Pre-fix this committed red ~10 s in on a booting home.
+1. `stale-wake-does-not-survive-a-freeze` (v8.33) — THE reported bug. A wake tapped
+   last night, page frozen, app reopened this morning: no phantom countdown, no
+   power button stuck in "sent". Note it needs `set_system_time`, not
+   `fast_forward`: the latter also fires the thawed poll timer, which reaps the wake
+   on its own, and the test would pass even WITHOUT the fix — proving nothing.
 
-2. `frozen-retry-does-not-thaw-into-a-phantom-wake` (v8.32) — Android freezes a
-   backgrounded PWA: pending setTimeouts queue and ALL fire at once on resume.
-   Playwright's clock API reproduces that exactly (`fast_forward` runs pending
-   timers with Date.now() jumped). A wake tapped, then thawed ~24 h later, must
-   POST nothing. Pre-fix the four retries fired on thaw, re-arming the relay's
-   `waking` signal and painting a phantom countdown on EVERY open PWA.
-
-   Guarded by a CONTROL scenario: a SHORT thaw (inside the retry window) must
-   still POST. Without it, "no phantom POST" could just mean "no timer pending"
-   and the test would pass for the wrong reason.
+2. `frozen-retry-does-not-thaw-into-a-phantom-wake` (v8.32) — a defensive guard. A
+   retry thawed long after its wake must not POST: it would fire a magic packet
+   nobody asked for and re-arm the relay's `waking` signal for every open PWA.
+   Guarded by a CONTROL scenario — a SHORT thaw (inside the retry window) must still
+   POST. Without it, "no phantom POST" could just mean "no timer pending", and the
+   test would pass for the wrong reason.
 
 Runs against the LIVE deploy by default (post-merge gate), like cold-radio-e2e:
   python3 tests/wake-e2e.py
@@ -116,52 +119,6 @@ def is_starting(s):
 def check(name, cond, detail=""):
     print(f"  {'PASS' if cond else 'FAIL'}  {name}" + (f"  — {detail}" if detail else ""))
     return cond
-
-
-# --------------------------------------------------------------------------
-# 1. v8.31 — an adopted remote wake survives a probe that cannot see it
-# --------------------------------------------------------------------------
-def scenario_remote_wake(p):
-    print("\n## remote-wake-survives-relay-miss (v8.31)")
-    counters = {"relay": 0, "home": 0, "wol": 0}
-
-    # The wake was fired elsewhere (the AM5's logon task). Mid-boot the relay probe
-    # dies twice (cold radio) — the direct-home fallback answers "down" with no
-    # waking flag — then the relay is heard from again and the home finishes booting.
-    def relay_plan(n):
-        return {1: "waking:18", 2: "fail", 3: "fail", 4: "waking:32"}.get(n, "up")
-
-    b = getattr(p, ENGINE).launch()
-    ctx = b.new_context(viewport={"width": 390, "height": 844})
-    page = ctx.new_page()
-    page.route("**/*", _mk_handler(counters, relay_plan, lambda n: "fail"))
-    page.goto(PWA_URL, wait_until="load")
-    page.wait_for_selector("#statusLabel", state="attached", timeout=10000)
-
-    samples = []
-    for t in (1, 3, 6, 10, 14, 20, 30):
-        page.wait_for_timeout(1000 if not samples else (t - samples[-1][0]) * 1000)
-        s = card(page)
-        samples.append((t, s))
-        tags = [f for f, on in (("RED", is_red(s)), ("green", is_green(s)),
-                                ("starting", is_starting(s))) if on]
-        print(f"  T+{t}s: {s['label']!r} -> {','.join(tags) or '(neutral)'}")
-
-    b.close()
-    reds = [t for t, s in samples if is_red(s)]
-    starts = [t for t, s in samples if is_starting(s)]
-    final_green = is_green(samples[-1][1])
-
-    ok = True
-    ok &= check("the boot countdown is shown (wake adopted from the relay)",
-                bool(starts), f"'Démarrage…' at {starts}")
-    ok &= check("NEVER flashes red while the home is booting",
-                not reds, f"red at {reds}" if reds else "no red at any sample")
-    ok &= check("settles green once the home answers", final_green,
-                f"final={samples[-1][1]['label']!r}")
-    ok &= check("fired no WoL of its own (adoption must not POST)",
-                counters["wol"] == 0, f"wol POSTs={counters['wol']}")
-    return ok
 
 
 # --------------------------------------------------------------------------
@@ -289,8 +246,7 @@ def main():
             print(f"[SKIP] engine={ENGINE}: cannot launch — {str(e)[:90]}")
             print("       → ssh omv-deploy setup-codeserver-browser")
             return 0
-        ok = scenario_remote_wake(p)
-        ok &= scenario_phantom_retry(p)
+        ok = scenario_phantom_retry(p)
         ok &= scenario_stale_wake_on_resume(p)
 
     print("\n" + "=" * 72)

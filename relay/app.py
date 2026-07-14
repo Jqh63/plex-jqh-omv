@@ -495,21 +495,8 @@ async def status(request: Request, x_token: str | None = Header(None)):
     # stale ceiling. Past STATUS_CACHE_STALE_S we have no trustworthy value.
     usable = have_value and success_age is not None and success_age <= STATUS_CACHE_STALE_S
 
-    # During a wake the home is down BY DEFINITION until it boots, so blocking on
-    # a fresh poll only adds ~4.5 s (FIRST + RETRY, every poll fails) to an answer
-    # we can already predict — and it lands exactly in the window where the PWA's
-    # own probe budget is tightest. A client that times out falls back to its
-    # direct-home probe, whose verdict carries no `waking` flag, and the boot
-    # countdown dies mid-boot. Serve the known "down + waking" now and revalidate
-    # in the background; the up-flip still lands on the next poll (and the poll
-    # cadence stays tight enough for the boot-sample measurement).
-    wake_in_progress = (
-        _wake_pending
-        and _last_wol_at
-        and (now - _last_wol_at) < WAKE_SIGNAL_TTL_S
-    )
     if (now - _status_cache.last_poll_at) >= STATUS_CACHE_FRESH_S:
-        if usable or wake_in_progress:
+        if usable:
             # Stale-while-revalidate: serve the (slightly stale) cached verdict
             # NOW and refresh in the background. The PWA never waits behind the
             # home poll — which on a cold relay→home leg can take up to

@@ -60,8 +60,17 @@ STATUS_TARGET_URL = os.environ.get("STATUS_TARGET_URL")
 #   (~4.5 s worst case = FIRST + RETRY) rather than 6 s with a flat 3 s.
 #
 # Override either via env var on links with unusual latencies.
+#
+# 2026-07-14 — RETRY raised 1.5 s → 4.0 s, on measurement. The comment above assumed the
+# retry runs "once a connection is up" (~50-150 ms). That assumption is FALSE here: the
+# instrumentation shows attempt=1 failing on nearly every poll (the pooled HTTP/2
+# connection to the home dies between polls), so the retry is precisely the attempt that
+# must pay a FULL cold handshake — measured at 3.37 s. It was being given 1.5 s. It could
+# not succeed, and the relay then declared the home OFF to the whole family. Total worst
+# case is now 3.0 + 4.0 = 7 s, still inside the PWA's 8 s probe budget (PROBE_TIMEOUT_MS),
+# which is the real constraint on this path.
 STATUS_POLL_FIRST_TIMEOUT_S = float(os.environ.get("STATUS_POLL_FIRST_TIMEOUT_S", "3.0"))
-STATUS_POLL_RETRY_TIMEOUT_S = float(os.environ.get("STATUS_POLL_RETRY_TIMEOUT_S", "1.5"))
+STATUS_POLL_RETRY_TIMEOUT_S = float(os.environ.get("STATUS_POLL_RETRY_TIMEOUT_S", "4.0"))
 STATUS_CACHE_FRESH_S = int(os.environ.get("STATUS_CACHE_FRESH_S", "5"))
 STATUS_CACHE_STALE_S = int(os.environ.get("STATUS_CACHE_STALE_S", "60"))
 
@@ -101,6 +110,27 @@ STATUS_KEEPALIVE_DOWN_S = int(os.environ.get("STATUS_KEEPALIVE_DOWN_S", "60"))
 # Give the loop room to actually complete the handshake it exists to warm up.
 STATUS_KEEPALIVE_FIRST_TIMEOUT_S = float(os.environ.get("STATUS_KEEPALIVE_FIRST_TIMEOUT_S", "10.0"))
 STATUS_KEEPALIVE_RETRY_TIMEOUT_S = float(os.environ.get("STATUS_KEEPALIVE_RETRY_TIMEOUT_S", "5.0"))
+
+# Confirm-before-DOWN (2026-07-14) — the real fix, after two wrong ones.
+#
+# The relay→home leg is simply UNRELIABLE: the instrumentation shows attempt=1 failing
+# on essentially every poll (the pooled HTTP/2 connection dies between polls, 30 s
+# apart) and attempt=2 paying a fresh ~3.4 s handshake. Chasing that with bigger budgets
+# and a keepalive was treating the symptom — some polls will fail, always, and no timeout
+# makes a flaky leg reliable.
+#
+# The actual defect is that ONE failed poll was enough for the relay to declare the home
+# OFF — to every PWA in the house, on a home that is running fine. The PWA has never been
+# that naive: it demands DOWN_CONFIRM consecutive agreeing verdicts before it commits a
+# red. The relay, which is the ORACLE the whole family trusts, had no such guard.
+#
+# So: an UP verdict commits instantly (optimistic — a home that answers IS up), while a
+# DOWN needs STATUS_DOWN_CONFIRM_POLLS consecutive failures before it is believed. Until
+# then the last known UP keeps being served. A genuinely-off home simply takes one extra
+# poll to be reported — nothing depends on that latency (the nightly shutdown is not a
+# race), whereas a false "éteint" is seen by everyone.
+STATUS_DOWN_CONFIRM_POLLS = int(os.environ.get("STATUS_DOWN_CONFIRM_POLLS", "2"))
+_consecutive_poll_failures: int = 0
 
 # Wake-in-progress signal (shared wake-state). After a /wol POST, /status
 # advertises `waking: true` for this long while the home is still down, so ANY
@@ -474,7 +504,7 @@ async def _poll_home_and_update(background: bool = False) -> None:
     # Run one poll and fold the verdict into the cache. Shared by the blocking
     # path (cold/expired cache) and the background SWR refresh. Caller holds
     # _status_poll_lock.
-    global _wake_pending
+    global _wake_pending, _consecutive_poll_failures
     prev_poll_at = _status_cache.last_poll_at
     prev_state = _status_cache.last_state
     ok, degraded = await _poll_home(background=background)
@@ -488,6 +518,7 @@ async def _poll_home_and_update(background: bool = False) -> None:
     _status_cache.last_poll_at = polled_at
     _status_cache.last_degraded = degraded
     if ok:
+        _consecutive_poll_failures = 0
         _status_cache.last_state = True
         _status_cache.last_success_at = polled_at
         # Shared-ETA measurement: a wake was pending and the home just answered →
@@ -510,11 +541,32 @@ async def _poll_home_and_update(background: bool = False) -> None:
                     polled_at - prev_poll_at, BOOT_SAMPLE_MAX_POLL_GAP_S,
                 )
             _wake_pending = False
-    elif _status_cache.last_state is None:
-        # First-ever poll failed → bootstrap with a real verdict so the cache
-        # isn't stuck on "no opinion".
-        _status_cache.last_state = False
-        _status_cache.last_success_at = polled_at
+    else:
+        _consecutive_poll_failures += 1
+        if _status_cache.last_state is None:
+            # First-ever poll failed → bootstrap with a real verdict so the cache isn't
+            # stuck on "no opinion". (A cold-start poll is the least reliable one there
+            # is, but with nothing to compare against we have no better answer.)
+            _status_cache.last_state = False
+            _status_cache.last_success_at = polled_at
+        elif _consecutive_poll_failures < STATUS_DOWN_CONFIRM_POLLS:
+            # Confirm-before-DOWN: a SINGLE failed poll must not turn the home off for
+            # the whole family. The relay→home leg is flaky by nature (attempt=1 fails on
+            # nearly every poll — the pooled HTTP/2 connection dies between polls), so an
+            # isolated failure carries no information. Keep serving the last known
+            # verdict, and hold the freshness clock with it: otherwise last_success_at
+            # ages past STATUS_CACHE_STALE_S and /status demotes to "down" anyway — the
+            # staleness backstop would silently defeat the confirmation.
+            _status_cache.last_success_at = polled_at
+            logger.info(
+                "poll failed (%d/%d) — holding the last verdict (%s) rather than "
+                "flipping the home off on one flaky probe",
+                _consecutive_poll_failures, STATUS_DOWN_CONFIRM_POLLS,
+                "UP" if _status_cache.last_state else "DOWN",
+            )
+        else:
+            # Confirmed: consecutive failures agree. Now we believe it.
+            _status_cache.last_state = False
 
 
 async def _keepalive_loop() -> None:

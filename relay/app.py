@@ -80,13 +80,27 @@ STATUS_CACHE_STALE_S = int(os.environ.get("STATUS_CACHE_STALE_S", "60"))
 #
 # Adaptive cadence, so this is not a tap:
 #   home UP   → 30 s. There IS a connection to keep warm, and the cache stays fresh.
-#   home DOWN → 300 s. Nothing to keep warm (the box is off — the nightly window is
-#               ~14 h of guaranteed failures); just re-check now and then. A wake does
-#               not depend on this loop: the PWA polls hard on its own during a boot.
-# Cost: ~2 HEADs/min while up, 12/h while down, on a service whose only job is this.
+#   home DOWN → 60 s. Nothing to keep warm (the box is off — the nightly window is ~14 h
+#               of guaranteed failures), but a DOWN is the verdict that can be WRONG, so
+#               it is never the one we re-check lazily. A wake does not depend on this
+#               loop: the PWA polls hard on its own during a boot.
+# Cost: ~2 HEADs/min while up, 1/min while down, on a service whose only job is this.
 # The home sees a HEAD on SWAG, which has access_log off — no noise there either.
 STATUS_KEEPALIVE_UP_S = int(os.environ.get("STATUS_KEEPALIVE_UP_S", "30"))
-STATUS_KEEPALIVE_DOWN_S = int(os.environ.get("STATUS_KEEPALIVE_DOWN_S", "300"))
+# 60 s, not 300 s. A DOWN verdict is the one that LIES to the family, so it must never
+# be the one we re-check lazily: the first version of this loop used 300 s, its cold
+# start poll failed, and the relay then sat on a confidently-served WRONG "down" for
+# five minutes (2026-07-14, "verdict flip: DOWN → UP" 11 s after an open). Re-checking
+# a down home every 60 s is free and bounds that damage.
+STATUS_KEEPALIVE_DOWN_S = int(os.environ.get("STATUS_KEEPALIVE_DOWN_S", "60"))
+# The keepalive runs in the BACKGROUND, with no client waiting on it — so it must NOT
+# use the foreground budget. That was the design error behind the regression above:
+# 3 s is tuned to fit inside the PWA's own 8 s probe, a constraint that simply does not
+# apply here. A cold TLS handshake from this (slow) e2-micro can exceed 3 s, the
+# background poll then failed, and a WRONG "down" got cached and served instantly.
+# Give the loop room to actually complete the handshake it exists to warm up.
+STATUS_KEEPALIVE_FIRST_TIMEOUT_S = float(os.environ.get("STATUS_KEEPALIVE_FIRST_TIMEOUT_S", "10.0"))
+STATUS_KEEPALIVE_RETRY_TIMEOUT_S = float(os.environ.get("STATUS_KEEPALIVE_RETRY_TIMEOUT_S", "5.0"))
 
 # Wake-in-progress signal (shared wake-state). After a /wol POST, /status
 # advertises `waking: true` for this long while the home is still down, so ANY
@@ -393,8 +407,10 @@ _status_cache = _StatusCache()
 _status_poll_lock = asyncio.Lock()
 
 
-async def _poll_home() -> tuple[bool, bool]:
-    # HEAD + 1 retry. Returns (up, degraded).
+async def _poll_home(background: bool = False) -> tuple[bool, bool]:
+    # HEAD + 1 retry. Returns (up, degraded). `background` = the keepalive loop, which
+    # has NO client waiting and therefore gets a budget generous enough to actually
+    # complete a cold TLS handshake (see STATUS_KEEPALIVE_FIRST_TIMEOUT_S).
     #
     # ANY HTTP response means the host is serving — it answered the TCP+TLS
     # handshake and spoke HTTP, which is the only thing WoL cares about. The
@@ -415,7 +431,9 @@ async def _poll_home() -> tuple[bool, bool]:
     # a success that burned more than half its budget (the early warning that the leg
     # is going cold), and the verdict FLIPS (logged by the caller). Steady state is
     # silent.
-    timeouts = (STATUS_POLL_FIRST_TIMEOUT_S, STATUS_POLL_RETRY_TIMEOUT_S)
+    timeouts = ((STATUS_KEEPALIVE_FIRST_TIMEOUT_S, STATUS_KEEPALIVE_RETRY_TIMEOUT_S)
+                if background
+                else (STATUS_POLL_FIRST_TIMEOUT_S, STATUS_POLL_RETRY_TIMEOUT_S))
     for attempt, timeout in enumerate(timeouts):
         started = time.monotonic()
         try:
@@ -452,14 +470,14 @@ def _current_eta_s() -> int:
     return max(1, round(med / 1000))
 
 
-async def _poll_home_and_update() -> None:
+async def _poll_home_and_update(background: bool = False) -> None:
     # Run one poll and fold the verdict into the cache. Shared by the blocking
     # path (cold/expired cache) and the background SWR refresh. Caller holds
     # _status_poll_lock.
     global _wake_pending
     prev_poll_at = _status_cache.last_poll_at
     prev_state = _status_cache.last_state
-    ok, degraded = await _poll_home()
+    ok, degraded = await _poll_home(background=background)
     polled_at = time.monotonic()
     # Verdict flips only — the one line that matters, and the one that makes a false
     # negative self-evident afterwards ("home DOWN" while the box was demonstrably up)
@@ -508,7 +526,7 @@ async def _keepalive_loop() -> None:
     while True:
         try:
             async with _status_poll_lock:
-                await _poll_home_and_update()
+                await _poll_home_and_update(background=True)
         except asyncio.CancelledError:
             raise
         except Exception:

@@ -375,19 +375,47 @@ async def _poll_home() -> tuple[bool, bool]:
     # First attempt gets the cold-handshake budget; retry uses the warm
     # one (by then the TCP+TLS session is up even if the first response
     # was aborted — the handshake bytes hit the wire before the cancel).
+    # Observability (2026-07-14): a "down" verdict here is what paints the home as
+    # off in every PWA, so when it is WRONG (home up, probe merely slow) the whole
+    # family sees a lie. The probe budget is tight on purpose, but nothing recorded
+    # how close to it we actually run — a false "éteint" at open was impossible to
+    # attribute (relay too slow? client radio? PWA bug?) without guessing. Log the
+    # measured duration of every attempt, and log a DOWN verdict loudly with the
+    # budget it blew. Cheap (a few lines a minute, only on /status traffic) and it
+    # turns the next occurrence into a fact instead of a debate.
     timeouts = (STATUS_POLL_FIRST_TIMEOUT_S, STATUS_POLL_RETRY_TIMEOUT_S)
     for attempt, timeout in enumerate(timeouts):
+        started = time.monotonic()
         try:
             r = await _http_client.head(STATUS_TARGET_URL, timeout=timeout)
+            elapsed = time.monotonic() - started
             degraded = r.status_code >= 500
+            logger.info(
+                "poll ok attempt=%d status=%s in %.2fs (budget %.1fs)",
+                attempt + 1, r.status_code, elapsed, timeout,
+            )
             if degraded:
                 logger.warning(
                     "status target degraded: %s returned %s (host is up)",
                     STATUS_TARGET_URL, r.status_code,
                 )
             return True, degraded
-        except httpx.HTTPError:
+        except httpx.HTTPError as e:
+            elapsed = time.monotonic() - started
+            logger.warning(
+                "poll FAILED attempt=%d after %.2fs (budget %.1fs): %s",
+                attempt + 1, elapsed, timeout, type(e).__name__,
+            )
             if attempt == len(timeouts) - 1:
+                # Every attempt burned. The relay is about to tell every PWA the home
+                # is DOWN — say so in the log, with the evidence, so a false negative
+                # is self-evident afterwards rather than reconstructed.
+                logger.error(
+                    "poll verdict=DOWN — all %d attempts failed (budgets %s). If the "
+                    "home was actually up, this is a FALSE NEGATIVE: the budget is too "
+                    "tight for a cold TLS leg from this VM.",
+                    len(timeouts), timeouts,
+                )
                 return False, False
     return False, False
 

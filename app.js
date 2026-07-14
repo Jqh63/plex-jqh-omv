@@ -1192,6 +1192,25 @@ function onForeground(){
   // (common on desktop) so we don't double-probe / double-resync.
   if(Date.now()-lastForegroundMs<1000)return;
   lastForegroundMs=Date.now();
+  // v8.45 — reap a wake that went stale while the page was frozen.
+  //
+  // Android does not KILL a backgrounded PWA, it FREEZES it: reopening RESUMES the
+  // page, it does not reload it, so startApp() never re-runs and the wake state
+  // survives. The user's actual sequence (2026-07-14): the AM5's logon task wakes the
+  // home and POSTs /wol to the relay on purpose, so every PWA shows the wake (runbook
+  // wol-am5-windows-task). He keeps the PWA open to watch the countdown, pockets the
+  // phone MID-BOOT, and the page freezes with remoteWaking=true and the bar running.
+  // Reopened the NEXT MORNING, that countdown is still ticking ("Réveil… environ 62s")
+  // on a home that is off, until two probes finally settle it — ~10 s on a cold radio.
+  //
+  // It must cover remoteWaking, NOT just wolSent: the phone never tapped anything —
+  // the wake was ADOPTED from the relay. wolStartTime is the right anchor for both
+  // (enterRemoteWaking sets it too). A wake younger than WOL_TIMEOUT_MS is left alone:
+  // it may still be genuinely in flight (the user is just peeking mid-boot).
+  if((wolSent||remoteWaking)&&Date.now()-wolStartTime>WOL_TIMEOUT_MS){
+    wolSent=false;remoteWaking=false;wolStartTime=0;
+    stopCountdown();clearWolPoll();clearWolRetries();releaseWakeLock();
+  }
   // A fetch in flight when the screen locked may never resolve (Android
   // suspends network) — its `checking=true` flag would then permanently
   // block subsequent checks. Reset it on resume so the next checkStatus()

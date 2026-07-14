@@ -236,6 +236,12 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
+# httpx logs every request at INFO. That was tolerable when the home was only polled on
+# client traffic; with the keepalive loop it is one line every 30 s — ~2 900/day of
+# "HEAD … 405", drowning the few lines that actually mean something (a slow poll, a
+# verdict flip, a /wol). Silence the routine chatter; a real transport problem still
+# surfaces as a WARNING from httpx and, above all, through our own poll logging.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("wol-relay")
 
 # CORS is handled exclusively at the Caddy layer (see Caddyfile). Caddy

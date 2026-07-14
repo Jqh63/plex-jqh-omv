@@ -620,12 +620,27 @@ async def _keepalive_loop() -> None:
     # a failed poll is already absorbed by _poll_home returning False, and this task
     # must outlive every transient (a crash here would silently restore the old cold
     # behaviour — the exact bug it exists to prevent).
+    # Log the window transitions — and ONLY the transitions (a couple of lines a day).
+    # Without this, "the keepalive is off" could only be INFERRED from silence, and a
+    # successful poll is silent too: the same silence would cover a gate that works and a
+    # gate that doesn't. That inference is precisely the trap that made a timed-out probe
+    # invisible for weeks. A positive signal, or nothing is proven.
+    active: bool | None = None
     while True:
         # Outside the home's uptime window we MUST NOT poll: the probe rides port 443,
         # which the home's autoshutdown plugin counts as activity (see _in_uptime_window).
         # Polling there would keep the box awake forever. Re-check every minute so the
         # loop resumes on its own at the window's start.
-        if not _in_uptime_window():
+        now_active = _in_uptime_window()
+        if now_active != active:
+            active = now_active
+            logger.info(
+                "keepalive %s (uptime window %s)",
+                "ACTIVE — warming the home leg" if active
+                else "PAUSED — outside the window, the home must be free to auto-shut-down",
+                current_window() or "unset",
+            )
+        if not active:
             await asyncio.sleep(60)
             continue
         try:

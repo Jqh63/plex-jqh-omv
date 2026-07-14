@@ -1240,6 +1240,26 @@ function onForeground(){
   // (common on desktop) so we don't double-probe / double-resync.
   if(Date.now()-lastForegroundMs<1000)return;
   lastForegroundMs=Date.now();
+  // v8.33 — reap a wake that went stale while the page was frozen. Android does not
+  // KILL a backgrounded PWA, it FREEZES it: reopening RESUMES the page, it does not
+  // reload it, so startApp() never re-runs and wolSent/wolStartTime survive with
+  // last night's countdown still painted and the power button locked in its "sent"
+  // state. The user reopens the app and is shown a wake that ended hours ago, on a
+  // home that is off — reported 2026-07-14 ("un compteur à 62 s à l'ouverture, avant
+  // même d'appuyer sur power"). Nothing in this handler used to touch the wake, so
+  // it cleared only once the frozen wolPollTimer thawed and hit its WOL_TIMEOUT_MS
+  // check: a few seconds of a confident lie, and a wake button needlessly disabled.
+  // Settle it on the wall clock, at resume, before anything is painted.
+  // A wake younger than WOL_TIMEOUT_MS is left alone on purpose — that one may still
+  // be genuinely in flight (the user is just peeking mid-boot).
+  if(wolSent&&Date.now()-wolStartTime>WOL_TIMEOUT_MS){
+    wolSent=false;wolStartTime=0;stopCountdown();clearWolPoll();clearWolRetries();releaseWakeLock();
+  }
+  // Same for a remote wake adopted from the relay: past its deadline it is over,
+  // and the countdown must not outlive it across a freeze.
+  if(remoteWaking&&Date.now()>=remoteWakeDeadline){
+    remoteWaking=false;remoteWakeDeadline=0;stopCountdown();
+  }
   // A fetch in flight when the screen locked may never resolve (Android
   // suspends network) — its `checking=true` flag would then permanently
   // block subsequent checks. Reset it on resume so the next checkStatus()

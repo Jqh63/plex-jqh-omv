@@ -1,4 +1,4 @@
-var CACHE = 'plex-jqh-omv-v8.40';
+var CACHE = 'plex-jqh-omv-v8.41';
 var FILES = ['./', './app.js', './preconnect.js', './fallback.html', './fallback.js', './debug.html', './debug.js', './manifest.json', './icon-192-v4.png', './icon-512-v4.png', './icon-maskable-v3.png', './icon-monochrome-v3.png'];
 
 // Two non-obvious requirements stacked here:

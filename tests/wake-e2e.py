@@ -217,6 +217,67 @@ def scenario_phantom_retry(p):
     return ok
 
 
+# --------------------------------------------------------------------------
+# 3. v8.33 — a stale wake must not survive a freeze and paint on resume
+# --------------------------------------------------------------------------
+def scenario_stale_wake_on_resume(p):
+    """THE reported sequence (2026-07-14). Android FREEZES a backgrounded PWA — it
+    does not kill it. Reopening RESUMES the page: startApp() never re-runs, so
+    wolSent / wolStartTime / the countdown survive intact from last night's wake.
+    The user reopens the app and is shown a boot countdown for a wake that ended
+    hours ago, on a home that is off, with the power button locked in "sent".
+
+    Note what this scenario proves is NOT a relay artefact: the relay serves plain
+    `down` throughout (no `waking`), and zero /wol is POSTed. The phantom countdown
+    is pure client-side state outliving a freeze."""
+    print("\n## stale-wake-does-not-survive-a-freeze (v8.33)")
+    counters = {"relay": 0, "home": 0, "wol": 0}
+    b = getattr(p, ENGINE).launch()
+    ctx = b.new_context(viewport={"width": 390, "height": 844})
+    page = ctx.new_page()
+    page.route("**/*", _mk_handler(counters, lambda n: "down", lambda n: "fail"))
+    page.clock.install()
+    page.goto(PWA_URL, wait_until="load")
+    page.wait_for_selector("#powerBtn", state="attached", timeout=10000)
+    page.wait_for_timeout(500)
+
+    page.click("#powerBtn")             # last night's wake
+    page.wait_for_timeout(500)
+    mid = card(page)
+    print(f"  tapped power → {mid['label']!r}")
+    ok = check("a fresh wake shows the countdown", is_starting(mid))
+
+    # The screen locks: the page is frozen mid-wake, then resumed the next morning.
+    #
+    # `set_system_time` jumps the wall clock WITHOUT running any pending timer —
+    # which is precisely the instant the user experiences: the page is back on
+    # screen, still painted with last night's state, and nothing has ticked yet.
+    # Using fast_forward here instead would ALSO fire the thawed wolPollTimer,
+    # whose WOL_TIMEOUT_MS check reaps the wake on its own — the assertions below
+    # would then pass even WITHOUT the v8.33 fix, and prove nothing. Isolating the
+    # resume is what makes this a real regression test: pre-fix, onForeground()
+    # touched neither wolSent nor the countdown, so the phantom card survived here.
+    # NB: clock.install() keeps the REAL epoch, so the jump must be computed from
+    # the page's own Date.now() — passing a bare "24 h in ms" would set the clock to
+    # 1970+1d, i.e. 54 years BACKWARDS, making the wake's age negative and silently
+    # disarming the very guard under test.
+    page.clock.set_system_time(page.evaluate("() => Date.now() + 24*3600*1000"))
+    page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
+    page.wait_for_timeout(1500)
+    resumed = card(page)
+    pwr = page.evaluate("() => document.getElementById('powerBtn').className")
+    print(f"  reopened 24 h later → {resumed['label']!r} power={pwr!r}")
+
+    ok &= check("NO phantom countdown on reopen (the bug)",
+                not is_starting(resumed), f"card={resumed['label']!r}")
+    ok &= check("the power button is usable again (not stuck in 'sent')",
+                "sent" not in pwr, f"class={pwr!r}")
+    ok &= check("still no /wol POSTed by any of this",
+                counters["wol"] == 1, f"wol POSTs={counters['wol']} (the tap only)")
+    b.close()
+    return ok
+
+
 def main():
     print("=" * 72)
     print(f"WAKE-path E2E (v8.31 + v8.32) — engine={ENGINE} base={PWA_BASE}")
@@ -230,6 +291,7 @@ def main():
             return 0
         ok = scenario_remote_wake(p)
         ok &= scenario_phantom_retry(p)
+        ok &= scenario_stale_wake_on_resume(p)
 
     print("\n" + "=" * 72)
     print("ALL PASS" if ok else "FAILURES — see above")

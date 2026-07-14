@@ -65,6 +65,29 @@ STATUS_POLL_RETRY_TIMEOUT_S = float(os.environ.get("STATUS_POLL_RETRY_TIMEOUT_S"
 STATUS_CACHE_FRESH_S = int(os.environ.get("STATUS_CACHE_FRESH_S", "5"))
 STATUS_CACHE_STALE_S = int(os.environ.get("STATUS_CACHE_STALE_S", "60"))
 
+# Keepalive poll (2026-07-14) — the fix for the false "Éteint (prévu)" on a home that
+# was UP. Root cause: the cache lapses after STATUS_CACHE_STALE_S and the household is
+# the relay's ONLY caller, so essentially EVERY open paid a full cold TLS handshake to
+# the home. Measured on a cold relay: 1.51 s of a 3.0 s budget — half of it, on a good
+# day. On a worse one the budget blows, _poll_home returns False, and the relay tells
+# every PWA the home is off while it is running fine.
+#
+# Widening the budget was the wrong lever: the PWA only grants its own probe 8 s, so a
+# relay that blocks longer just pushes the client onto its fallback path. Instead, keep
+# the leg WARM so it is never cold at the moment it matters: a background poll holds the
+# HTTP/2 connection open and the cache fresh, and /status is then served from cache
+# instantly, without ever blocking.
+#
+# Adaptive cadence, so this is not a tap:
+#   home UP   → 30 s. There IS a connection to keep warm, and the cache stays fresh.
+#   home DOWN → 300 s. Nothing to keep warm (the box is off — the nightly window is
+#               ~14 h of guaranteed failures); just re-check now and then. A wake does
+#               not depend on this loop: the PWA polls hard on its own during a boot.
+# Cost: ~2 HEADs/min while up, 12/h while down, on a service whose only job is this.
+# The home sees a HEAD on SWAG, which has access_log off — no noise there either.
+STATUS_KEEPALIVE_UP_S = int(os.environ.get("STATUS_KEEPALIVE_UP_S", "30"))
+STATUS_KEEPALIVE_DOWN_S = int(os.environ.get("STATUS_KEEPALIVE_DOWN_S", "300"))
+
 # Wake-in-progress signal (shared wake-state). After a /wol POST, /status
 # advertises `waking: true` for this long while the home is still down, so ANY
 # open PWA — not just the device that fired the wake — can show the boot
@@ -324,19 +347,28 @@ def health_deep():
 # resumption) instead of a full TLS handshake (1+ s from us-east1 to
 # the home server).
 _http_client: httpx.AsyncClient | None = None
+_keepalive_task: "asyncio.Task | None" = None
 
 
 @app.on_event("startup")
 async def _status_startup() -> None:
-    global _http_client
+    global _http_client, _keepalive_task
     # The retry timeout is the client default (warm-path budget); _poll_home()
     # overrides per call to give the first attempt the cold-handshake budget.
     _http_client = httpx.AsyncClient(http2=True, timeout=STATUS_POLL_RETRY_TIMEOUT_S)
+    _keepalive_task = asyncio.create_task(_keepalive_loop())
 
 
 @app.on_event("shutdown")
 async def _status_shutdown() -> None:
-    global _http_client
+    global _http_client, _keepalive_task
+    if _keepalive_task is not None:
+        _keepalive_task.cancel()
+        try:
+            await _keepalive_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        _keepalive_task = None
     if _http_client is not None:
         await _http_client.aclose()
         _http_client = None
@@ -375,47 +407,35 @@ async def _poll_home() -> tuple[bool, bool]:
     # First attempt gets the cold-handshake budget; retry uses the warm
     # one (by then the TCP+TLS session is up even if the first response
     # was aborted — the handshake bytes hit the wire before the cancel).
-    # Observability (2026-07-14): a "down" verdict here is what paints the home as
-    # off in every PWA, so when it is WRONG (home up, probe merely slow) the whole
-    # family sees a lie. The probe budget is tight on purpose, but nothing recorded
-    # how close to it we actually run — a false "éteint" at open was impossible to
-    # attribute (relay too slow? client radio? PWA bug?) without guessing. Log the
-    # measured duration of every attempt, and log a DOWN verdict loudly with the
-    # budget it blew. Cheap (a few lines a minute, only on /status traffic) and it
-    # turns the next occurrence into a fact instead of a debate.
+    # Observability (2026-07-14), deliberately QUIET. A "down" verdict here paints the
+    # home as off in EVERY PWA, so a wrong one (home up, probe merely slow) lies to the
+    # whole family — and until now a timed-out poll logged NOTHING, which made a false
+    # "éteint" impossible to attribute after the fact. But this now runs on a keepalive
+    # every 30 s, so logging each poll would be a tap, not a signal. Two lines only:
+    # a success that burned more than half its budget (the early warning that the leg
+    # is going cold), and the verdict FLIPS (logged by the caller). Steady state is
+    # silent.
     timeouts = (STATUS_POLL_FIRST_TIMEOUT_S, STATUS_POLL_RETRY_TIMEOUT_S)
     for attempt, timeout in enumerate(timeouts):
         started = time.monotonic()
         try:
             r = await _http_client.head(STATUS_TARGET_URL, timeout=timeout)
             elapsed = time.monotonic() - started
+            if elapsed > timeout / 2:
+                logger.warning(
+                    "poll slow: attempt=%d answered %s in %.2fs of a %.1fs budget "
+                    "(a cold TLS leg from this VM is what produces a false DOWN)",
+                    attempt + 1, r.status_code, elapsed, timeout,
+                )
             degraded = r.status_code >= 500
-            logger.info(
-                "poll ok attempt=%d status=%s in %.2fs (budget %.1fs)",
-                attempt + 1, r.status_code, elapsed, timeout,
-            )
             if degraded:
                 logger.warning(
                     "status target degraded: %s returned %s (host is up)",
                     STATUS_TARGET_URL, r.status_code,
                 )
             return True, degraded
-        except httpx.HTTPError as e:
-            elapsed = time.monotonic() - started
-            logger.warning(
-                "poll FAILED attempt=%d after %.2fs (budget %.1fs): %s",
-                attempt + 1, elapsed, timeout, type(e).__name__,
-            )
+        except httpx.HTTPError:
             if attempt == len(timeouts) - 1:
-                # Every attempt burned. The relay is about to tell every PWA the home
-                # is DOWN — say so in the log, with the evidence, so a false negative
-                # is self-evident afterwards rather than reconstructed.
-                logger.error(
-                    "poll verdict=DOWN — all %d attempts failed (budgets %s). If the "
-                    "home was actually up, this is a FALSE NEGATIVE: the budget is too "
-                    "tight for a cold TLS leg from this VM.",
-                    len(timeouts), timeouts,
-                )
                 return False, False
     return False, False
 
@@ -438,8 +458,15 @@ async def _poll_home_and_update() -> None:
     # _status_poll_lock.
     global _wake_pending
     prev_poll_at = _status_cache.last_poll_at
+    prev_state = _status_cache.last_state
     ok, degraded = await _poll_home()
     polled_at = time.monotonic()
+    # Verdict flips only — the one line that matters, and the one that makes a false
+    # negative self-evident afterwards ("home DOWN" while the box was demonstrably up)
+    # instead of something to be reconstructed from silence. Steady state logs nothing.
+    if prev_state is not None and ok != prev_state:
+        logger.info("verdict flip: %s → %s", "UP" if prev_state else "DOWN",
+                    "UP" if ok else "DOWN")
     _status_cache.last_poll_at = polled_at
     _status_cache.last_degraded = degraded
     if ok:
@@ -470,6 +497,25 @@ async def _poll_home_and_update() -> None:
         # isn't stuck on "no opinion".
         _status_cache.last_state = False
         _status_cache.last_success_at = polled_at
+
+
+async def _keepalive_loop() -> None:
+    # See STATUS_KEEPALIVE_UP_S. Holds the relay→home leg warm so /status is always
+    # served from a fresh cache instead of blocking on a cold handshake. Never raises:
+    # a failed poll is already absorbed by _poll_home returning False, and this task
+    # must outlive every transient (a crash here would silently restore the old cold
+    # behaviour — the exact bug it exists to prevent).
+    while True:
+        try:
+            async with _status_poll_lock:
+                await _poll_home_and_update()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("keepalive poll failed")
+        delay = (STATUS_KEEPALIVE_UP_S if _status_cache.last_state
+                 else STATUS_KEEPALIVE_DOWN_S)
+        await asyncio.sleep(delay)
 
 
 async def _background_refresh() -> None:

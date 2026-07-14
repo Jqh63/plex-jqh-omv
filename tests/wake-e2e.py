@@ -16,11 +16,20 @@ with nothing having run yet).
 
 ## What it pins
 
-1. `stale-wake-does-not-survive-a-freeze` (v8.33) — THE reported bug. A wake tapped
-   last night, page frozen, app reopened this morning: no phantom countdown, no
-   power button stuck in "sent". Note it needs `set_system_time`, not
-   `fast_forward`: the latter also fires the thawed poll timer, which reaps the wake
-   on its own, and the test would pass even WITHOUT the fix — proving nothing.
+1. `stale-wake-does-not-survive-a-freeze` (v8.33) and its REMOTE twin (v8.43) —
+   THE reported bug, in both flavours: a wake this device tapped, and a wake it
+   merely ADOPTED from the relay (the AM5's logon task POSTs /wol on purpose so every
+   PWA shows the countdown). The user watches that countdown, pockets the phone
+   mid-boot, and finds it still ticking the next morning. The remote flavour is the
+   one hit in practice, and `wolSent` does not catch it — the phone never tapped.
+
+   Two traps, both of which produced a green-but-worthless test on the first pass:
+   - assert on the COUNTDOWN (`powerProgress`), not the status card: the card is
+     repainted to "Vérification…" within ~200 ms while the countdown keeps ticking
+     underneath for seconds — that is what the user actually sees;
+   - jump time with `set_system_time`, not `fast_forward`: the latter also fires the
+     thawed poll timer, which reaps the wake on its own, so the test would pass even
+     WITHOUT the fix.
 
 2. `frozen-retry-does-not-thaw-into-a-phantom-wake` (v8.32) — a defensive guard. A
    retry thawed long after its wake must not POST: it would fire a magic packet
@@ -94,13 +103,26 @@ def _mk_handler(counters, relay_plan, home_plan):
 
 
 def card(page):
+    # NB: `powerLabel` / `powerProgress` are what carry the COUNTDOWN ("Réveil…
+    # environ 62s" + the progress bar). Asserting on the status card alone hides the
+    # bug: setRechecking() repaints the card to "Vérification…" while the countdown
+    # keeps right on ticking underneath. That mistake made a first pass of this test
+    # report a stale wake as "corrected in 200 ms" when it was in fact still running.
     return page.evaluate(
         """() => ({
         label: document.getElementById('statusLabel').innerText,
         dot: document.getElementById('statusDot').className,
         card: document.getElementById('statusCard').className,
+        power: document.getElementById('powerLabel').innerText,
+        progress: document.getElementById('powerProgress').className,
     })"""
     )
+
+
+def is_counting_down(s):
+    """The user-visible countdown: the progress bar is active. This — not the status
+    card — is what "un compteur à 62 s" means."""
+    return "active" in s["progress"]
 
 
 def is_red(s):
@@ -235,6 +257,64 @@ def scenario_stale_wake_on_resume(p):
     return ok
 
 
+def scenario_stale_remote_wake_on_resume(p):
+    """The AM5 variant of the stale-wake bug — the one the user actually hits.
+
+    The previous morning's wake was fired by the AM5's logon task, NOT from the
+    phone. That task POSTs /wol to the relay ON PURPOSE (runbook wol-am5-windows-task:
+    "relais GCP d'abord → statut « wake en cours » + countdown partagés dans toutes
+    les PWA"). So the phone's PWA, sitting in the background, ADOPTS the wake from
+    the relay's `waking` flag: remoteWaking = true, "Démarrage…" painted, countdown
+    running. Then Android freezes the page with that state.
+
+    Next morning the user reopens the app and is shown yesterday's countdown. Note
+    `wolSent` is FALSE throughout — the phone never tapped anything — so the v8.33
+    reap (which keys on wolSent) does NOT catch this one. That is the hole.
+    """
+    print("\n## stale-REMOTE-wake-does-not-survive-a-freeze (v8.34 — the AM5 variant)")
+    counters = {"relay": 0, "home": 0, "wol": 0}
+    state = {"waking": True}   # yesterday: the AM5's wake is in progress
+
+    def relay_plan(n):
+        return "waking:18" if state["waking"] else "down"
+
+    b = getattr(p, ENGINE).launch()
+    ctx = b.new_context(viewport={"width": 390, "height": 844})
+    page = ctx.new_page()
+    page.route("**/*", _mk_handler(counters, relay_plan, lambda n: "fail"))
+    page.clock.install()
+    page.goto(PWA_URL, wait_until="load")
+    page.wait_for_selector("#statusLabel", state="attached", timeout=10000)
+    page.wait_for_timeout(800)
+
+    adopted = card(page)
+    print(f"  AM5 wake adopted → card={adopted['label']!r} countdown={adopted['power']!r}")
+    ok = check("the PWA adopts the AM5 wake (countdown running, no tap)",
+               is_counting_down(adopted) and counters["wol"] == 0,
+               f"countdown={adopted['power']!r} wol POSTs={counters['wol']}")
+
+    # Overnight. The relay's waking signal expired long ago (TTL 150 s); the home
+    # has since shut down. The page was frozen the whole time and is now reopened.
+    state["waking"] = False
+    page.clock.set_system_time(page.evaluate("() => Date.now() + 24*3600*1000"))
+    page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
+    page.wait_for_timeout(1500)
+
+    resumed = card(page)
+    print(f"  reopened 24 h later → card={resumed['label']!r} countdown={resumed['power']!r} "
+          f"bar={resumed['progress']!r}")
+    # Assert on the COUNTDOWN, not the card: the card gets repainted to
+    # "Vérification…" within ~200 ms while the countdown keeps ticking underneath
+    # for seconds. The countdown is what the user sees and reports.
+    ok &= check("NO phantom countdown still running from yesterday's AM5 wake",
+                not is_counting_down(resumed),
+                f"progress bar={resumed['progress']!r}")
+    ok &= check("the PWA never POSTed a WoL of its own",
+                counters["wol"] == 0, f"wol POSTs={counters['wol']}")
+    b.close()
+    return ok
+
+
 def main():
     print("=" * 72)
     print(f"WAKE-path E2E (v8.31 + v8.32) — engine={ENGINE} base={PWA_BASE}")
@@ -248,6 +328,7 @@ def main():
             return 0
         ok = scenario_phantom_retry(p)
         ok &= scenario_stale_wake_on_resume(p)
+        ok &= scenario_stale_remote_wake_on_resume(p)
 
     print("\n" + "=" * 72)
     print("ALL PASS" if ok else "FAILURES — see above")

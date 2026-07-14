@@ -1222,8 +1222,19 @@ function onForeground(){
   // Settle it on the wall clock, at resume, before anything is painted.
   // A wake younger than WOL_TIMEOUT_MS is left alone on purpose — that one may still
   // be genuinely in flight (the user is just peeking mid-boot).
-  if(wolSent&&Date.now()-wolStartTime>WOL_TIMEOUT_MS){
-    wolSent=false;wolStartTime=0;stopCountdown();clearWolPoll();clearWolRetries();releaseWakeLock();
+  // v8.43 — this MUST cover remoteWaking too, and that is the variant the user
+  // actually hits. His habit: keep the PWA open to watch the countdown while the
+  // AM5's logon task wakes the home (that task POSTs /wol to the relay on purpose,
+  // so every PWA shows the wake — cf. runbook wol-am5-windows-task). The phone is
+  // then pocketed MID-COUNTDOWN and freezes with remoteWaking=true and the progress
+  // bar running. Reopened the next morning, the stale countdown keeps ticking
+  // ("Réveil… environ 62s") until two probes finally settle a red — ~10 s on a cold
+  // mobile radio. Keying the reap on wolSent alone missed it entirely: the phone
+  // never tapped anything, the wake was adopted from the relay.
+  // wolStartTime is the right anchor for both: enterRemoteWaking() sets it too.
+  if((wolSent||remoteWaking)&&Date.now()-wolStartTime>WOL_TIMEOUT_MS){
+    wolSent=false;remoteWaking=false;wolStartTime=0;
+    stopCountdown();clearWolPoll();clearWolRetries();releaseWakeLock();
   }
   // A fetch in flight when the screen locked may never resolve (Android
   // suspends network) — its `checking=true` flag would then permanently

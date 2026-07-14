@@ -171,11 +171,35 @@ def _relay_fulfill(route, verdict):
         # Relay ANSWERS with a degraded oracle (STATUS_TARGET_URL unset → 503).
         # Relay alive, /wol works — the PWA must keep it reachable + fall back.
         route.fulfill(status=503, headers=h, body='{"detail": "status target not configured"}')
+    elif verdict == "stall":
+        # The relay is ANSWERING nothing yet — the real off-hours shape: the home
+        # drops the probe's packets, so the relay sits on FIRST+RETRY (~7 s) before
+        # it can say "down". Leaving the route unfulfilled models that wait exactly;
+        # the PWA's own PROBE_TIMEOUT_MS eventually fires underneath.
+        return
     else:  # 'fail' → transport failure
         route.abort()
 
 
-def run_scenario(p, name, relay_plan, home_plan, sample_delays_s, preseed_cache=None):
+def is_sleep(s):
+    # v8.31 — the calm blue "Éteint (prévu)" card of a scheduled shutdown. Distinct
+    # from is_red (the `offline` outage classes) and from is_checking (orange).
+    return "sleep" in s["dotClass"] and "sleep" in s["cardClass"]
+
+
+def _window_excluding_now(inside):
+    """Return an "HHhMM-HHhMM" uptime window that either CONTAINS now (inside=True)
+    or does not (inside=False), in the browser's local clock — which is this
+    container's clock (Playwright inherits the system TZ)."""
+    import datetime
+    n = datetime.datetime.now()
+    m = n.hour * 60 + n.minute
+    lo, hi = ((m - 60) % 1440, (m + 60) % 1440) if inside else ((m + 60) % 1440, (m + 120) % 1440)
+    f = lambda v: f"{v // 60:02d}h{v % 60:02d}"
+    return f"{f(lo)}-{f(hi)}"
+
+
+def run_scenario(p, name, relay_plan, home_plan, sample_delays_s, preseed_cache=None, url_extra=""):
     """relay_plan(n) → 'up'|'down'|'degraded'|'fail' for the n-th relay /status
     call (1-indexed). home_plan(n) → 'ok'|'fail' for the n-th direct-home call.
     preseed_cache: inject {up, relayOk} under STATUS_LOCAL_KEY before nav."""
@@ -210,7 +234,7 @@ def run_scenario(p, name, relay_plan, home_plan, sample_delays_s, preseed_cache=
         )
     page = ctx.new_page()
     page.route("**/*", handle)
-    page.goto(PWA_URL, wait_until="load")
+    page.goto(PWA_URL + url_extra, wait_until="load")
     page.wait_for_selector("#statusLabel", state="attached", timeout=10000)
 
     samples = []
@@ -231,6 +255,8 @@ def run_scenario(p, name, relay_plan, home_plan, sample_delays_s, preseed_cache=
         "warn_at": [t for t, s in samples if is_warn(s)],
         "green_at": [t for t, s in samples if is_green(s)],
         "checking_at": [t for t, s in samples if is_checking(s)],
+        "sleep_at": [t for t, s in samples if is_sleep(s)],
+        "final_sleep": is_sleep(final),
         "final_green": is_green(final),
         "final_red": is_red(final),
         "final_warn": is_warn(final),
@@ -624,6 +650,42 @@ def collect_results():
         ok14 = r14["final_green"] and not r14["red_at"] and not r14["warn_at"]
         results.append(("cache-down-server-actually-up-no-red", ok14, r14,
                         "stale cached down → never a red flash, greens via live probe"))
+
+        # v8.31 — cold open DURING the nightly shutdown, with the relay still paying
+        # its ~7 s FIRST+RETRY against a home that drops the packets ("stall"). The
+        # schedule already says "off", so the blue "Éteint (prévu)" card + the wake
+        # button must be on screen within a second, not after the timeout. Fails on
+        # v8.30, which painted the orange "Vérification…" for the whole wait.
+        r15 = run_scenario(p, "cold-open-outside-window-presumes-sleep",
+                           relay_plan=lambda n: "stall", home_plan=lambda n: "fail",
+                           sample_delays_s=[1, 3],
+                           url_extra="&window=" + _window_excluding_now(inside=False))
+        ok15 = r15["sleep_at"] == [1, 3] and not r15["checking_at"] and not r15["green_at"]
+        results.append(("cold-open-outside-window-presumes-sleep", ok15, r15,
+                        "outside window + slow relay → sleep card at once, never orange"))
+
+        # Positive control for r15 — the SAME stalled relay INSIDE the window must
+        # still show the orange "Vérification…". Without this, r15 could pass on a
+        # presumption that fires everywhere (which would paint a false "éteint" over
+        # a home that is simply slow to answer at 4 p.m.).
+        r15b = run_scenario(p, "cold-open-inside-window-still-checks",
+                            relay_plan=lambda n: "stall", home_plan=lambda n: "fail",
+                            sample_delays_s=[1, 3],
+                            url_extra="&window=" + _window_excluding_now(inside=True))
+        ok15b = r15b["checking_at"] == [1, 3] and not r15b["sleep_at"]
+        results.append(("cold-open-inside-window-still-checks", ok15b, r15b,
+                        "inside window + slow relay → orange, never a presumed sleep"))
+
+        # v8.31 — the presumption must be CORRECTABLE: same off-hours open, but the
+        # home is actually up (auto-WoL by home-watch, or another family member woke
+        # it). The instant sleep card must flip green as soon as the relay answers.
+        r15c = run_scenario(p, "outside-window-presumed-sleep-corrects-green",
+                            relay_plan=lambda n: "up", home_plan=lambda n: "ok",
+                            sample_delays_s=[3],
+                            url_extra="&window=" + _window_excluding_now(inside=False))
+        ok15c = r15c["final_green"] and not r15c["final_sleep"]
+        results.append(("outside-window-presumed-sleep-corrects-green", ok15c, r15c,
+                        "presumed sleep + home actually up → corrects to green"))
 
     return results
 

@@ -682,7 +682,27 @@ function checkStatus(){
   // "Démarrage…" card but doesn't set hasConfirmedState, so on a cold-open wake
   // each 5 s WoL poll fell into this branch and strobed "Démarrage…" ⇄
   // "Vérification…". The countdown UI owns the card while wolSent/remoteWaking.
-  if(!hasConfirmedState&&!wolSent&&!remoteWaking){
+  // v8.31 — outside the uptime window, presume the scheduled shutdown instead of
+  // painting orange while the probe runs. Proving a machine is OFF costs a full
+  // timeout: the home drops the packets, so the relay pays FIRST+RETRY (~7 s) and
+  // only THEN answers "down". During the nightly window that wait was the common
+  // case — the user opened the app precisely because the server is off, and stared
+  // at "Vérification…" for 7 s before getting the button they came for.
+  // Outside the window, "off" is what the schedule says, so we render it at once:
+  // the blue "Éteint (prévu)" card + an armed wake button. The probe keeps running
+  // underneath and setOnline() corrects to green if the home answers (woken by
+  // home-watch's auto-WoL, or by another family member). The wrong-way error is
+  // harmless: a magic packet sent to an already-running host is ignored by the NIC
+  // — WoL cannot reboot a live machine.
+  // This is a PRESUMPTION, not a verdict: hasConfirmedState stays false (no
+  // "vérifié il y a…" age is claimed, and the next poll re-enters this branch
+  // rather than strobing back to orange). downStreak is left pinned by setOffline()
+  // so the first agreeing live "down" commits red without a detour through the
+  // orange re-check — it agrees with what is already on screen.
+  if(!hasConfirmedState&&!wolSent&&!remoteWaking&&navigator.onLine&&inUptimeWindow()===false){
+    setOffline();
+    hasConfirmedState=false;lastVerdictAtMs=0;updateVerdictAge();
+  }else if(!hasConfirmedState&&!wolSent&&!remoteWaking){
     document.getElementById('statusDot').className='status-dot checking';
     document.getElementById('statusCard').className='status-card';
     label.textContent='Vérification...';sub.textContent='ping en cours';

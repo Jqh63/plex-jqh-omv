@@ -19,21 +19,6 @@ var wolStartTime=0,wolPollTimer=null,wolRetryTimers=[];
 // boot countdown WITHOUT firing our own retry POSTs. Cleared on the next settle
 // (setOnline / setOffline) and on startApp.
 var remoteWaking=false;
-// v8.31 — epoch ms past which an adopted remote wake is considered failed. A wake
-// in flight owns the status card until it resolves (green on the up-flip, red once
-// this deadline passes) — a single probe that carries no `waking` info must NOT
-// commit red mid-boot. That was the bug behind "countdown appears, vanishes ~10 s
-// later claiming the home is off, force-refresh disagrees" (2026-07-14): the relay
-// probe times out on a cold mobile radio, the direct-home fallback verdict cannot
-// carry a `waking` flag, and DOWN_CONFIRM committed red on a home that was booting
-// fine. The local-wake path was already immune (setOffline's wolSent guard); a
-// wake adopted from another device (the AM5 logon task) had no such protection —
-// hence "surtout après un allumage par l'AM5".
-var remoteWakeDeadline=0;
-// Grace past the boot ETA before an unconfirmed remote wake is declared failed.
-// Mirrors the countdown's own "30 s past ETA is a fair signal something is slower
-// than usual" threshold (see startCountdown).
-var REMOTE_WAKE_GRACE_MS=30000;
 // v8.10 — epoch ms of the last confident-verdict paint (setOnline / setOffline,
 // live probe settle or cache pre-paint). Read by the checkStatus() staleness
 // guard: a confirmed on-screen verdict older than STATUS_LOCAL_TTL_MS no longer
@@ -573,7 +558,7 @@ function startApp(){
   clearWolPoll();
   clearWolRetries();
   releaseWakeLock();
-  isOnline=false;wolSent=false;remoteWaking=false;remoteWakeDeadline=0;checking=false;checkStartedAt=0;relayReachable=true;relayMissStreak=0;hasConfirmedState=false;
+  isOnline=false;wolSent=false;remoteWaking=false;checking=false;checkStartedAt=0;relayReachable=true;relayMissStreak=0;hasConfirmedState=false;
   // v8.28 — restore the persisted relay-served ETA so a wake fired right after an
   // offline open still seeds a shared-value countdown before the first poll lands.
   relayEtaMs=(config&&typeof config.eta==='number'&&config.eta*1000>=BOOT_MIN_MS&&config.eta*1000<=BOOT_MAX_MS)?config.eta*1000:0;
@@ -788,11 +773,8 @@ function checkStatus(){
 function setRechecking(){
   document.getElementById('refreshBtn').classList.add('spinning');
   // During an active WoL wake, keep the "Démarrage…" state — a re-check card
-  // would contradict the wake-in-progress UI (mirrors setOffline's wake guards).
-  // v8.31 — an adopted remote wake gets the same treatment: the first down of a
-  // boot used to strobe the "Démarrage…" card to orange before setOffline turned
-  // it red two probes later.
-  if(wolSent||(remoteWaking&&Date.now()<remoteWakeDeadline)){setStarting();return;}
+  // would contradict the wake-in-progress UI (mirrors setOffline's wolSent guard).
+  if(wolSent){setStarting();return;}
   document.getElementById('statusDot').className='status-dot checking';
   document.getElementById('statusCard').className='status-card';
   document.getElementById('statusLabel').textContent='Vérification...';
@@ -887,7 +869,6 @@ function setOnline(){
   if(wolSent||remoteWaking)serverReadyHintUntil=Date.now()+APP_WARMUP_MS;
   isOnline=true;
   remoteWaking=false;
-  remoteWakeDeadline=0;
   hasConfirmedState=true;
   lastVerdictAtMs=Date.now();
   // v8.7 — green cancels any in-progress down-confirmation (streak + pending
@@ -952,12 +933,8 @@ function enterRemoteWaking(wakeAgeS){
     var pBtn=document.getElementById('powerBtn'),pLbl=document.getElementById('powerLabel');
     pBtn.className='power-btn sent';pLbl.className='power-label sent';
   }
-  var elapsedMs=(wakeAgeS>0?wakeAgeS:0)*1000;
-  // Re-anchored on every poll that still reports `waking`, so the deadline tracks
-  // the relay's authoritative wake age rather than drifting from our first sight
-  // of it. Bounded in practice by the relay's own WAKE_SIGNAL_TTL_S.
-  remoteWakeDeadline=Date.now()+Math.max(getEta()-elapsedMs,0)+REMOTE_WAKE_GRACE_MS;
   if(!countdownTimer){
+    var elapsedMs=(wakeAgeS>0?wakeAgeS:0)*1000;
     wolStartTime=Date.now()-elapsedMs;
     startCountdown(elapsedMs);
   }
@@ -1058,15 +1035,8 @@ function postWol(isRetry){
 }
 
 function setOffline(){
-  // v8.31 — an adopted remote wake owns the card until its boot deadline: hold
-  // "Démarrage…" instead of committing red. Placed before any state mutation so
-  // it covers EVERY caller (down-confirm, probe failure, WoL failure), mirroring
-  // the wolSent guard further down for locally-fired wakes. Past the deadline the
-  // wake is deemed failed and red is committed normally.
-  if(remoteWaking&&Date.now()<remoteWakeDeadline){setStarting();return;}
   isOnline=false;
   remoteWaking=false;
-  remoteWakeDeadline=0;
   hasConfirmedState=true;
   lastVerdictAtMs=Date.now();
   // v8.7 — reaching setOffline means red is committed (either DOWN_CONFIRM live
@@ -1254,11 +1224,6 @@ function onForeground(){
   // be genuinely in flight (the user is just peeking mid-boot).
   if(wolSent&&Date.now()-wolStartTime>WOL_TIMEOUT_MS){
     wolSent=false;wolStartTime=0;stopCountdown();clearWolPoll();clearWolRetries();releaseWakeLock();
-  }
-  // Same for a remote wake adopted from the relay: past its deadline it is over,
-  // and the countdown must not outlive it across a freeze.
-  if(remoteWaking&&Date.now()>=remoteWakeDeadline){
-    remoteWaking=false;remoteWakeDeadline=0;stopCountdown();
   }
   // A fetch in flight when the screen locked may never resolve (Android
   // suspends network) — its `checking=true` flag would then permanently

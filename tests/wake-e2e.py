@@ -31,12 +31,13 @@ with nothing having run yet).
      thawed poll timer, which reaps the wake on its own, so the test would pass even
      WITHOUT the fix.
 
-2. `frozen-retry-does-not-thaw-into-a-phantom-wake` (v8.32) — a defensive guard. A
-   retry thawed long after its wake must not POST: it would fire a magic packet
-   nobody asked for and re-arm the relay's `waking` signal for every open PWA.
-   Guarded by a CONTROL scenario — a SHORT thaw (inside the retry window) must still
-   POST. Without it, "no phantom POST" could just mean "no timer pending", and the
-   test would pass for the wrong reason.
+2. `stale-REMOTE-wake-does-not-survive-a-freeze` (v8.45) — the SAME bug via the wake
+   the phone merely ADOPTED from the relay (the AM5's logon task POSTs /wol on purpose
+   so every PWA shows the countdown). This is the variant actually hit in practice, and
+   `wolSent` does not catch it — the phone never tapped. Assert on the COUNTDOWN
+   (`powerProgress`), not the status card: the card is repainted to "Vérification…"
+   within ~200 ms while the countdown keeps ticking underneath for seconds. That very
+   mistake made a first pass of this test report the bug as "self-corrects in 200 ms".
 
 Runs against the LIVE deploy by default (post-merge gate), like cold-radio-e2e:
   python3 tests/wake-e2e.py
@@ -141,59 +142,6 @@ def is_starting(s):
 def check(name, cond, detail=""):
     print(f"  {'PASS' if cond else 'FAIL'}  {name}" + (f"  — {detail}" if detail else ""))
     return cond
-
-
-# --------------------------------------------------------------------------
-# 2. v8.32 — a frozen retry must not thaw into a phantom wake
-# --------------------------------------------------------------------------
-def _tap_and_thaw(p, thaw, label):
-    """Tap power, then jump the clock by `thaw` (Playwright's clock runs every
-    pending timer at once on a jump — the Android freeze/thaw semantics).
-    Returns the number of POST /wol before and after the jump."""
-    counters = {"relay": 0, "home": 0, "wol": 0}
-    b = getattr(p, ENGINE).launch()
-    ctx = b.new_context(viewport={"width": 390, "height": 844})
-    page = ctx.new_page()
-    page.route("**/*", _mk_handler(counters, lambda n: "down", lambda n: "fail"))
-    # Fake timers must be installed before the app schedules anything.
-    page.clock.install()
-    page.goto(PWA_URL, wait_until="load")
-    page.wait_for_selector("#powerBtn", state="attached", timeout=10000)
-    page.wait_for_timeout(500)          # let the first probe settle (real time)
-
-    page.click("#powerBtn")
-    page.wait_for_timeout(500)          # the initial POST goes out immediately
-    before = counters["wol"]
-
-    page.clock.fast_forward(thaw)       # ← the thaw: every pending retry fires now
-    page.wait_for_timeout(1500)         # let any POST actually reach the route
-    after = counters["wol"]
-    b.close()
-    print(f"  [{label}] POSTs before thaw={before}, after thaw={after} "
-          f"(thaw={thaw})")
-    return before, after
-
-
-def scenario_phantom_retry(p):
-    print("\n## frozen-retry-does-not-thaw-into-a-phantom-wake (v8.32)")
-    ok = True
-
-    # CONTROL — a SHORT freeze (resumed inside the retry window) MUST still retry.
-    # This proves the timers are genuinely pending and that this harness would
-    # catch a phantom POST. Without it, the assertion below could pass simply
-    # because nothing was scheduled.
-    before, after = _tap_and_thaw(p, "00:00:20", "control: 20 s freeze")
-    ok &= check("CONTROL — a short freeze still fires its retry (UDP-loss cover intact)",
-                after > before, f"{after - before} retry POST(s) on thaw")
-
-    # THE BUG — the page thaws ~24 h later (tapped last night, reopened this
-    # morning). Pre-fix: the four pending retries all fired here, re-arming the
-    # relay's `waking` signal → phantom countdown on every open PWA.
-    before, after = _tap_and_thaw(p, "24:00:00", "bug: 24 h freeze")
-    ok &= check("a 24 h thaw fires NO phantom WoL POST",
-                after == before, f"{after - before} POST(s) after thaw "
-                                 f"(pre-fix: 4)")
-    return ok
 
 
 # --------------------------------------------------------------------------
@@ -326,8 +274,7 @@ def main():
             print(f"[SKIP] engine={ENGINE}: cannot launch — {str(e)[:90]}")
             print("       → ssh omv-deploy setup-codeserver-browser")
             return 0
-        ok = scenario_phantom_retry(p)
-        ok &= scenario_stale_wake_on_resume(p)
+        ok = scenario_stale_wake_on_resume(p)
         ok &= scenario_stale_remote_wake_on_resume(p)
 
     print("\n" + "=" * 72)

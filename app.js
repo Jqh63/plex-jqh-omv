@@ -172,6 +172,19 @@ var WOL_POLL_MS=5000, WOL_TIMEOUT_MS=300000;
 // cache has usually started to expire on the affected hop, and a
 // retry stands a much better chance of being broadcast through.
 var WOL_RETRY_DELAYS_MS=[15000, 30000, 60000, 90000];
+// v8.32 — wall-clock ceiling past which a scheduled retry is NOT fired. Android
+// FREEZES a backgrounded PWA: pending setTimeouts don't run, they queue, and they
+// all fire at once when the page is resumed — possibly many hours later (observed
+// 2026-07-14: three retries POSTed within the same 0.11 s on resume). A thawed
+// retry checking only `wolSent` (a flag frozen mid-wake alongside the timers) sent
+// a magic packet nobody asked for, and — the damaging part — re-armed the relay's
+// `waking` signal, so EVERY open PWA painted a boot countdown for a wake that had
+// never been requested. That is the "phantom countdown matching an AM5 wake from
+// ~24 h earlier" report: the retries were the previous evening's, thawed on the
+// next morning's open. Flags survive a freeze; the wall clock does not lie — a
+// retry is only legitimate inside the window it was scheduled for (last delay +
+// grace).
+var WOL_RETRY_MAX_AGE_MS=WOL_RETRY_DELAYS_MS[WOL_RETRY_DELAYS_MS.length-1]+30000;
 
 // Fallback ETA before any boot history is recorded. Calibrated to the actual
 // observed boot time on the author's J5005 OMV (~80 s wall-clock from magic
@@ -1127,6 +1140,11 @@ function sendWol(){
   WOL_RETRY_DELAYS_MS.forEach(function(delay){
     wolRetryTimers.push(setTimeout(function(){
       if(!wolSent||isOnline)return;
+      // v8.32 — see WOL_RETRY_MAX_AGE_MS: `wolSent` alone is not enough. It is a
+      // flag, and a frozen page thaws its flags and its timers together, so a
+      // retry deferred by a background freeze would still pass this check hours
+      // later and fire a phantom wake. Anchor on the wall clock instead.
+      if(Date.now()-wolStartTime>WOL_RETRY_MAX_AGE_MS)return;
       postWol(true);
     },delay));
   });

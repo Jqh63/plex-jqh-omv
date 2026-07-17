@@ -26,6 +26,17 @@ while the home is still down. This lets *any* open PWA — not just the device
 that fired the wake — show the boot countdown, and deduplicates a wake across
 devices. The signal clears implicitly once the home answers (`up` wins).
 
+**Push heartbeat, oracle inversion** (since 2026-07-17): when `HEARTBEAT_TOKEN`
+is set, the home server declares its own state via `POST /heartbeat` (~15 s
+POSTs, dedicated token, burst-tolerant rate limit). A fresh beat (age <
+`HEARTBEAT_TTL_S`, measured on the VM's clock — no shared-clock assumption) is
+the **primary** `/status` verdict (`source: "heartbeat"` in the response); the
+HEAD pull described above is only consulted when the beat is stale/absent, so
+a broken push channel degrades to exactly the pull-only behaviour. A last-gasp
+`{"up": false}` at clean shutdown flips the verdict red instantly, and the
+first post-WoL beat ends the wake campaign and records a to-the-second boot
+ETA sample. DOWN detection stays pull-based (a crashed home cannot post).
+
 **Server-side wake campaign** (since 2026-07-17): a `POST /wol` also arms a
 relay-side task that re-sends the magic packets at +15/30/60/90 s
 (`WOL_CAMPAIGN_DELAYS_S`) until the home is seen up. The retry bursts used to

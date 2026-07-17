@@ -26,6 +26,16 @@ while the home is still down. This lets *any* open PWA — not just the device
 that fired the wake — show the boot countdown, and deduplicates a wake across
 devices. The signal clears implicitly once the home answers (`up` wins).
 
+**Server-side wake campaign** (since 2026-07-17): a `POST /wol` also arms a
+relay-side task that re-sends the magic packets at +15/30/60/90 s
+(`WOL_CAMPAIGN_DELAYS_S`) until the home is seen up. The retry bursts used to
+be `setTimeout`s in the PWA page, which Android freezes as soon as the phone
+is pocketed — precisely the nominal gesture. The campaign stops at the first
+fresh `up` verdict, when the uptime window closes (if it was armed inside it —
+no re-wake after a scheduled shutdown), or after the last burst. One campaign
+at a time: concurrent `/wol` posts (several devices/scripts within a minute)
+attach to it, and a `/wol` against an up home arms nothing.
+
 `/status` also serves `eta_s`: the relay measures each boot's wall-clock (from
 `/wol` to the next observed `up` flip), keeps a small in-memory ring, and serves
 its median. Every open PWA seeds its wake countdown from this single value, so the
@@ -69,7 +79,9 @@ each owned by the relevant service user:
   `STATUS_TARGET_URL` (enables `/status`),
   `STATUS_POLL_FIRST_TIMEOUT_S`/`STATUS_POLL_RETRY_TIMEOUT_S`/`STATUS_CACHE_FRESH_S`/`STATUS_CACHE_STALE_S`
   (tuning), `WAKE_SIGNAL_TTL_S` (how long `/status` advertises `waking` after a
-  wake, default 150 s), `USAGE_LOG_DEDUPE_S` (min interval between `open` log
+  wake, default 150 s), `WOL_CAMPAIGN_DELAYS_S` (comma-separated offsets in
+  seconds of the server-side wake campaign bursts, default `15,30,60,90`),
+  `USAGE_LOG_DEDUPE_S` (min interval between `open` log
   lines per client, default 600 s), `UPTIME_WINDOW` (e.g. `13h50-00h10` or `13:50-00:10` —
   echoed as a `window` field in `/status`; the PWA adopts it
   automatically, so every user gets the scheduled-uptime "En veille"

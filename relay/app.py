@@ -212,6 +212,30 @@ def current_window() -> str | None:
 PACKET_REPEATS = 3
 PACKET_GAP_S = 0.5
 
+# Server-side wake campaign (2026-07-17, KB ADR 2026-07-16). The retry POSTs
+# used to live in the PWA page as setTimeouts — but Android FREEZES a
+# backgrounded PWA, so "tap Allumer, pocket the phone" froze the retries
+# before they fired. The +15 s one is precisely the retry that matters: it
+# walks past the router's ARP cache TTL (a fresh ARP entry unicasts the magic
+# packet to the sleeping NIC instead of broadcasting). So the campaign now
+# runs HERE, on the always-up relay: a /wol arms a task that re-sends the
+# packets at these offsets until the home answers. Waking stops depending on
+# the phone's sleep state.
+#
+# Stop conditions (any of): the /status verdict flips to a fresh UP (an open
+# PWA polls every ~8 s during a boot, and the keepalive loop polls in-window);
+# the uptime window closes when the campaign was armed inside it (a click at
+# 00:09 must not re-wake a home that just shut down on schedule — yo-yo); the
+# offsets are exhausted. Extra packets on an already-up machine are a NIC
+# no-op, so a stop signal that arrives late is harmless.
+#
+# One campaign at a time: concurrent /wol POSTs (PWA + AM5 script + home-watch
+# auto-WoL within the same minute — observed) attach to the running campaign
+# instead of arming a second one. A /wol against a fresh-UP home arms nothing.
+WOL_CAMPAIGN_DELAYS_S = tuple(
+    float(x) for x in os.environ.get("WOL_CAMPAIGN_DELAYS_S", "15,30,60,90").split(",")
+)
+
 # Rate limit per source IP on /wol. Sliding window, in-memory: a leaked
 # token can't be brute-bursted, and a scanner hitting /wol gets capped
 # fast without ever reaching the token comparison. uvicorn runs as a
@@ -401,11 +425,16 @@ def health_deep():
 # the home server).
 _http_client: httpx.AsyncClient | None = None
 _keepalive_task: "asyncio.Task | None" = None
+_campaign_task: "asyncio.Task | None" = None
+# Event loop captured at startup: /wol runs sync in a threadpool worker, so
+# arming the campaign task requires call_soon_threadsafe onto this loop.
+_loop: "asyncio.AbstractEventLoop | None" = None
 
 
 @app.on_event("startup")
 async def _status_startup() -> None:
-    global _http_client, _keepalive_task
+    global _http_client, _keepalive_task, _loop
+    _loop = asyncio.get_running_loop()
     # The retry timeout is the client default (warm-path budget); _poll_home()
     # overrides per call to give the first attempt the cold-handshake budget.
     _http_client = httpx.AsyncClient(http2=True, timeout=STATUS_POLL_RETRY_TIMEOUT_S)
@@ -414,14 +443,16 @@ async def _status_startup() -> None:
 
 @app.on_event("shutdown")
 async def _status_shutdown() -> None:
-    global _http_client, _keepalive_task
-    if _keepalive_task is not None:
-        _keepalive_task.cancel()
-        try:
-            await _keepalive_task
-        except (asyncio.CancelledError, Exception):
-            pass
-        _keepalive_task = None
+    global _http_client, _keepalive_task, _campaign_task
+    for task in (_keepalive_task, _campaign_task):
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+    _keepalive_task = None
+    _campaign_task = None
     if _http_client is not None:
         await _http_client.aclose()
         _http_client = None
@@ -761,6 +792,70 @@ async def status(request: Request, x_token: str | None = Header(None)):
     )
 
 
+def _send_packets(target_ip: str, pkt: bytes) -> None:
+    # Blocking (PACKET_GAP_S sleeps) — call from a thread, never the event loop.
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    try:
+        for i in range(PACKET_REPEATS):
+            s.sendto(pkt, (target_ip, TARGET_PORT))
+            if i < PACKET_REPEATS - 1:
+                time.sleep(PACKET_GAP_S)
+    finally:
+        s.close()
+
+
+def _resolve_and_send() -> bool:
+    # DNS re-resolved on every burst: a campaign outlives a single request, and
+    # a transient DNS failure must not kill the remaining bursts.
+    try:
+        target_ip = socket.gethostbyname(TARGET_HOST)
+    except socket.gaierror:
+        return False
+    _send_packets(target_ip, magic_packet(ALLOWED_MAC))
+    return True
+
+
+def _home_up_fresh() -> bool:
+    # A verdict worth trusting: UP and within the stale ceiling. Mirrors what
+    # /status itself is willing to serve as green.
+    return (_status_cache.last_state is True
+            and (time.monotonic() - _status_cache.last_success_at) <= STATUS_CACHE_STALE_S)
+
+
+async def _wake_campaign() -> None:
+    armed_at = time.monotonic()
+    armed_in_window = _in_uptime_window()
+    for delay in WOL_CAMPAIGN_DELAYS_S:
+        await asyncio.sleep(max(0.0, delay - (time.monotonic() - armed_at)))
+        t = int(time.monotonic() - armed_at)
+        if _home_up_fresh():
+            logger.info("wake campaign: home answered — stopping (t+%ds)", t)
+            return
+        if armed_in_window and not _in_uptime_window():
+            logger.info("wake campaign: uptime window closed — stopping (t+%ds), "
+                        "no re-wake after a scheduled shutdown", t)
+            return
+        if await asyncio.to_thread(_resolve_and_send):
+            logger.info("wake campaign: re-sent magic packets (t+%ds)", t)
+        else:
+            logger.warning("wake campaign: dns resolution failed (t+%ds) — burst skipped", t)
+    logger.info("wake campaign: exhausted after %d bursts, home still not seen up",
+                len(WOL_CAMPAIGN_DELAYS_S))
+
+
+def _arm_campaign() -> None:
+    # Runs on the event loop (via call_soon_threadsafe from the /wol thread).
+    global _campaign_task
+    if _campaign_task is not None and not _campaign_task.done():
+        return  # single campaign — concurrent triggers attach to it
+    if _home_up_fresh():
+        return  # waking an up home arms nothing (packets already sent are a no-op)
+    _campaign_task = asyncio.create_task(_wake_campaign())
+    logger.info("wake campaign: armed (bursts at +%s s)",
+                "/".join(str(int(d)) for d in WOL_CAMPAIGN_DELAYS_S))
+
+
 @app.post("/wol")
 def wol(req: WolReq, request: Request, x_token: str = Header(...)):
     ip = client_ip(request)
@@ -781,16 +876,9 @@ def wol(req: WolReq, request: Request, x_token: str = Header(...)):
     except socket.gaierror:
         logger.error("wol ip=%s status=502 reason=dns_resolution_failed", ip)
         raise HTTPException(status_code=502, detail="dns resolution failed")
-    pkt = magic_packet(req.mac)
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-    try:
-        for i in range(PACKET_REPEATS):
-            s.sendto(pkt, (target_ip, TARGET_PORT))
-            if i < PACKET_REPEATS - 1:
-                time.sleep(PACKET_GAP_S)
-    finally:
-        s.close()
+    _send_packets(target_ip, magic_packet(req.mac))
+    if _loop is not None:
+        _loop.call_soon_threadsafe(_arm_campaign)
     global _last_wol_at, _wake_pending
     # Anchor the boot-time measurement to the FIRST POST of a wake cycle. The
     # PWA fires ~4 retry POSTs over ~60 s to cover UDP loss; if each reset the

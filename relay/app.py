@@ -236,6 +236,35 @@ WOL_CAMPAIGN_DELAYS_S = tuple(
     float(x) for x in os.environ.get("WOL_CAMPAIGN_DELAYS_S", "15,30,60,90").split(",")
 )
 
+# Push heartbeat home→VM (2026-07-17, KB ADR 2026-07-16, step 1). The home
+# declares its own state (~15 s POSTs) instead of this relay guessing it
+# through a WAN+TLS pull that fails on nearly every first attempt. When a
+# heartbeat is FRESH it is the primary source of the /status verdict; when it
+# is stale/absent, /status degrades to EXACTLY the pull behaviour below
+# ("never worse than today"). A crashed home cannot post "I'm dead", so DOWN
+# detection stays pull-based; the last-gasp POST (up=false at clean shutdown)
+# closes the remaining ~TTL of false "up" on a scheduled power-off, and its
+# ABSENCE becomes a crash signal the pull alone never offered.
+#
+# Auth: HEARTBEAT_TOKEN is DEDICATED (never the family WOL_TOKEN) — whoever
+# holds it can mute the "home down" verdict for everyone. Unset = endpoint off
+# (404-equivalent 503), the relay stays pull-only. TTL is computed on THIS
+# VM's clock (age of receipt), never on a payload timestamp — no shared-clock
+# assumption (DST, RTC drift). ~45 s = 3 missed beats.
+HEARTBEAT_TOKEN = os.environ.get("HEARTBEAT_TOKEN", "")
+HEARTBEAT_TTL_S = float(os.environ.get("HEARTBEAT_TTL_S", "45"))
+# Rate limit sized for bursts (ADR blind spot 4): nominal is 4 POST/min, a
+# post-outage catch-up must never get the home banned by its own relay.
+HEARTBEAT_RATE_MAX_PER_MIN = int(os.environ.get("HEARTBEAT_RATE_MAX_PER_MIN", "40"))
+_hb_last_at: float = 0.0        # monotonic receipt time of the last ACCEPTED beat
+_hb_up: bool = False            # last declared state (True beat / False last-gasp)
+_hb_degraded: bool = False      # home-measured (curl localhost), truer than our probe
+_hb_times: deque = deque(maxlen=HEARTBEAT_RATE_MAX_PER_MIN)
+
+
+def _hb_fresh() -> bool:
+    return _hb_last_at > 0 and (time.monotonic() - _hb_last_at) <= HEARTBEAT_TTL_S
+
 # Rate limit per source IP on /wol. Sliding window, in-memory: a leaked
 # token can't be brute-bursted, and a scanner hitting /wol gets capped
 # fast without ever reaching the token comparison. uvicorn runs as a
@@ -713,6 +742,50 @@ def _maybe_background_refresh() -> None:
     _bg_refresh_task = asyncio.create_task(_background_refresh())
 
 
+class HeartbeatReq(BaseModel):
+    up: bool
+    # Measured by the home itself (curl on localhost) — no TLS, no WAN, truer
+    # than any probe from this VM.
+    degraded: bool = False
+
+
+@app.post("/heartbeat")
+def heartbeat(req: HeartbeatReq, request: Request,
+              x_token: str | None = Header(None)):
+    global _hb_last_at, _hb_up, _hb_degraded, _wake_pending
+    if not HEARTBEAT_TOKEN:
+        raise HTTPException(status_code=503, detail="heartbeat not configured")
+    if x_token is None or not hmac.compare_digest(x_token, HEARTBEAT_TOKEN):
+        logger.warning("heartbeat ip=%s status=401 reason=bad_token", client_ip(request))
+        raise HTTPException(status_code=401, detail="bad token")
+    now = time.monotonic()
+    # Burst-tolerant global limiter (beats come from ONE home): reject with 429
+    # but never punish beyond the window — a rejected beat simply doesn't
+    # refresh the TTL, it can't make the verdict expire faster (ADR blind spot 4).
+    while _hb_times and _hb_times[0] < now - 60:
+        _hb_times.popleft()
+    if len(_hb_times) >= HEARTBEAT_RATE_MAX_PER_MIN:
+        raise HTTPException(status_code=429, detail="rate limited")
+    _hb_times.append(now)
+    was_fresh, was_up = _hb_fresh(), _hb_up
+    # Transitions only (~5 760 beats/day must never reach the journal): first
+    # beat after silence, up/down flip, or a last-gasp.
+    if not was_fresh or was_up != req.up:
+        logger.info("heartbeat: home declares %s%s (was %s)",
+                    "UP" if req.up else "DOWN (clean shutdown)",
+                    " degraded" if req.degraded else "",
+                    ("UP" if was_up else "DOWN") if was_fresh else "silent")
+    # Boot-ETA, measured to the second: the first post-WoL beat is the "I'm
+    # standing" signal — better than a poll that may have missed the flip.
+    if req.up and (not was_fresh or not was_up) and _wake_pending and _last_wol_at:
+        boot_ms = (now - _last_wol_at) * 1000.0
+        if BOOT_MIN_MS <= boot_ms <= BOOT_MAX_MS:
+            _boot_history.append(boot_ms)
+        _wake_pending = False
+    _hb_last_at, _hb_up, _hb_degraded = now, req.up, req.degraded
+    return {"ok": True}
+
+
 @app.get("/status")
 async def status(request: Request, x_token: str | None = Header(None)):
     # Same shared token as /wol (the PWA already holds it). Closes the
@@ -731,45 +804,57 @@ async def status(request: Request, x_token: str | None = Header(None)):
         raise HTTPException(status_code=503, detail="status target not configured")
 
     now = time.monotonic()
-    have_value = _status_cache.last_state is not None
-    success_age = (now - _status_cache.last_success_at) if have_value else None
-    # "Usable" = a value we can serve without lying: present and not past the
-    # stale ceiling. Past STATUS_CACHE_STALE_S we have no trustworthy value.
-    usable = have_value and success_age is not None and success_age <= STATUS_CACHE_STALE_S
-
-    if (now - _status_cache.last_poll_at) >= STATUS_CACHE_FRESH_S:
-        if usable:
-            # Stale-while-revalidate: serve the (slightly stale) cached verdict
-            # NOW and refresh in the background. The PWA never waits behind the
-            # home poll — which on a cold relay→home leg can take up to
-            # STATUS_POLL_FIRST_TIMEOUT_S + RETRY (~4.5 s) and push the PWA's own
-            # 5 s fetch into a false-negative timeout (red flash on a server
-            # that's actually up). See ADR 2026-05-27 addendum (2026-05-31).
-            _maybe_background_refresh()
-        else:
-            # Nothing trustworthy to serve (cold start, or contact lost past the
-            # stale ceiling) → block on a fresh poll, coalesced under the lock.
-            async with _status_poll_lock:
-                if (time.monotonic() - _status_cache.last_poll_at) >= STATUS_CACHE_FRESH_S:
-                    await _poll_home_and_update()
-
-    if _status_cache.last_state is None:
-        body = {"up": False, "stale": False, "age_s": None}
+    if _hb_fresh():
+        # PRIMARY source (KB ADR 2026-07-16): the home's own declaration.
+        # Instant (no TLS handshake at the moment a PWA opens), and honest —
+        # a last-gasp (up=false) turns the verdict red immediately instead of
+        # lying "up" for a TTL after every scheduled shutdown. The pull below
+        # is not consulted at all while a beat is fresh; it takes over the
+        # instant the heartbeat goes stale ("never worse than today").
+        body = {"up": _hb_up, "stale": False,
+                "age_s": int(now - _hb_last_at), "source": "heartbeat"}
+        if _hb_up and _hb_degraded:
+            body["degraded"] = True
     else:
-        success_age = time.monotonic() - _status_cache.last_success_at
-        if success_age > STATUS_CACHE_STALE_S:
-            # Lost contact for too long — the cached "up" can't be trusted.
+        have_value = _status_cache.last_state is not None
+        success_age = (now - _status_cache.last_success_at) if have_value else None
+        # "Usable" = a value we can serve without lying: present and not past the
+        # stale ceiling. Past STATUS_CACHE_STALE_S we have no trustworthy value.
+        usable = have_value and success_age is not None and success_age <= STATUS_CACHE_STALE_S
+
+        if (now - _status_cache.last_poll_at) >= STATUS_CACHE_FRESH_S:
+            if usable:
+                # Stale-while-revalidate: serve the (slightly stale) cached verdict
+                # NOW and refresh in the background. The PWA never waits behind the
+                # home poll — which on a cold relay→home leg can take up to
+                # STATUS_POLL_FIRST_TIMEOUT_S + RETRY (~4.5 s) and push the PWA's own
+                # 5 s fetch into a false-negative timeout (red flash on a server
+                # that's actually up). See ADR 2026-05-27 addendum (2026-05-31).
+                _maybe_background_refresh()
+            else:
+                # Nothing trustworthy to serve (cold start, or contact lost past the
+                # stale ceiling) → block on a fresh poll, coalesced under the lock.
+                async with _status_poll_lock:
+                    if (time.monotonic() - _status_cache.last_poll_at) >= STATUS_CACHE_FRESH_S:
+                        await _poll_home_and_update()
+
+        if _status_cache.last_state is None:
             body = {"up": False, "stale": False, "age_s": None}
         else:
-            body = {
-                "up": _status_cache.last_state,
-                "stale": success_age > STATUS_CACHE_FRESH_S,
-                "age_s": int(success_age),
-            }
-            # Only meaningful alongside up=True: the box answers, the probed
-            # app doesn't. The PWA stays green (no pointless WoL) and warns.
-            if _status_cache.last_state and _status_cache.last_degraded:
-                body["degraded"] = True
+            success_age = time.monotonic() - _status_cache.last_success_at
+            if success_age > STATUS_CACHE_STALE_S:
+                # Lost contact for too long — the cached "up" can't be trusted.
+                body = {"up": False, "stale": False, "age_s": None}
+            else:
+                body = {
+                    "up": _status_cache.last_state,
+                    "stale": success_age > STATUS_CACHE_FRESH_S,
+                    "age_s": int(success_age),
+                }
+                # Only meaningful alongside up=True: the box answers, the probed
+                # app doesn't. The PWA stays green (no pointless WoL) and warns.
+                if _status_cache.last_state and _status_cache.last_degraded:
+                    body["degraded"] = True
     # Wake-in-progress: advertise a recently-fired /wol so every open PWA can
     # show the boot countdown, not just the device that initiated it. Only while
     # still down — once up, the green verdict drives the UI and the signal is moot.
@@ -818,7 +903,11 @@ def _resolve_and_send() -> bool:
 
 def _home_up_fresh() -> bool:
     # A verdict worth trusting: UP and within the stale ceiling. Mirrors what
-    # /status itself is willing to serve as green.
+    # /status itself is willing to serve as green. A fresh heartbeat is the
+    # strongest form — the first post-WoL beat ends a wake campaign to the
+    # second, no poll needed.
+    if _hb_fresh():
+        return _hb_up
     return (_status_cache.last_state is True
             and (time.monotonic() - _status_cache.last_success_at) <= STATUS_CACHE_STALE_S)
 

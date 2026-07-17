@@ -16,7 +16,7 @@ This repo bundles **two components**:
 
 - **Server status** — checks every 15s by fetching the relay's `GET /status` oracle (steady-state offline detection within ~24s of the actual outage)
 - **Wake-on-LAN** — sends magic packet via a self-hosted HTTP→UDP relay (browsers cannot send UDP directly — see [Relay](#relay-required-for-wol) below)
-- **Auto-retry** — re-sends the WoL POST at +15/30/60/90s and polls every 5s post-WoL until the server answers or 5 min timeout
+- **Auto-retry** — the relay re-sends the magic packets at +15/30/60/90s server-side until the server answers (immune to mobile background freeze); the PWA polls every 5s post-WoL until green or 5 min timeout
 - **Dynamic app links** — configurable via URL parameter, built from a catalog of known apps
 - **Read-only mode** — works without a MAC address (status monitoring only, no WoL button)
 - **Installable PWA** — works on PC, Android (Chrome) and iOS (Safari)

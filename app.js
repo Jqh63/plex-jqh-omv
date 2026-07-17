@@ -12,7 +12,7 @@ var relayReachable=true;
 // used a 1-tick debounce (2 misses) — too tight against a cold relay that
 // misses across two ticks, which painted a false "relais off" on cold open.
 var relayMissStreak=0;
-var wolStartTime=0,wolPollTimer=null,wolRetryTimers=[];
+var wolStartTime=0,wolPollTimer=null;
 // v8.25 — true while a wake fired from ANOTHER device (or an earlier session of
 // ours) is in progress, surfaced by the relay's /status `waking` flag. Distinct
 // from wolSent (this session initiated the wake): remoteWaking shows the same
@@ -147,16 +147,12 @@ var STATUS_POLL_INTERVAL_MS=8000;
 // a manual refresh would flip to green immediately. 5 s caps the
 // post-up delay.
 var WOL_POLL_MS=5000, WOL_TIMEOUT_MS=300000;
-// Resend the POST at these offsets after the initial fire (server-side
-// already sends 3 packets per POST). 5 POSTs (1 initial + 4 retries) ×
-// 3 packets = 15 magic packets over 90 s. The 15 s first retry is tuned
-// for the ARP-cache
-// timing on the home router: the initial wake often misses because the
-// router still has a fresh ARP entry pointing at the now-sleeping NIC
-// and unicasts the packet instead of broadcasting. By T+15 s that
-// cache has usually started to expire on the affected hop, and a
-// retry stands a much better chance of being broadcast through.
-var WOL_RETRY_DELAYS_MS=[15000, 30000, 60000, 90000];
+// v8.47 — the wake retry campaign (+15/30/60/90 s bursts, ARP-cache-TTL
+// rationale) moved SERVER-SIDE to the relay: local setTimeout retries were
+// frozen by Android the moment the phone was pocketed — exactly the nominal
+// family gesture — so the retry that matters most (+15 s) rarely fired. The
+// relay arms the campaign on our single POST and stops it when the home
+// answers; waking no longer depends on the phone's sleep state.
 
 // Fallback ETA before any boot history is recorded. Calibrated to the actual
 // observed boot time on the author's J5005 OMV (~80 s wall-clock from magic
@@ -543,7 +539,6 @@ function startApp(){
   }
   buildLinks();
   clearWolPoll();
-  clearWolRetries();
   releaseWakeLock();
   isOnline=false;wolSent=false;remoteWaking=false;checking=false;checkStartedAt=0;relayReachable=true;relayMissStreak=0;hasConfirmedState=false;
   // v8.28 — restore the persisted relay-served ETA so a wake fired right after an
@@ -883,7 +878,6 @@ function setOnline(){
   downStreak=0;if(downRecheckTimer){clearTimeout(downRecheckTimer);downRecheckTimer=null;}
   stopCountdown();
   clearWolPoll();
-  clearWolRetries();
   // v8.20 — wake-lock release is deferred to the end of this function: after a
   // successful wake we keep the screen on a few more seconds so the green card
   // + success toast are actually seen before the screen may re-lock.
@@ -1002,33 +996,24 @@ function stopCountdown(){
 function clearWolPoll(){
   if(wolPollTimer){clearInterval(wolPollTimer);wolPollTimer=null;}
 }
-function clearWolRetries(){
-  wolRetryTimers.forEach(function(t){clearTimeout(t)});
-  wolRetryTimers=[];
-}
-
-// One POST to the relay. `isRetry=true` means a follow-up shot to cover
-// transient UDP loss: we don't want a single retry hitting a 503 or a
-// network blip to reset the wake state — the original POST may already
-// have woken the server, we're just being paranoid. Initial POST keeps
-// the strict 401/403/network handling so a misconfigured token surfaces
-// immediately instead of waiting for the 5-min timeout.
-function postWol(isRetry){
+// One POST to the relay — the relay runs the retry campaign server-side
+// (v8.47). Strict 401/403/network handling so a misconfigured token
+// surfaces immediately instead of waiting for the 5-min timeout.
+function postWol(){
   fetch(config.relay+'/wol',{
     method:'POST',
     cache:'no-store',
     headers:{'Content-Type':'application/json','X-Token':config.token,'X-Client-Id':CLIENT_ID},
     body:JSON.stringify({mac:macToColon(config.mac)})
   }).then(function(r){
-    if(r.ok||isRetry)return;
-    wolSent=false;wolStartTime=0;stopCountdown();clearWolPoll();clearWolRetries();releaseWakeLock();
+    if(r.ok)return;
+    wolSent=false;wolStartTime=0;stopCountdown();clearWolPoll();releaseWakeLock();
     var msg=(r.status===401||r.status===403)?'Relais : accès refusé':'Erreur relais HTTP '+r.status;
     if(navigator.vibrate)navigator.vibrate(300);
     showToast('⚠ '+msg+' — réveil manuel ↓',true,5000);
     setOffline();
   }).catch(function(){
-    if(isRetry)return;
-    wolSent=false;wolStartTime=0;stopCountdown();clearWolPoll();clearWolRetries();releaseWakeLock();
+    wolSent=false;wolStartTime=0;stopCountdown();clearWolPoll();releaseWakeLock();
     // Flip relayReachable manually — a checkStatus() right now would race
     // the WoL POST, and we already know the relay just failed. This is a
     // CONFIRMED failure (the user actually tried to wake), so bypass the
@@ -1110,16 +1095,10 @@ function sendWol(){
   setStarting();
   startCountdown();
   showToast('⚡ Demande de réveil envoyée');
-  postWol(false);
-  // Retry POSTs to drown out UDP loss AND walk past the router's ARP
-  // cache TTL (see WOL_RETRY_DELAYS_MS comment). Server-side also sends
-  // 3 packets per POST, so 5 POSTs × 3 = 15 magic packets over 90 s.
-  WOL_RETRY_DELAYS_MS.forEach(function(delay){
-    wolRetryTimers.push(setTimeout(function(){
-      if(!wolSent||isOnline)return;
-      postWol(true);
-    },delay));
-  });
+  postWol();
+  // No local retry POSTs (v8.47): the relay's server-side campaign re-sends
+  // the packets at +15/30/60/90 s and stops when the home answers — immune
+  // to Android freezing this page.
   // Single polling interval instead of 60/120/180 s setTimeouts. Two reasons:
   //  1. Tighter detection window — boots faster than 60 s previously missed
   //     the first check and waited for the 120 s one (visible gap of ~55 s).
@@ -1129,7 +1108,7 @@ function sendWol(){
   wolPollTimer=setInterval(function(){
     if(!wolSent||isOnline){clearWolPoll();return;}
     if(Date.now()-wolStartTime>WOL_TIMEOUT_MS){
-      wolSent=false;wolStartTime=0;clearWolPoll();clearWolRetries();stopCountdown();releaseWakeLock();checkStatus();
+      wolSent=false;wolStartTime=0;clearWolPoll();stopCountdown();releaseWakeLock();checkStatus();
       if(navigator.vibrate)navigator.vibrate(300);
       // Surface the timeout — silent failure (vibration + flip to red) used to
       // leave family members wondering whether the app was broken. Toast tells
@@ -1229,7 +1208,7 @@ function onForeground(){
   // it may still be genuinely in flight (the user is just peeking mid-boot).
   if((wolSent||remoteWaking)&&Date.now()-wolStartTime>WOL_TIMEOUT_MS){
     wolSent=false;remoteWaking=false;wolStartTime=0;
-    stopCountdown();clearWolPoll();clearWolRetries();releaseWakeLock();
+    stopCountdown();clearWolPoll();releaseWakeLock();
   }
   // A fetch in flight when the screen locked may never resolve (Android
   // suspends network) — its `checking=true` flag would then permanently

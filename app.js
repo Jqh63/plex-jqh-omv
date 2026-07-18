@@ -748,7 +748,7 @@ function checkStatus(){
       // app link warns "still starting" instead of silently landing on a 502.
       if(res.degraded)serverReadyHintUntil=Date.now()+APP_WARMUP_MS;
       writeLocalStatus(true,relayReachable);
-      setOnline();
+      setOnline(res.degraded);
     }else if(res.waking&&!wolSent){
       // v8.25 — a wake fired elsewhere (another device, or an earlier session of
       // ours) is in progress per the relay. Show the boot countdown without
@@ -757,7 +757,12 @@ function checkStatus(){
       // Takes priority over the down-confirmation: waking is a confident
       // "it's coming up" signal, so don't paint red underneath it.
       enterRemoteWaking(res.wakeAgeS);
-    }else if(++downStreak>=DOWN_CONFIRM){
+    }else if(res.declared||++downStreak>=DOWN_CONFIRM){
+      // v8.48 — a heartbeat-sourced "down" is the home's own last words (clean
+      // shutdown last-gasp), not a flaky probe: commit red at once instead of
+      // the orange re-confirmation detour. Covers "extinction avec app ouverte"
+      // — the card flips to Éteint on the next poll, no Vérification… dance.
+      downStreak=DOWN_CONFIRM;
       writeLocalStatus(false,relayReachable);
       setOffline();
     }else{
@@ -819,7 +824,7 @@ function probe(){
     // v8.25 — thread the relay's wake-in-progress signal through (see the
     // remoteWaking branch in checkStatus): `waking` true while a /wol fired
     // recently and the home is still down, `wake_age_s` its age for the ETA.
-    function(j){return {up:j.up,relayReachable:true,window:(typeof j.window==='string'?j.window:null),waking:j.waking===true,wakeAgeS:(typeof j.wake_age_s==='number'?j.wake_age_s:0),etaS:(typeof j.eta_s==='number'?j.eta_s:0),degraded:j.degraded===true};},
+    function(j){return {up:j.up,relayReachable:true,window:(typeof j.window==='string'?j.window:null),waking:j.waking===true,wakeAgeS:(typeof j.wake_age_s==='number'?j.wake_age_s:0),etaS:(typeof j.eta_s==='number'?j.eta_s:0),degraded:j.degraded===true,declared:j.source==='heartbeat'};},
     function(err){
       var relayUp=!!(err&&err.answered);
       return fetchHomeDirectly().then(
@@ -864,7 +869,7 @@ function setFallbackState(){
   }
 }
 
-function setOnline(){
+function setOnline(degraded){
   // v8.27 — capture whether we got here off the back of a wake (local or remote)
   // BEFORE the flags are cleared below: if so, arm the app-warm-up grace so a tap
   // in the next APP_WARMUP_MS gets the "apps still starting" heads-up.
@@ -890,7 +895,12 @@ function setOnline(){
   document.getElementById('statusDot').className='status-dot online';
   document.getElementById('statusCard').className='status-card online';
   document.getElementById('statusLabel').textContent='En ligne';
-  document.getElementById('statusSub').textContent='serveur accessible';
+  // v8.48 — surface the relay's `degraded` on the card itself: host up but the
+  // apps (Seerr…) still starting. Green stays (no pointless wake) but the sub
+  // says WHY a tapped app may spin — the toast hint alone was invisible until
+  // the user actually tapped a link. Self-corrects: the next non-degraded poll
+  // repaints the normal sub.
+  document.getElementById('statusSub').textContent=degraded?'services en cours de démarrage…':'serveur accessible';
   updateVerdictAge();
   if(config.mac){
     var pBtn=document.getElementById('powerBtn'),pLbl=document.getElementById('powerLabel');

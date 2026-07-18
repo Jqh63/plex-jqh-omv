@@ -34,6 +34,12 @@ resolves after a resume (the Android suspend-mid-fetch race). Worst case =
 PROBE + HOME ≈ 13 s and only on a genuine relay+home outage; the common reopen
 settles in <3 s.
 
+> ⚠️ **Both E2E suites default to `PWA_BASE=https://jqh63.github.io/plex-jqh-omv/`
+> — the DEPLOYED app, not your working tree.** A green run proves nothing about
+> uncommitted changes (bit us 2026-07-18: new scenarios "passed" against the live
+> v8.47). To validate local edits:
+> `python3 -m http.server 8123 &` then `PWA_BASE=http://127.0.0.1:8123/ python3 tests/…`
+
 ## When to use which
 
 - **State-machine sim** — change app.js timing logic, run in <1 s, get a

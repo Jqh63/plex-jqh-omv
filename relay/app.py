@@ -578,12 +578,6 @@ async def _poll_home_and_update(background: bool = False) -> None:
     prev_state = _status_cache.last_state
     ok, degraded = await _poll_home(background=background)
     polled_at = time.monotonic()
-    # Verdict flips only — the one line that matters, and the one that makes a false
-    # negative self-evident afterwards ("home DOWN" while the box was demonstrably up)
-    # instead of something to be reconstructed from silence. Steady state logs nothing.
-    if prev_state is not None and ok != prev_state:
-        logger.info("verdict flip: %s → %s", "UP" if prev_state else "DOWN",
-                    "UP" if ok else "DOWN")
     _status_cache.last_poll_at = polled_at
     _status_cache.last_degraded = degraded
     if ok:
@@ -618,7 +612,8 @@ async def _poll_home_and_update(background: bool = False) -> None:
             # is, but with nothing to compare against we have no better answer.)
             _status_cache.last_state = False
             _status_cache.last_success_at = polled_at
-        elif _consecutive_poll_failures < STATUS_DOWN_CONFIRM_POLLS:
+        elif (_consecutive_poll_failures < STATUS_DOWN_CONFIRM_POLLS
+              and (polled_at - _status_cache.last_success_at) <= STATUS_CACHE_STALE_S):
             # Confirm-before-DOWN: a SINGLE failed poll must not turn the home off for
             # the whole family. The relay→home leg is flaky by nature (attempt=1 fails on
             # nearly every poll — the pooled HTTP/2 connection dies between polls), so an
@@ -626,6 +621,14 @@ async def _poll_home_and_update(background: bool = False) -> None:
             # verdict, and hold the freshness clock with it: otherwise last_success_at
             # ages past STATUS_CACHE_STALE_S and /status demotes to "down" anyway — the
             # staleness backstop would silently defeat the confirmation.
+            #
+            # The hold only applies while the held verdict is itself still within
+            # STATUS_CACHE_STALE_S: it protects a *warm* leg against one flaky probe.
+            # A verdict hours past the ceiling (first poll of the day — keepalive
+            # paused overnight, heartbeat long stale) carries nothing worth
+            # protecting, and refreshing ITS clock resurrects it as fresh — IRL
+            # 2026-07-18 04:19 UTC: /status served yesterday's UP as green during a
+            # wake, and _home_up_fresh() stopped the wake campaign at t+15 s.
             _status_cache.last_success_at = polled_at
             logger.info(
                 "poll failed (%d/%d) — holding the last verdict (%s) rather than "
@@ -634,8 +637,17 @@ async def _poll_home_and_update(background: bool = False) -> None:
                 "UP" if _status_cache.last_state else "DOWN",
             )
         else:
-            # Confirmed: consecutive failures agree. Now we believe it.
+            # Confirmed (consecutive failures agree), or the held verdict was
+            # already past the stale ceiling. Now we believe it.
             _status_cache.last_state = False
+    # Verdict flips only — the one line that matters, and the one that makes a false
+    # negative self-evident afterwards ("home DOWN" while the box was demonstrably up)
+    # instead of something to be reconstructed from silence. Logged on the COMMITTED
+    # state (a held verdict is not a flip — the old placement logged the raw poll
+    # result and lied "UP → DOWN" while still serving UP). Steady state logs nothing.
+    if prev_state is not None and _status_cache.last_state != prev_state:
+        logger.info("verdict flip: %s → %s", "UP" if prev_state else "DOWN",
+                    "UP" if _status_cache.last_state else "DOWN")
 
 
 def _in_uptime_window() -> bool:

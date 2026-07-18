@@ -818,7 +818,10 @@ async def status(request: Request, x_token: str | None = Header(None)):
         wake_age = time.monotonic() - _last_wol_at
         if wake_age < WAKE_SIGNAL_TTL_S:
             body["waking"] = True
-            body["wake_age_s"] = int(wake_age)
+            # Sub-second precision matters here: int() truncation alone put up
+            # to ~1 s of the observed ~3 s cross-device countdown offset (the
+            # adopting device back-dates its anchor by this value).
+            body["wake_age_s"] = round(wake_age, 3)
     window = current_window()
     if window:
         body["window"] = window

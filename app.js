@@ -658,11 +658,17 @@ function fetchStatusFromRelay(){
   var headers={'X-Client-Id':CLIENT_ID};
   if(config.token)headers['X-Token']=config.token;
   var opts={headers:headers};
+  // v8.51 — stamp the request round-trip so time-sensitive fields
+  // (wake_age_s) can be transit-compensated by the consumer: the age is
+  // computed server-side at response build and is stale by ~RTT/2 + download
+  // by the time it's applied here (~0.3-0.5 s measured on the e2-micro leg).
+  var t0=Date.now();
   return fetchOnce(config.relay+'/status',opts).then(function(r){
     if(!r.ok)return answered('HTTP '+r.status);
     return r.json().catch(function(){return answered('bad json');});
   }).then(function(j){
     if(!j||typeof j.up!=='boolean')return answered('bad shape');
+    j._rtMs=Date.now()-t0;
     return j;
   });
 }
@@ -887,7 +893,7 @@ function probe(){
     // v8.25 — thread the relay's wake-in-progress signal through (see the
     // remoteWaking branch in checkStatus): `waking` true while a /wol fired
     // recently and the home is still down, `wake_age_s` its age for the ETA.
-    function(j){return {up:j.up,relayReachable:true,window:(typeof j.window==='string'?j.window:null),waking:j.waking===true,wakeAgeS:(typeof j.wake_age_s==='number'?j.wake_age_s:0),etaS:(typeof j.eta_s==='number'?j.eta_s:0),degraded:j.degraded===true,declared:j.source==='heartbeat'};},
+    function(j){return {up:j.up,relayReachable:true,window:(typeof j.window==='string'?j.window:null),waking:j.waking===true,wakeAgeS:(typeof j.wake_age_s==='number'?j.wake_age_s+((j._rtMs||0)/2000):0),etaS:(typeof j.eta_s==='number'?j.eta_s:0),degraded:j.degraded===true,declared:j.source==='heartbeat'};},
     function(err){
       var relayUp=!!(err&&err.answered);
       return fetchHomeDirectly().then(
@@ -1058,7 +1064,18 @@ function startCountdown(elapsedMs){
       document.getElementById('statusSub').textContent='réveil en cours · '+txt.replace('Réveil… ','').toLowerCase();
   };
   tick();
-  countdownTimer=setInterval(tick,1000);
+  // v8.51 — ticks aligned on countdownEndsAt's whole-second boundaries
+  // instead of a free-running 1 s interval: two devices sharing the same
+  // anchor now repaint the same remaining-seconds number at the same wall
+  // instant (a free-running interval phase added up to ~1 s of perceived
+  // cross-device offset). stopCountdown's clearInterval also clears timeouts
+  // (shared handle pool), so the existing teardown keeps working.
+  var schedule=function(){
+    var d=(countdownEndsAt-Date.now())%1000;
+    if(d<=0)d+=1000;
+    countdownTimer=setTimeout(function(){tick();schedule();},d);
+  };
+  schedule();
 }
 function stopCountdown(){
   if(countdownTimer){clearInterval(countdownTimer);countdownTimer=null;}

@@ -60,9 +60,17 @@ to the relay's `/wol` endpoint with proper success/failure feedback
   `type: short description` (no scope — the repo is single-project).
   End-user-facing strings inside the code stay in French; this rule
   is about commit messages, PR titles/bodies and docs.
-- Open PRs with `gh pr create`. Merge via the GitHub UI or
-  `gh pr merge <num> --merge --delete-branch` (preserve commit
-  history, do not squash).
+- Open PRs with `gh pr create -R Jqh63/plex-jqh-omv`. Merge via the
+  GitHub UI or `gh pr merge <num> -R Jqh63/plex-jqh-omv --merge
+  --delete-branch` (preserve commit history, do not squash).
+- **`-R Jqh63/<repo>` on EVERY `gh pr` / `gh issue` command, no
+  exception** — including right after a `cd`. The agent sandbox shares
+  a working directory across four checkouts and the cwd of a shell call
+  does not reliably persist, so without `-R` the repo is resolved from
+  whatever directory is current. PR numbers overlap across the repos,
+  which makes the mistake silent and destructive: on 2026-07-18 a
+  `gh pr merge 137` meant for this repo targeted `knowledge-base#137`,
+  an unrelated PR.
 
 ## Before committing
 

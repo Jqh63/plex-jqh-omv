@@ -48,8 +48,10 @@ at a time: concurrent `/wol` posts (several devices/scripts within a minute)
 attach to it, and a `/wol` against an up home arms nothing.
 
 `/status` also serves `eta_s`: the relay measures each boot's wall-clock (from
-`/wol` to the next observed `up` flip), keeps a small in-memory ring, and serves
-its median. Every open PWA seeds its wake countdown from this single value, so the
+`/wol` to the first **non-degraded** up signal — services actually serving, not
+the first HTTP answer, which lands ~20 s earlier while the apps are still
+starting; heartbeat and pull paths both gate on it), keeps a small in-memory
+ring, and serves its median. Every open PWA seeds its wake countdown from this single value, so the
 timer is identical across devices instead of each running its own local
 boot-history median. Ephemeral (resets on relay restart → `ETA_FALLBACK_S`,
 default 80 s, until a few wakes reconverge).

@@ -567,15 +567,25 @@ async def _poll_home_and_update() -> None:
             # not the boot. Only record when the previous poll was recent enough
             # for the flip timestamp to be trustworthy; still consume the pending
             # wake either way so a later poll can't record an even worse sample.
+            # Degraded up = host answers but the probed app (Seerr) is still
+            # starting: NOT ready yet — keep the wake pending so a later
+            # non-degraded poll records the true services-ready duration
+            # (mirrors the heartbeat path; bounded by BOOT_MAX_MS below).
             tight_polling = (polled_at - prev_poll_at) <= BOOT_SAMPLE_MAX_POLL_GAP_S
-            if tight_polling and BOOT_MIN_MS <= boot_ms <= BOOT_MAX_MS:
-                _boot_history.append(boot_ms)
-            elif not tight_polling:
+            if boot_ms > BOOT_MAX_MS:
+                _wake_pending = False
+            elif degraded:
+                pass
+            elif tight_polling:
+                if boot_ms >= BOOT_MIN_MS:
+                    _boot_history.append(boot_ms)
+                _wake_pending = False
+            else:
                 logger.info(
                     "boot sample dropped: poll gap %.0fs > %ss (no client polling during wake)",
                     polled_at - prev_poll_at, BOOT_SAMPLE_MAX_POLL_GAP_S,
                 )
-            _wake_pending = False
+                _wake_pending = False
     else:
         _consecutive_poll_failures += 1
         if _status_cache.last_state is None:
@@ -711,13 +721,23 @@ def heartbeat(req: HeartbeatReq, request: Request,
                     "UP" if req.up else "DOWN (clean shutdown)",
                     " degraded" if req.degraded else "",
                     ("UP" if was_up else "DOWN") if was_fresh else "silent")
-    # Boot-ETA, measured to the second: the first post-WoL beat is the "I'm
-    # standing" signal — better than a poll that may have missed the flip.
-    if req.up and (not was_fresh or not was_up) and _wake_pending and _last_wol_at:
+    # Boot-ETA, measured to the second — to SERVICES-READY, not first HTTP
+    # answer. The first post-WoL beat fires as soon as the home's network is up,
+    # ~20 s before Seerr actually serves (IRL 2026-07-18: every shared countdown
+    # ended early, then the tapped app 502'd). The beat carries `degraded`
+    # measured by the home itself (curl on Seerr), so the first NON-degraded up
+    # beat is the real "ready" instant: a degraded up beat keeps the wake
+    # pending instead of consuming it, and the sample lands when the apps serve.
+    if req.up and _wake_pending and _last_wol_at:
         boot_ms = (now - _last_wol_at) * 1000.0
-        if BOOT_MIN_MS <= boot_ms <= BOOT_MAX_MS:
-            _boot_history.append(boot_ms)
-        _wake_pending = False
+        if boot_ms > BOOT_MAX_MS:
+            # Services never came up within the sample ceiling — not a boot
+            # measurement anymore. Drop it so a later beat can't record worse.
+            _wake_pending = False
+        elif not req.degraded:
+            if boot_ms >= BOOT_MIN_MS:
+                _boot_history.append(boot_ms)
+            _wake_pending = False
     _hb_last_at, _hb_up, _hb_degraded = now, req.up, req.degraded
     return {"ok": True}
 

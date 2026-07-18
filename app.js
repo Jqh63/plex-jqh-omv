@@ -132,6 +132,12 @@ var checkStartedAt=0;
 // that a longer cache lies confidently when the server has flipped
 // state in the meantime.
 var STATUS_LOCAL_TTL_MS=60000,STATUS_LOCAL_KEY='plex-jqh-omv-status';
+// v8.49 — presumption ceiling for the cold-open pre-paint (see the prior-verdict
+// branch in checkStatus). Beyond the 60 s confident reuse, a persisted "up" up
+// to this old is still painted as a PRESUMPTION (spinner running, no age
+// claimed) instead of the orange wait: within half an hour of last use the
+// state almost never flipped, and the probe corrects within one cycle anyway.
+var PRESUME_STALE_MAX_MS=30*60000;
 // Self-healing status poll cadence. v8.5: 15 s → 8 s. When the home goes down,
 // the relay only learns it on a background SWR refresh (~4.5 s after the first
 // /status poll lands on a stale "up"); at the old 15 s cadence the corrected
@@ -584,12 +590,12 @@ function startApp(){
 // "is the relay reachable?" and "is the home server up?". On relay
 // timeout we retry once; if both fail we fall back to a direct no-cors
 // fetch against the home so up/down detection survives a GCP outage.
-function readLocalStatus(){
+function readLocalStatus(maxAgeMs){
   try{
     var raw=localStorage.getItem(STATUS_LOCAL_KEY);if(!raw)return null;
     var d=JSON.parse(raw);
     if(!d||typeof d!=='object'||typeof d.t!=='number')return null;
-    if(Date.now()-d.t>STATUS_LOCAL_TTL_MS)return null;
+    if(Date.now()-d.t>(maxAgeMs||STATUS_LOCAL_TTL_MS))return null;
     return d;
   }catch(e){return null;}
 }
@@ -698,10 +704,25 @@ function checkStatus(){
     setOffline();
     hasConfirmedState=false;lastVerdictAtMs=0;updateVerdictAge();
   }else if(!hasConfirmedState&&!wolSent&&!remoteWaking){
-    document.getElementById('statusDot').className='status-dot checking';
-    document.getElementById('statusCard').className='status-card';
-    label.textContent='Vérification...';sub.textContent='ping en cours';
-    setButtonChecking();
+    // v8.49 — inside the window, presume the LAST PERSISTED verdict instead of
+    // orange when one exists (bounded by PRESUME_STALE_MAX_MS). The relay knows
+    // the answer instantly (heartbeat-primary), but the PWA→relay fetch still
+    // pays a cold-radio TLS handshake (~3-8 s) — during which the family stared
+    // at "Vérification…" for a state that almost never changed since last open.
+    // Same PRESUMPTION contract as the off-window branch above: only an "up"
+    // prior is painted (a stale red must never flash — v8.7 doctrine),
+    // hasConfirmedState stays false (no "vérifié il y a…" claimed, spinner
+    // runs), and the settling probe corrects within one cycle.
+    var prior=readLocalStatus(PRESUME_STALE_MAX_MS);
+    if(prior&&prior.up&&navigator.onLine&&inUptimeWindow()!==false){
+      setOnline();
+      hasConfirmedState=false;lastVerdictAtMs=0;updateVerdictAge();
+    }else{
+      document.getElementById('statusDot').className='status-dot checking';
+      document.getElementById('statusCard').className='status-card';
+      label.textContent='Vérification...';sub.textContent='interrogation du relais…';
+      setButtonChecking();
+    }
   }
   probe().then(function(res){
     // A newer probe (e.g. a resume re-probe) superseded this one — drop the
@@ -747,6 +768,20 @@ function checkStatus(){
       // and arm the same warm-up hint the post-wake grace uses, so tapping an
       // app link warns "still starting" instead of silently landing on a 502.
       if(res.degraded)serverReadyHintUntil=Date.now()+APP_WARMUP_MS;
+      // v8.49 — during an active wake, a DEGRADED up is not "démarré": the host
+      // answers HTTP but the apps (Seerr…) are still starting — exactly the
+      // ~20 s the old countdown missed ("Serveur démarré" then a 502 on tap).
+      // Keep the Démarrage… countdown running until the first non-degraded
+      // poll; bounded (ETA + warm-up grace) so a genuinely broken app can't
+      // hold the wake UI hostage — past the bound we settle green + degraded
+      // sub, same as before. The relay's ETA sample is gated the same way
+      // (services-ready), so the shared countdown now lands on this instant.
+      if(res.degraded&&(wolSent||remoteWaking)&&wolStartTime&&
+         Date.now()-wolStartTime<getEta()+APP_WARMUP_MS){
+        downStreak=0;if(downRecheckTimer){clearTimeout(downRecheckTimer);downRecheckTimer=null;}
+        writeLocalStatus(true,relayReachable);
+        return;
+      }
       writeLocalStatus(true,relayReachable);
       setOnline(res.degraded);
     }else if(res.waking&&!wolSent){

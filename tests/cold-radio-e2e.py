@@ -107,6 +107,7 @@ def capture_state(page):
     return page.evaluate(
         """() => ({
         statusLabel: document.getElementById('statusLabel').innerText,
+        statusSub: document.getElementById('statusSub') ? document.getElementById('statusSub').innerText : '',
         dotClass: document.getElementById('statusDot').className,
         cardClass: document.getElementById('statusCard').className,
         fallbackClass: document.getElementById('fallbackLink') ? document.getElementById('fallbackLink').className : '',
@@ -167,6 +168,14 @@ def _relay_fulfill(route, verdict):
         route.fulfill(status=200, headers=h, body='{"up": true, "stale": true, "age_s": 30}')
     elif verdict == "down":
         route.fulfill(status=200, headers=h, body='{"up": false, "stale": false, "age_s": null}')
+    elif verdict == "down-declared":
+        # v8.48 — heartbeat-sourced down: the home's own clean-shutdown last-gasp.
+        route.fulfill(status=200, headers=h,
+                      body='{"up": false, "stale": false, "age_s": 2, "source": "heartbeat"}')
+    elif verdict == "up-degraded":
+        # v8.48 — host up, probed app (Seerr) not ready yet.
+        route.fulfill(status=200, headers=h,
+                      body='{"up": true, "stale": false, "age_s": 2, "degraded": true, "source": "heartbeat"}')
     elif verdict == "degraded":
         # Relay ANSWERS with a degraded oracle (STATUS_TARGET_URL unset → 503).
         # Relay alive, /wol works — the PWA must keep it reachable + fall back.
@@ -261,6 +270,7 @@ def run_scenario(p, name, relay_plan, home_plan, sample_delays_s, preseed_cache=
         "final_red": is_red(final),
         "final_warn": is_warn(final),
         "final_wol_disabled": is_wol_disabled(final),
+        "final_sub": final["statusSub"],
         "button_confident_at": [t for t, s in samples if is_button_confident(s)],
         "button_checking_at": [t for t, s in samples if is_button_checking(s)],
         "final_button_confident": is_button_confident(final),
@@ -686,6 +696,31 @@ def collect_results():
         ok15c = r15c["final_green"] and not r15c["final_sleep"]
         results.append(("outside-window-presumed-sleep-corrects-green", ok15c, r15c,
                         "presumed sleep + home actually up → corrects to green"))
+
+        # v8.48 — a heartbeat-declared down (the home's own last-gasp) commits red
+        # at once: no orange re-confirmation detour, even from a reused green
+        # pre-paint. Contrast with cache-up-server-down-corrects-red, where the
+        # probed "down" MUST show the orange first.
+        # Discriminating samples: with a PROBED down, T+2 is still orange (the
+        # DOWN_RECHECK re-probe fires at 2.5 s, red lands ≥T+3 — see r2); a
+        # DECLARED down must already be red at T+2, with no orange re-check.
+        r16 = run_scenario(p, "heartbeat-declared-down-instant-red",
+                           relay_plan=lambda n: "down-declared", home_plan=lambda n: "ok",
+                           sample_delays_s=[2, 3])
+        ok16 = (r16["final_red"] and bool(r16["red_at"]) and r16["red_at"][0] <= 2
+                and not r16["checking_at"])
+        results.append(("heartbeat-declared-down-instant-red", ok16, r16,
+                        "declared down → red by T+2 (no DOWN_RECHECK orange detour)"))
+
+        # v8.48 — up+degraded paints the green card with the explanatory sub
+        # ("services en cours de démarrage…") instead of the generic one.
+        r17 = run_scenario(p, "up-degraded-sub-label",
+                           relay_plan=lambda n: "up-degraded", home_plan=lambda n: "ok",
+                           sample_delays_s=[1, 3])
+        ok17 = (r17["final_green"] and not r17["red_at"]
+                and "services en cours" in r17["final_sub"])
+        results.append(("up-degraded-sub-label", ok17, r17,
+                        "green card with 'services en cours de démarrage…' sub"))
 
     return results
 

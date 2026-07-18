@@ -103,7 +103,8 @@
 		<div class="note">
 		Ces adresses ne répondent que depuis le LAN ou via WireGuard.<br><br>
 		Si rien ne répond : le serveur est éteint (fenêtre d'uptime 13h50-00h10) ou injoignable — réveiller via la PWA WoL.<br><br>
-		Ultime recours, sans DNS ni Docker : <b>{$RESCUE_SSH}</b>
+		Ultime recours, sans DNS ni Docker : <b>{$RESCUE_SSH}</b><br><br>
+		Hors LAN/WG (un docker down tue aussi WireGuard) : <b>{$RESCUE_OOB}</b>
 		</div>
 		</body>
 		</html>` 200

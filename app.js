@@ -310,6 +310,9 @@ function readUrlParams(){
   var status=p.get('status');if(status&&validHost(status))config.status=status;
   var ip=p.get('ip');if(ip&&validIp(ip))config.ip=ip;
   var win=p.get('window');if(win&&parseWindow(win))config.window=win;
+  // v8.50 — admin-only rescue-page link, provisioned via ?rescue= (no settings
+  // field): the URL segment is a secret, typing it in a form would spread it.
+  var rescue=p.get('rescue');if(rescue){var cr=cleanRelay(rescue);if(validRelay(cr))config.rescue=cr;}
   storeConfig(config);
   // Strip the provisioning params from the address bar once adopted: the URL
   // carries the relay token in clear, and it would otherwise persist in the
@@ -365,6 +368,7 @@ function saveConfig(){
   // there's no settings field for it. Carry the existing value across a save so
   // editing other fields doesn't silently drop it.
   var prevStatus=(config&&config.status)||'';
+  var prevRescue=(config&&config.rescue)||'';
   var prevWinSrc=(config&&config.winSrc)||'';
   var prevWindow=(config&&config.window)||'';
   if(!host){showToast('⚠ Domaine requis',true);return}
@@ -389,6 +393,7 @@ function saveConfig(){
   // dropping the relay hands the window back to manual editing.
   if(prevWinSrc==='relay'&&cleanedRelay){config.window=prevWindow;config.winSrc='relay';}
   if(prevStatus)config.status=prevStatus;
+  if(prevRescue)config.rescue=prevRescue;
   storeConfig(config);
   startApp();
 }
@@ -494,6 +499,29 @@ function buildLinks(){
     a.appendChild(text);
     container.appendChild(a);
   });
+  // v8.50 — rescue-page link (only if provisioned via ?rescue=). Deliberately
+  // NEVER server-dependent/greyed: its whole point is to stay clickable when
+  // the home server (or its whole docker stack) is down. Top-level nav like
+  // the app links — the page carries no login, but standalone _blank would
+  // open it in the ephemeral in-app browser (see the app-link comment above).
+  if(config.rescue){
+    var resc=document.createElement('a');
+    resc.className='link-btn';
+    resc.href=config.rescue;
+    var rescIcon=document.createElement('div');
+    rescIcon.className='link-icon cfg';
+    rescIcon.textContent='🛟';
+    var rescText=document.createElement('div');
+    rescText.className='link-text';
+    rescText.textContent='Accès de secours';
+    var rescSub=document.createElement('div');
+    rescSub.className='link-sub';
+    rescSub.textContent='marche même si le serveur est down';
+    rescText.appendChild(rescSub);
+    resc.appendChild(rescIcon);
+    resc.appendChild(rescText);
+    container.appendChild(resc);
+  }
   var cfg=document.createElement('div');
   cfg.className='link-btn';
   cfg.addEventListener('click',showSettings);

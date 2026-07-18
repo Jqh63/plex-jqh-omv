@@ -18,6 +18,7 @@ Security model (defense in depth):
 Cf. relay/README.md for the full deploy / hardening procedure.
 """
 import asyncio
+import hashlib
 import hmac
 import logging
 import os
@@ -76,41 +77,13 @@ STATUS_POLL_RETRY_TIMEOUT_S = float(os.environ.get("STATUS_POLL_RETRY_TIMEOUT_S"
 STATUS_CACHE_FRESH_S = int(os.environ.get("STATUS_CACHE_FRESH_S", "5"))
 STATUS_CACHE_STALE_S = int(os.environ.get("STATUS_CACHE_STALE_S", "60"))
 
-# Keepalive poll (2026-07-14) — COMFORT, not correctness. Read this before touching it.
-#
-# It keeps the relay→home leg warm so /status is served from a fresh cache instead of
-# paying a cold TLS handshake at the exact moment a user opens the PWA. That is all it
-# does. The false "Éteint (prévu)" on a home that was UP is fixed by confirm-before-DOWN
-# + the retry budget (see STATUS_DOWN_CONFIRM_POLLS), which work with or without this
-# loop. Two earlier attempts to fix that bug WITH this loop were both wrong.
-#
-# ⚠️ SAFETY — it is gated on the home's uptime window (_in_uptime_window), and that gate
-# is NOT optional. The probe rides port 443, and the home's autoshutdown plugin has
-# `checksockets: true` / `nsocketnumbers: 2222,443,51820`. A keepalive holding a pooled
-# connection open 24/7 would look like permanent activity and the home would NEVER
-# auto-shut-down — losing the nightly power saving AND the ~50 % cut in exposure window.
-# Caught by Yann before it ever ran a night. Outside the window the loop is silent and
-# the leg goes cold; that is accepted, correctness does not depend on it.
-#
-# Cadence inside the window: 30 s while UP (a connection worth keeping warm), 60 s while
-# DOWN — a DOWN is the verdict that can be WRONG, so it is never the one re-checked
-# lazily. A wake does not depend on this loop: the PWA polls hard on its own during a
-# boot. The home sees a HEAD on SWAG, which has access_log off — no noise there either.
-STATUS_KEEPALIVE_UP_S = int(os.environ.get("STATUS_KEEPALIVE_UP_S", "30"))
-# 60 s, not 300 s. A DOWN verdict is the one that LIES to the family, so it must never
-# be the one we re-check lazily: the first version of this loop used 300 s, its cold
-# start poll failed, and the relay then sat on a confidently-served WRONG "down" for
-# five minutes (2026-07-14, "verdict flip: DOWN → UP" 11 s after an open). Re-checking
-# a down home every 60 s is free and bounds that damage.
-STATUS_KEEPALIVE_DOWN_S = int(os.environ.get("STATUS_KEEPALIVE_DOWN_S", "60"))
-# The keepalive runs in the BACKGROUND, with no client waiting on it — so it must NOT
-# use the foreground budget. That was the design error behind the regression above:
-# 3 s is tuned to fit inside the PWA's own 8 s probe, a constraint that simply does not
-# apply here. A cold TLS handshake from this (slow) e2-micro can exceed 3 s, the
-# background poll then failed, and a WRONG "down" got cached and served instantly.
-# Give the loop room to actually complete the handshake it exists to warm up.
-STATUS_KEEPALIVE_FIRST_TIMEOUT_S = float(os.environ.get("STATUS_KEEPALIVE_FIRST_TIMEOUT_S", "10.0"))
-STATUS_KEEPALIVE_RETRY_TIMEOUT_S = float(os.environ.get("STATUS_KEEPALIVE_RETRY_TIMEOUT_S", "5.0"))
+# Keepalive poll — REMOVED (2026-07-18, KB ADR 2026-07-16 step 4). Its only job was
+# to keep the relay→home pull leg warm; with the heartbeat as the primary /status
+# source that leg is out of the nominal path, and the loop's raison d'être — plus the
+# autoshutdown risk it carried (an inbound 443 connection counts as activity for the
+# home's autoshutdown plugin, `sport=443` in its `ss` match) — went with it. If a
+# periodic relay→home poller is ever reintroduced, it MUST be gated on the home's
+# uptime window again (see _in_uptime_window) or the home will never auto-shut-down.
 
 # Confirm-before-DOWN (2026-07-14) — the real fix, after two wrong ones.
 #
@@ -223,7 +196,7 @@ PACKET_GAP_S = 0.5
 # the phone's sleep state.
 #
 # Stop conditions (any of): the /status verdict flips to a fresh UP (an open
-# PWA polls every ~8 s during a boot, and the keepalive loop polls in-window);
+# PWA polls every ~8 s during a boot, and the first post-WoL heartbeat is instant);
 # the uptime window closes when the campaign was armed inside it (a click at
 # 00:09 must not re-wake a home that just shut down on schedule — yo-yo); the
 # offsets are exhausted. Extra packets on an already-up machine are a NIC
@@ -293,7 +266,8 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 # httpx logs every request at INFO. That was tolerable when the home was only polled on
-# client traffic; with the keepalive loop it is one line every 30 s — ~2 900/day of
+# client traffic; kept silenced even without the keepalive loop — polls still ride on
+# every /status SWR refresh, lines of
 # "HEAD … 405", drowning the few lines that actually mean something (a slow poll, a
 # verdict flip, a /wol). Silence the routine chatter; a real transport problem still
 # surfaces as a WARNING from httpx and, above all, through our own poll logging.
@@ -453,7 +427,6 @@ def health_deep():
 # resumption) instead of a full TLS handshake (1+ s from us-east1 to
 # the home server).
 _http_client: httpx.AsyncClient | None = None
-_keepalive_task: "asyncio.Task | None" = None
 _campaign_task: "asyncio.Task | None" = None
 # Event loop captured at startup: /wol runs sync in a threadpool worker, so
 # arming the campaign task requires call_soon_threadsafe onto this loop.
@@ -462,25 +435,30 @@ _loop: "asyncio.AbstractEventLoop | None" = None
 
 @app.on_event("startup")
 async def _status_startup() -> None:
-    global _http_client, _keepalive_task, _loop
+    global _http_client, _loop
     _loop = asyncio.get_running_loop()
     # The retry timeout is the client default (warm-path budget); _poll_home()
     # overrides per call to give the first attempt the cold-handshake budget.
     _http_client = httpx.AsyncClient(http2=True, timeout=STATUS_POLL_RETRY_TIMEOUT_S)
-    _keepalive_task = asyncio.create_task(_keepalive_loop())
+    # Which code is running, without trusting a hand-bumped constant: the file's
+    # own digest, comparable against `sha256sum relay/app.py` in the repo.
+    try:
+        with open(__file__, "rb") as f:
+            digest = hashlib.sha256(f.read()).hexdigest()[:12]
+        logger.info("wol-relay starting — app.py sha256 %s", digest)
+    except OSError:
+        pass
 
 
 @app.on_event("shutdown")
 async def _status_shutdown() -> None:
-    global _http_client, _keepalive_task, _campaign_task
-    for task in (_keepalive_task, _campaign_task):
-        if task is not None:
-            task.cancel()
-            try:
-                await task
-            except (asyncio.CancelledError, Exception):
-                pass
-    _keepalive_task = None
+    global _http_client, _campaign_task
+    if _campaign_task is not None:
+        _campaign_task.cancel()
+        try:
+            await _campaign_task
+        except (asyncio.CancelledError, Exception):
+            pass
     _campaign_task = None
     if _http_client is not None:
         await _http_client.aclose()
@@ -506,10 +484,8 @@ _status_cache = _StatusCache()
 _status_poll_lock = asyncio.Lock()
 
 
-async def _poll_home(background: bool = False) -> tuple[bool, bool]:
-    # HEAD + 1 retry. Returns (up, degraded). `background` = the keepalive loop, which
-    # has NO client waiting and therefore gets a budget generous enough to actually
-    # complete a cold TLS handshake (see STATUS_KEEPALIVE_FIRST_TIMEOUT_S).
+async def _poll_home() -> tuple[bool, bool]:
+    # HEAD + 1 retry. Returns (up, degraded).
     #
     # ANY HTTP response means the host is serving — it answered the TCP+TLS
     # handshake and spoke HTTP, which is the only thing WoL cares about. The
@@ -525,14 +501,10 @@ async def _poll_home(background: bool = False) -> tuple[bool, bool]:
     # Observability (2026-07-14), deliberately QUIET. A "down" verdict here paints the
     # home as off in EVERY PWA, so a wrong one (home up, probe merely slow) lies to the
     # whole family — and until now a timed-out poll logged NOTHING, which made a false
-    # "éteint" impossible to attribute after the fact. But this now runs on a keepalive
-    # every 30 s, so logging each poll would be a tap, not a signal. Two lines only:
-    # a success that burned more than half its budget (the early warning that the leg
-    # is going cold), and the verdict FLIPS (logged by the caller). Steady state is
-    # silent.
-    timeouts = ((STATUS_KEEPALIVE_FIRST_TIMEOUT_S, STATUS_KEEPALIVE_RETRY_TIMEOUT_S)
-                if background
-                else (STATUS_POLL_FIRST_TIMEOUT_S, STATUS_POLL_RETRY_TIMEOUT_S))
+    # "éteint" impossible to attribute after the fact. Two lines only: a success that
+    # burned more than half its budget (the early warning that the leg is going cold),
+    # and the verdict FLIPS (logged by the caller). Steady state is silent.
+    timeouts = (STATUS_POLL_FIRST_TIMEOUT_S, STATUS_POLL_RETRY_TIMEOUT_S)
     for attempt, timeout in enumerate(timeouts):
         started = time.monotonic()
         try:
@@ -569,14 +541,14 @@ def _current_eta_s() -> int:
     return max(1, round(med / 1000))
 
 
-async def _poll_home_and_update(background: bool = False) -> None:
+async def _poll_home_and_update() -> None:
     # Run one poll and fold the verdict into the cache. Shared by the blocking
     # path (cold/expired cache) and the background SWR refresh. Caller holds
     # _status_poll_lock.
     global _wake_pending, _consecutive_poll_failures
     prev_poll_at = _status_cache.last_poll_at
     prev_state = _status_cache.last_state
-    ok, degraded = await _poll_home(background=background)
+    ok, degraded = await _poll_home()
     polled_at = time.monotonic()
     _status_cache.last_poll_at = polled_at
     _status_cache.last_degraded = degraded
@@ -653,19 +625,12 @@ async def _poll_home_and_update(background: bool = False) -> None:
 def _in_uptime_window() -> bool:
     """True when the home is INSIDE its uptime window (local time at the home).
 
-    This gates the keepalive, and it is not an optimisation — it is a safety
-    requirement. The home's `autoshutdown` plugin has `checksockets: true` with
-    `nsocketnumbers: 2222,443,51820`, and the status probe goes to Seerr through SWAG,
-    i.e. **port 443**. A keepalive holding a pooled HTTP/2 connection open 24/7 would
-    therefore look like permanent activity and the home would NEVER auto-shut-down —
-    losing both the nightly power saving and the ~50 % reduction in exposure window.
-    Caught by Yann, 2026-07-14, before it ever ran a night.
-
-    So the loop only runs while the home is meant to be up anyway (where 443 traffic is
-    harmless), and goes silent at the window's end so the shutdown can proceed. Outside
-    the window the leg goes cold again — that is fine: the false "éteint" is fixed by
-    confirm-before-DOWN + the retry budget (which work everywhere), not by this loop.
-    The keepalive is comfort, not correctness.
+    Gates the wake campaign's stop condition ("window closed → no re-wake after a
+    scheduled shutdown"). It used to gate the (now removed) keepalive loop too — and
+    for any future periodic relay→home poller the same safety rule holds: the probe
+    rides port 443, which the home's autoshutdown plugin counts as activity
+    (`checksockets: true`, `nsocketnumbers: 2222,443,51820`), so an ungated 24/7
+    poller would keep the home awake forever (caught by Yann, 2026-07-14).
 
     The VM runs UTC; the window is expressed in the home's local time.
     """
@@ -680,51 +645,10 @@ def _in_uptime_window() -> bool:
         cur = now.hour * 60 + now.minute
         start, end = sh * 60 + sm, eh * 60 + em
     except Exception:
-        logger.warning("keepalive: cannot parse window %r — staying off", window)
+        logger.warning("uptime window: cannot parse %r — treating as outside", window)
         return False
     # The window wraps midnight (e.g. 13:50-00:10).
     return start <= cur < end if start < end else (cur >= start or cur < end)
-
-
-async def _keepalive_loop() -> None:
-    # See STATUS_KEEPALIVE_UP_S. Holds the relay→home leg warm so /status is always
-    # served from a fresh cache instead of blocking on a cold handshake. Never raises:
-    # a failed poll is already absorbed by _poll_home returning False, and this task
-    # must outlive every transient (a crash here would silently restore the old cold
-    # behaviour — the exact bug it exists to prevent).
-    # Log the window transitions — and ONLY the transitions (a couple of lines a day).
-    # Without this, "the keepalive is off" could only be INFERRED from silence, and a
-    # successful poll is silent too: the same silence would cover a gate that works and a
-    # gate that doesn't. That inference is precisely the trap that made a timed-out probe
-    # invisible for weeks. A positive signal, or nothing is proven.
-    active: bool | None = None
-    while True:
-        # Outside the home's uptime window we MUST NOT poll: the probe rides port 443,
-        # which the home's autoshutdown plugin counts as activity (see _in_uptime_window).
-        # Polling there would keep the box awake forever. Re-check every minute so the
-        # loop resumes on its own at the window's start.
-        now_active = _in_uptime_window()
-        if now_active != active:
-            active = now_active
-            logger.info(
-                "keepalive %s (uptime window %s)",
-                "ACTIVE — warming the home leg" if active
-                else "PAUSED — outside the window, the home must be free to auto-shut-down",
-                current_window() or "unset",
-            )
-        if not active:
-            await asyncio.sleep(60)
-            continue
-        try:
-            async with _status_poll_lock:
-                await _poll_home_and_update(background=True)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("keepalive poll failed")
-        delay = (STATUS_KEEPALIVE_UP_S if _status_cache.last_state
-                 else STATUS_KEEPALIVE_DOWN_S)
-        await asyncio.sleep(delay)
 
 
 async def _background_refresh() -> None:

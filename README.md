@@ -97,6 +97,8 @@ Since **v7.0 (relay-as-oracle)** the primary status check is a single `fetch GET
 
 `statusHost` (used by the fallback) resolves as: explicit `?status=` param → first subdomain app from the apps list → base `host`.
 
+**v8.50 — admin rescue link.** An optional `?rescue=<https-url>` provisioning param (URL-only, no settings field: the target URL segment is a secret and typing it in a form would spread it) adds an "Accès de secours" entry to the links list, pointing at the relay-hosted emergency page. The link is deliberately never greyed out by server state — its whole point is to remain clickable when the home server (or its docker stack, VPN included) is down.
+
 Example: `host=myserver.example.com` + `apps=seerr,plexweb` → pings `seerr.myserver.example.com`. Useful when the root domain lacks a valid SSL cert (e.g. DuckDNS wildcard certs cover `*.domain` but not the bare root).
 
 ## Files

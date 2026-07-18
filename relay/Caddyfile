@@ -48,6 +48,67 @@
 		}
 	}
 
+	# Out-of-band rescue page. When a host-upgrade restarts dockerd on the
+	# home server, EVERY containerized access path dies at once — AdGuard
+	# (.21, the LAN resolver) and nginx-internal (.20, which serves the
+	# *.jqh vhosts) are both containers. A hosts-file entry does NOT help:
+	# it resolves to .20, i.e. still a container. So the admin loses access
+	# by name AND by wildcard subdomain, while the services themselves are
+	# up (OMV's UI is the HOST nginx on :8090, no Docker in the path).
+	#
+	# This page lists the direct-IP fallbacks. It lives HERE, on the GCP VM,
+	# because that is the only piece of the ecosystem with no dependency on
+	# the home server: it answers even when the homelab is fully powered off.
+	#
+	# Served inline via respond (not a file) on purpose: it reuses the
+	# existing push-caddyfile + apply routes, so shipping it needs no new
+	# sudoers verb and no admin bootstrap on the VM.
+	#
+	# Everything identifying the private infrastructure is injected from
+	# the env file, NOT committed: this repo is public. RESCUE_PATH is the
+	# unguessable URL segment (publishing it here would defeat its purpose),
+	# RESCUE_HOST the LAN address of the home server, RESCUE_SSH the
+	# last-resort shell hint. The public repo therefore carries the page's
+	# structure and nothing about the actual topology. Real values live in
+	# /etc/caddy/wol-relay.env on the VM, and the canonical URL is recorded
+	# in the knowledge-base (wol-relay/README.md) — the recovery copy if the
+	# bookmark is ever lost.
+	handle /{$RESCUE_PATH} {
+		header Content-Type "text/html; charset=utf-8"
+		respond `<!DOCTYPE html>
+		<html lang="fr">
+		<head>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width,initial-scale=1">
+		<meta name="robots" content="noindex,nofollow">
+		<title>Accès de secours — homelab</title>
+		<style>
+		body{font-family:system-ui,sans-serif;margin:0;padding:1.5rem;background:#12151a;color:#e6e8eb;line-height:1.5}
+		h1{font-size:1.25rem;margin:0 0 .25rem}
+		p.sub{margin:0 0 1.5rem;color:#9aa4b2;font-size:.9rem}
+		a.tile{display:block;padding:.9rem 1rem;margin-bottom:.6rem;background:#1c212b;border:1px solid #2b3240;border-radius:10px;color:#e6e8eb;text-decoration:none}
+		a.tile:active{background:#242b38}
+		.n{font-weight:600}
+		.u{color:#7aa2f7;font-size:.85rem;word-break:break-all}
+		.note{margin-top:1.5rem;padding:.9rem 1rem;background:#1c212b;border-left:3px solid #e0af68;border-radius:6px;font-size:.85rem;color:#c3cad6}
+		</style>
+		</head>
+		<body>
+		<h1>Accès de secours</h1>
+		<p class="sub">Accès par IP directe, sans DNS ni conteneur Docker dans le chemin. À utiliser quand un update docker coupe AdGuard et nginx-internal.</p>
+		<a class="tile" href="http://{$RESCUE_HOST}:8090"><span class="n">OMV — interface web</span><br><span class="u">http://{$RESCUE_HOST}:8090</span></a>
+		<a class="tile" href="http://{$RESCUE_HOST}:3080"><span class="n">Homepage — tableau de bord</span><br><span class="u">http://{$RESCUE_HOST}:3080</span></a>
+		<a class="tile" href="http://{$RESCUE_HOST}:8443"><span class="n">code-server</span><br><span class="u">http://{$RESCUE_HOST}:8443</span></a>
+		<a class="tile" href="http://{$RESCUE_HOST}:5055"><span class="n">Seerr</span><br><span class="u">http://{$RESCUE_HOST}:5055</span></a>
+		<div class="note">
+		Ces adresses ne répondent que depuis le LAN ou via WireGuard.<br><br>
+		Si rien ne répond : le serveur est éteint (fenêtre d'uptime 13h50-00h10) ou injoignable — réveiller via la PWA WoL.<br><br>
+		Ultime recours, sans DNS ni Docker : <b>{$RESCUE_SSH}</b>
+		</div>
+		</body>
+		</html>` 200
+	}
+
 	reverse_proxy localhost:8000 {
 		header_up -X-Forwarded-For
 		header_up X-Real-IP {remote_host}

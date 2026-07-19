@@ -747,8 +747,13 @@ function checkStatus(){
     // prior is painted (a stale red must never flash — v8.7 doctrine),
     // hasConfirmedState stays false (no "vérifié il y a…" claimed, spinner
     // runs), and the settling probe corrects within one cycle.
+    // v8.52 — never re-presume while a down-confirmation is in flight: a live
+    // "down" has already refuted the stale prior, and setOnline() here would
+    // reset downStreak on every re-check cycle, making red unreachable for up
+    // to PRESUME_STALE_MAX_MS (deterministic e2e failure: clockjump-wake-
+    // stale-green-demoted stuck on "Vérification..." forever).
     var prior=readLocalStatus(PRESUME_STALE_MAX_MS);
-    if(prior&&prior.up&&navigator.onLine&&inUptimeWindow()!==false){
+    if(prior&&prior.up&&navigator.onLine&&inUptimeWindow()!==false&&downStreak===0){
       setOnline();
       hasConfirmedState=false;lastVerdictAtMs=0;updateVerdictAge();
     }else{

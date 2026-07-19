@@ -41,7 +41,7 @@ with nothing having run yet).
 
 Runs against the LIVE deploy by default (post-merge gate), like cold-radio-e2e:
   python3 tests/wake-e2e.py
-  PWA_BASE="file:///config/workspace/plex-jqh-omv/index.html" python3 tests/wake-e2e.py
+  python3 tests/wake-e2e.py   (défaut = working tree)
 """
 
 import os
@@ -52,7 +52,15 @@ from playwright.sync_api import Route, sync_playwright
 
 RELAY_HOST = "relay.example.test"
 CONFIG_HOST = "home.example.test"
-PWA_BASE = os.environ.get("PWA_BASE", "https://jqh63.github.io/plex-jqh-omv/")
+# Default = the WORKING TREE (file:// on this checkout) so a local fix is what
+# the suite actually exercises. The deployed GitHub Pages site is opt-in:
+# PWA_BASE=deployed (post-merge gate) or any explicit URL. Bitten 2026-07-19:
+# with the deployed default, a v8.49 regression read as a "pre-existing flaky".
+_LOCAL_BASE = "file://" + os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "index.html"))
+PWA_BASE = os.environ.get("PWA_BASE") or _LOCAL_BASE
+if PWA_BASE == "deployed":
+    PWA_BASE = "https://jqh63.github.io/plex-jqh-omv/"
 PWA_URL = (
     f"{PWA_BASE}"
     f"?host={CONFIG_HOST}&mac=AABBCCDDEEFF"

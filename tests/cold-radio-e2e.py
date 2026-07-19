@@ -25,8 +25,8 @@ bounds* (orange ≤ 13 s) are the sim's job; this E2E checks the transitions.
 
 Run against the working tree BEFORE merge (the PWA is flat HTML/JS so file://
 works):
-  PWA_BASE="file:///config/workspace/plex-jqh-omv/index.html" python3 tests/cold-radio-e2e.py
-Or against the live deploy (post-merge gate): leave PWA_BASE unset.
+  python3 tests/cold-radio-e2e.py   (défaut = working tree)
+Against the live deploy (post-merge gate): PWA_BASE=deployed.
 
 Scenarios (mirror state-machine-sim.py):
   1. cold-launch-server-up-fast        — /status up → green ≤3 s
@@ -78,7 +78,15 @@ from playwright.sync_api import sync_playwright, Route
 
 CONFIG_HOST = "test.example.com"
 RELAY_HOST = "r.example.com"
-PWA_BASE = os.environ.get("PWA_BASE", "https://jqh63.github.io/plex-jqh-omv/")
+# Default = the WORKING TREE (file:// on this checkout) so a local fix is what
+# the suite actually exercises. The deployed GitHub Pages site is opt-in:
+# PWA_BASE=deployed (post-merge gate) or any explicit URL. Bitten 2026-07-19:
+# with the deployed default, a v8.49 regression read as a "pre-existing flaky".
+_LOCAL_BASE = "file://" + os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "index.html"))
+PWA_BASE = os.environ.get("PWA_BASE") or _LOCAL_BASE
+if PWA_BASE == "deployed":
+    PWA_BASE = "https://jqh63.github.io/plex-jqh-omv/"
 PWA_URL = (
     f"{PWA_BASE}"
     f"?host={CONFIG_HOST}&mac=AABBCCDDEEFF"

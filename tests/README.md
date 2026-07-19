@@ -104,10 +104,14 @@ PWA_ENGINES=chromium python3 tests/cold-radio-e2e.py
 PWA_ENGINES=webkit   python3 tests/cold-radio-e2e.py
 ```
 
-> The code-server sandbox can run **chromium only** (no root to apt-install the
-> WebKit deps). The WebKit lane is wired up and runs wherever those libs exist
-> — a Mac (`p.webkit` = real Safari engine out of the box), a provisioned CI, or
-> the sandbox if the deps are ever baked into the container init.
+> The code-server sandbox installs the WebKit deps at container init (root
+> cont-init script, versioned in the private knowledge-base repo under
+> `code-server/init/`), so both engines run there since 2026-07-19. The deps
+> are re-installed after each monthly container recreate; if that install ever
+> fails, the WebKit lane degrades back to SKIP — Chromium is never affected.
+> Engine coverage caveat: this exercises WebCore/JSC, **not** iOS PWA
+> OS-level quirks (standalone cookie jar, popup activation, background
+> freeze) — those still need a physical iPhone.
 
 ## What the E2E actually does
 

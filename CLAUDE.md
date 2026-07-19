@@ -116,14 +116,12 @@ auto-update for installed users:
 No staging environment — `main` is production via GitHub Pages. Test
 on the public URL after merge.
 
-⚠️ **The e2e suites test the DEPLOYED site by default, not your working
-tree**: `tests/cold-radio-e2e.py` (and friends) load
-`PWA_BASE=https://jqh63.github.io/plex-jqh-omv/`. A local fix has no
-effect on their verdict, and a deployed regression looks like a
-"pre-existing flaky" (bitten 2026-07-19: a deterministic v8.49 bug was
-mislabeled flaky for exactly this reason). To exercise the working tree:
-`python3 -m http.server 8765` then
-`PWA_BASE=http://127.0.0.1:8765/ python3 tests/cold-radio-e2e.py`.
+The e2e suites test the **working tree** by default (`file://` on this
+checkout). To gate the live deploy after a merge: `PWA_BASE=deployed
+python3 tests/cold-radio-e2e.py` (or any explicit URL). The default used
+to be the deployed site — a deterministic v8.49 regression read as a
+"pre-existing flaky" for exactly that reason (2026-07-19), hence the
+flip.
 
 ## Architecture traps to avoid
 

@@ -104,11 +104,13 @@ PWA_ENGINES=chromium python3 tests/cold-radio-e2e.py
 PWA_ENGINES=webkit   python3 tests/cold-radio-e2e.py
 ```
 
-> The code-server sandbox installs the WebKit deps at container init (root
-> cont-init script, versioned in the private knowledge-base repo under
-> `code-server/init/`), so both engines run there since 2026-07-19. The deps
-> are re-installed after each monthly container recreate; if that install ever
-> fails, the WebKit lane degrades back to SKIP — Chromium is never affected.
+> The code-server sandbox gets the WebKit deps **on demand** (same flow as
+> Chromium): if the lane SKIPs after a container recreate, run
+> `ssh omv-deploy setup-codeserver-browser` once — it installs the Chromium +
+> WebKit system libs via a pinned root exec (route documented in the private
+> knowledge-base repo, `code-server/README.md` § Playwright). Both engines run
+> there since 2026-07-19; a missing install only degrades WebKit to SKIP —
+> Chromium is never affected.
 > Engine coverage caveat: this exercises WebCore/JSC, **not** iOS PWA
 > OS-level quirks (standalone cookie jar, popup activation, background
 > freeze) — those still need a physical iPhone.

@@ -61,6 +61,18 @@ set -euo pipefail
 STAGING_DIR="/tmp/wol-relay-staging"
 mkdir -p "$STAGING_DIR"
 
+# This VM runs on UTC; the home server it watches — and the admin reading
+# these logs — live in Europe/Paris. journalctl stamps lines in the VM's
+# zone, and its arg vector is pinned in sudoers, so the timestamps cannot
+# be re-zoned here. Print the live offset instead, ahead of every tail.
+# Not cosmetic: reading a UTC tail as local time once inverted a whole
+# diagnosis (2026-07-26 — a clean auto-shutdown read as a 2 h overshoot,
+# because the relay's "home DOWN" line sat 2 h off the server's own log).
+journal_banner() {
+  printf '=== journalctl -u %s (last 100) — VM clock %s | Europe/Paris %s ===\n' \
+    "$1" "$(date '+%H:%M %Z')" "$(TZ=Europe/Paris date '+%H:%M %Z')"
+}
+
 case "${SSH_ORIGINAL_COMMAND:-}" in
   push-app)
     cat > "$STAGING_DIR/app.py"
@@ -135,9 +147,11 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
     # Read-only journal tail. journalctl needs sudo because the `deploy`
     # user isn't in the systemd-journal group; the sudoers entry pins
     # the exact arg vector (no user-controlled flags, fixed -n 100).
+    journal_banner wol-relay
     sudo /usr/bin/journalctl -u wol-relay -n 100 --no-pager
     ;;
   logs-caddy)
+    journal_banner caddy
     sudo /usr/bin/journalctl -u caddy -n 100 --no-pager
     ;;
   log-footprint)
@@ -172,6 +186,7 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
     /bin/systemctl list-timers home-watch.timer --no-pager
     ;;
   logs-home-watch)
+    journal_banner home-watch
     sudo /usr/bin/journalctl -u home-watch -n 100 --no-pager
     ;;
   push-pock-sync-app)
@@ -202,6 +217,7 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
     /usr/bin/curl -fsS http://127.0.0.1:8001/pock/health
     ;;
   logs-pock-sync)
+    journal_banner pock-sync
     sudo /usr/bin/journalctl -u pock-sync -n 100 --no-pager
     ;;
   pock-dump)

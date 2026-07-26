@@ -313,6 +313,11 @@ function readUrlParams(){
   var relay=p.get('relay');if(relay){var cr=cleanRelay(relay);if(validRelay(cr))config.relay=cr;}
   var token=p.get('token');if(token)config.token=token;
   var title=p.get('title');if(title)config.title=title;
+  // v8.53 — device name, provisionable here so the admin can hand out an
+  // already-named link. The settings field alone would leave the label
+  // empty in practice: the family users this PWA targets never open the
+  // settings screen, which is the whole point of URL provisioning.
+  var label=cleanLabel(p.get('label')||'');if(label)config.label=label;
   var apps=p.get('apps');if(apps)config.apps=apps;
   var status=p.get('status');if(status&&validHost(status))config.status=status;
   var ip=p.get('ip');if(ip&&validIp(ip))config.ip=ip;

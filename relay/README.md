@@ -159,7 +159,9 @@ wol-relay` + `reload caddy`) and a final `health`. Typical duration:
 ```bash
 ssh wol-relay-deploy status         # systemctl is-active wol-relay caddy
 ssh wol-relay-deploy health         # curl http://127.0.0.1:8000/health
-ssh wol-relay-deploy logs-wol-relay # journalctl -u wol-relay -n 100 --no-pager
+ssh wol-relay-deploy logs-wol-relay        # journalctl tail, last 100 lines (~5 days)
+ssh wol-relay-deploy logs-wol-relay 500    # wider window
+ssh wol-relay-deploy logs-wol-relay 3000   # months of history (journald holds ~174 MB)
 ssh wol-relay-deploy logs-caddy     # journalctl -u caddy -n 100 --no-pager
 ssh wol-relay-deploy log-footprint  # journald size + log dirs + df (read-only)
 ssh wol-relay-deploy push-app < relay/app.py             # stage only
@@ -169,6 +171,13 @@ ssh wol-relay-deploy apply          # install + restart (run push-* first)
 ssh wol-relay-deploy push-window    # stage uptime window (stdin, one line)
 ssh wol-relay-deploy apply-window   # install /opt/wol-relay/window (hot-reload)
 ```
+
+> ⚠️ **`dispatch.sh` and `sudoers.deploy` are NOT deployed by `deploy.sh`** —
+> they are installed by `bootstrap-wol-relay.sh`, so a new subcommand or sudoers
+> entry (like the `500`/`3000` depths above) needs the bootstrap re-run on the
+> VM, or the file reinstalled by hand (admin, Cloud Shell — idempotent). App /
+> Caddyfile / service changes go through `deploy.sh` as usual. Merging alone
+> changes nothing on the VM.
 
 Security by construction: forced-command `dispatch.sh` on the VM
 (static enum whitelist, no free-form parsing), minimal sudoers

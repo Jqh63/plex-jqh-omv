@@ -15,7 +15,8 @@
 #   ssh wol-relay-deploy apply-window      # install /opt/wol-relay/window (hot, no restart)
 #   ssh wol-relay-deploy status            # systemctl is-active wol-relay caddy
 #   ssh wol-relay-deploy health            # curl http://127.0.0.1:8000/health
-#   ssh wol-relay-deploy logs-wol-relay    # journalctl -u wol-relay -n 100 (read-only)
+#   ssh wol-relay-deploy logs-wol-relay [500|3000]  # journalctl tail, read-only
+#                                          #   (defaut 100 lignes ~= 5 jours)
 #   ssh wol-relay-deploy logs-caddy        # journalctl -u caddy -n 100 (read-only)
 #   ssh wol-relay-deploy log-footprint     # journald size + log dirs + df (read-only)
 #
@@ -68,9 +69,9 @@ mkdir -p "$STAGING_DIR"
 # Not cosmetic: reading a UTC tail as local time once inverted a whole
 # diagnosis (2026-07-26 — a clean auto-shutdown read as a 2 h overshoot,
 # because the relay's "home DOWN" line sat 2 h off the server's own log).
-journal_banner() {
-  printf '=== journalctl -u %s (last 100) — VM clock %s | Europe/Paris %s ===\n' \
-    "$1" "$(date '+%H:%M %Z')" "$(TZ=Europe/Paris date '+%H:%M %Z')"
+journal_banner() { # <unit> [line count, default 100]
+  printf '=== journalctl -u %s (last %s) — VM clock %s | Europe/Paris %s ===\n' \
+    "$1" "${2:-100}" "$(date '+%H:%M %Z')" "$(TZ=Europe/Paris date '+%H:%M %Z')"
 }
 
 case "${SSH_ORIGINAL_COMMAND:-}" in
@@ -143,12 +144,23 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
   health)
     /usr/bin/curl -fsS http://127.0.0.1:8000/health
     ;;
-  logs-wol-relay)
+  logs-wol-relay|"logs-wol-relay 500"|"logs-wol-relay 3000")
     # Read-only journal tail. journalctl needs sudo because the `deploy`
     # user isn't in the systemd-journal group; the sudoers entry pins
     # the exact arg vector (no user-controlled flags, fixed -n 100).
-    journal_banner wol-relay
-    sudo /usr/bin/journalctl -u wol-relay -n 100 --no-pager
+    # Optional wider window. Deliberately NOT a parsed argument: each depth is
+    # a LITERAL case pattern, like `pat-receive daily|weekly`, so the static-enum
+    # property holds (no free args reaching sudo) and every resulting argv is
+    # pinned verbatim in sudoers — no glob, per this file's isolation model.
+    #
+    # No filtering here on purpose. A `grep device=` view was proposed (PR #96,
+    # closed): measured on the real journal, it removed 58 lines out of 100 —
+    # including the `home declares UP/DOWN` heartbeats and the wake campaigns,
+    # i.e. exactly the lines needed to reconstruct an auto-shutdown timeline
+    # (2026-07-26). The journal carries no access-log noise to filter out.
+    n="${SSH_ORIGINAL_COMMAND#logs-wol-relay}"; n="${n# }"; n="${n:-100}"
+    journal_banner wol-relay "$n"
+    sudo /usr/bin/journalctl -u wol-relay -n "$n" --no-pager
     ;;
   logs-caddy)
     journal_banner caddy
@@ -261,7 +273,7 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
     ;;
   *)
     echo "dispatch.sh: unknown command '${SSH_ORIGINAL_COMMAND:-}'" >&2
-    echo "Expected: push-app, push-caddyfile, push-service, apply, push-window, apply-window, status, health, logs-wol-relay, logs-caddy, log-footprint," >&2
+    echo "Expected: push-app, push-caddyfile, push-service, apply, push-window, apply-window, status, health, logs-wol-relay [500|3000], logs-caddy, log-footprint," >&2
     echo "          push-home-watch{,-service,-timer}, apply-home-watch, home-watch-status, logs-home-watch," >&2
     echo "          push-pock-sync-{app,service}, apply-pock-sync, pock-sync-status, logs-pock-sync, pock-dump," >&2
     echo "          pat-receive {daily,weekly}, pat-list, pat-dump-latest." >&2

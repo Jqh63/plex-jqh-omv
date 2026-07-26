@@ -12,8 +12,12 @@
 #   - systemctl daemon-reload (needed when wol-relay.service changes)
 #   - systemctl restart wol-relay
 #   - systemctl reload caddy
-#   - journalctl read-only tail (-n 100 --no-pager, fixed args) on the
-#     two services this VM runs, for the dispatch.sh logs-* subcommands
+#   - journalctl read-only tail (--no-pager, fixed args, no glob) on the
+#     two services this VM runs, for the dispatch.sh logs-* subcommands.
+#     wol-relay has 3 pinned depths (100 default / 500 / 3000) because a
+#     5-day window is too short to audit usage over time; each depth is a
+#     literal case pattern in dispatch.sh, so no free arg reaches sudo.
+#     Same unit, same read-only verb — the depth alone grants nothing new.
 #
 # Note: do NOT add `deploy` to the `sudo` group nor authorise arbitrary
 # verbs — the forced-command + minimal sudoers isolation is the whole
@@ -32,6 +36,8 @@ Cmnd_Alias WOL_RELAY_SYSTEMCTL = \
 
 Cmnd_Alias WOL_RELAY_LOGS = \
   /usr/bin/journalctl -u wol-relay -n 100 --no-pager, \
+  /usr/bin/journalctl -u wol-relay -n 500 --no-pager, \
+  /usr/bin/journalctl -u wol-relay -n 3000 --no-pager, \
   /usr/bin/journalctl -u caddy -n 100 --no-pager
 
 # log-footprint — janitorial measurement (knowledge-base ADR

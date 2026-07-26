@@ -332,7 +332,19 @@ def clean_cid(raw: str | None) -> str:
     return re.sub(r"[^A-Za-z0-9-]", "", (raw or "")[:36]) or "-"
 
 
-def note_usage(cid: str, ua: str | None, ip: str) -> None:
+def clean_label(raw: str | None) -> str:
+    # Optional self-chosen device name from the PWA settings ("iPhone de
+    # Mamie"). Purely an admin-facing hint in the audit log: it answers
+    # "who woke the server" without the relay knowing any account. Same
+    # threat model as the cid — client-controlled and log-bound — hence
+    # the same anti-injection treatment: a closed charset (ASCII letters
+    # and digits, Latin-1 accents for French names, space, - and _) and a
+    # hard length cap. The charset is also all <U+0100, which keeps the
+    # value legal in an HTTP header byte string on the PWA side.
+    return re.sub(r"[^A-Za-z0-9À-ÿ _-]", "", (raw or "")[:24]).strip() or "-"
+
+
+def note_usage(cid: str, ua: str | None, ip: str, label: str = "-") -> None:
     # Coarse usage telemetry: log a client's /status open at most once per
     # USAGE_LOG_DEDUPE_S so "PWA open" hours show in journalctl without a line
     # every 8 s. In-memory, bounded; only token-authenticated callers reach this
@@ -348,7 +360,8 @@ def note_usage(cid: str, ua: str | None, ip: str) -> None:
         cutoff = now - USAGE_LOG_DEDUPE_S
         for k in [k for k, t in _usage_seen.items() if t < cutoff]:
             _usage_seen.pop(k, None)
-    logger.info("open ip=%s device=%s cid=%s", ip, device_class(ua), cid)
+    logger.info('open ip=%s device=%s cid=%s label="%s"',
+                ip, device_class(ua), cid, label)
 
 
 def rate_limited(ip: str) -> bool:
@@ -829,7 +842,8 @@ async def status(request: Request, x_token: str | None = Header(None)):
     # PWA seeds its wake countdown from the same value, synced across devices.
     body["eta_s"] = _current_eta_s()
     note_usage(clean_cid(request.headers.get("x-client-id")),
-               request.headers.get("user-agent"), client_ip(request))
+               request.headers.get("user-agent"), client_ip(request),
+               clean_label(request.headers.get("x-client-label")))
     return JSONResponse(
         content=body,
         headers={"Cache-Control": "public, max-age=5"},
@@ -939,7 +953,8 @@ def wol(req: WolReq, request: Request, x_token: str = Header(...)):
     if not _wake_pending or (now - _last_wol_at) > WAKE_SIGNAL_TTL_S:
         _last_wol_at = now
     _wake_pending = True
-    logger.info("wol ip=%s device=%s cid=%s status=200", ip,
+    logger.info('wol ip=%s device=%s cid=%s label="%s" status=200', ip,
                 device_class(request.headers.get("user-agent")),
-                clean_cid(request.headers.get("x-client-id")))
+                clean_cid(request.headers.get("x-client-id")),
+                clean_label(request.headers.get("x-client-label")))
     return {"sent": True, "to": target_ip, "port": TARGET_PORT, "repeats": PACKET_REPEATS}

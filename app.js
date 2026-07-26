@@ -220,6 +220,13 @@ function getClientId(){
 var CLIENT_ID=getClientId();
 function loadConfig(){try{var r=localStorage.getItem('plex-jqh-omv-cfg');if(r)return JSON.parse(r)}catch(e){}return null}
 function storeConfig(c){try{localStorage.setItem('plex-jqh-omv-cfg',JSON.stringify(c))}catch(e){}}
+// v8.53 — optional device name, sent as X-Client-Label beside the opaque
+// cid so the relay log names the device that woke the server instead of a
+// UUID. Restricted to a closed charset (accents kept for French names) —
+// every allowed char is <U+0100, so the value stays a legal HTTP header
+// byte string; an emoji would make fetch() throw. The relay re-sanitises
+// on its side: this is UX, not a trust boundary.
+function cleanLabel(s){return (s||'').slice(0,24).replace(/[^A-Za-z0-9À-ÿ _-]/g,'').trim()}
 function cleanMac(m){return m.replace(/[:\-\s]/g,'').toLowerCase()}
 function validMac(m){return /^[0-9a-f]{12}$/.test(m)}
 function macToColon(m){return m.replace(/(.{2})/g,'$1:').slice(0,-1)}
@@ -335,6 +342,7 @@ function showSettings(){
     document.getElementById('cfgIp').value=config.ip||'';
     document.getElementById('cfgRelay').value=config.relay||'';
     document.getElementById('cfgToken').value=config.token||'';
+    document.getElementById('cfgLabel').value=config.label||'';
     document.getElementById('cfgApps').value=config.apps||'';
     document.getElementById('cfgWindow').value=config.window||'';
     // Relay-owned window: field is display-only (a manual edit would be
@@ -362,6 +370,7 @@ function saveConfig(){
   var ip=document.getElementById('cfgIp').value.trim();
   var relay=document.getElementById('cfgRelay').value.trim();
   var token=document.getElementById('cfgToken').value.trim();
+  var label=cleanLabel(document.getElementById('cfgLabel').value);
   var apps=document.getElementById('cfgApps').value.trim();
   var win=document.getElementById('cfgWindow').value.trim();
   // `status` (explicit status-host override) is provisioned via ?status= only —
@@ -387,6 +396,7 @@ function saveConfig(){
   if(cleanedRelay)config.relay=cleanedRelay;
   if(token)config.token=token;
   if(title)config.title=title;
+  if(label)config.label=label;
   if(apps)config.apps=apps;
   if(win)config.window=win;
   // Relay-owned window survives a save untouched (its field was disabled);
@@ -656,6 +666,7 @@ function fetchStatusFromRelay(){
   // which lands on the answered-rejection path → direct-home fallback.
   // v8.25 — always send X-Client-Id (device telemetry); add X-Token when set.
   var headers={'X-Client-Id':CLIENT_ID};
+  if(config.label)headers['X-Client-Label']=config.label;
   if(config.token)headers['X-Token']=config.token;
   var opts={headers:headers};
   // v8.51 — stamp the request round-trip so time-sensitive fields
@@ -1095,10 +1106,12 @@ function clearWolPoll(){
 // (v8.47). Strict 401/403/network handling so a misconfigured token
 // surfaces immediately instead of waiting for the 5-min timeout.
 function postWol(){
+  var wolHeaders={'Content-Type':'application/json','X-Token':config.token,'X-Client-Id':CLIENT_ID};
+  if(config.label)wolHeaders['X-Client-Label']=config.label;
   fetch(config.relay+'/wol',{
     method:'POST',
     cache:'no-store',
-    headers:{'Content-Type':'application/json','X-Token':config.token,'X-Client-Id':CLIENT_ID},
+    headers:wolHeaders,
     body:JSON.stringify({mac:macToColon(config.mac)})
   }).then(function(r){
     if(r.ok)return;

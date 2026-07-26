@@ -175,6 +175,7 @@ backend that honours it is interchangeable with the reference.
 ```
 GET /status
   Headers: X-Token: <shared-token>, X-Client-Id: <opaque-uuid> (optional)
+           X-Client-Label: <device name> (optional — settings field, logged)
   → 200 {"up":bool, "stale":bool, "age_s":int}   (the PWA's steady-state oracle —
         relay polls the home server itself and caches the verdict; one fetch tells
         the app both "home up?" and "relay reachable?")
@@ -194,6 +195,7 @@ POST /wol
   Headers: Content-Type: application/json
            X-Token: <shared-token>
            X-Client-Id: <opaque-uuid> (optional — device telemetry, logged not stored)
+           X-Client-Label: <device name> (optional — names the device in the relay log)
   Body:    {"mac":"AA:BB:CC:DD:EE:FF"}
   → 200 on success, 401 on bad token, 403 on disallowed MAC,
     422 on malformed body, 4xx/5xx otherwise.

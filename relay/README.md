@@ -59,12 +59,21 @@ default 80 s, until a few wakes reconverge).
 **Device / usage telemetry** (log-only, no persistence): the PWA sends an opaque
 `X-Client-Id` (a random UUID it persists locally — not a secret, no PII) on
 `/status` and `/wol`. The relay derives a coarse device class from the
-`User-Agent` and logs `wol ip=… device=… cid=… status=200` per wake, plus a
-deduped `open ip=… device=… cid=…` per client at most once every
+`User-Agent` and logs `wol ip=… device=… cid=… label="…" status=200` per wake,
+plus a deduped `open ip=… device=… cid=… label="…"` per client at most once every
 `USAGE_LOG_DEDUPE_S` (default 600 s) on `/status` — so "who woke it / when is the
 PWA open, on what kind of device" is visible via `journalctl -u wol-relay`
 without flooding. The client-id is charset/length-constrained before logging
 (anti log-injection). No MAC or token is ever logged.
+
+`X-Client-Label` is the optional human half of that pair: a name the user types
+once in the PWA settings ("iPhone de Marie"), so a wake reads as a device
+instead of a UUID. Absent → `label="-"`. It is deliberately **not** an identity
+claim — anyone holding the token can send any label; it is an admin-facing hint,
+never an input to a decision. Sanitised like the cid (closed charset, 24 chars),
+which also keeps the value inside the Latin-1 range an HTTP header requires —
+an unstripped emoji makes the PWA's own `fetch()` throw. Covered by
+`tests/test_client_label.py`.
 
 ## Files in this folder
 

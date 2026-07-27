@@ -1,5 +1,12 @@
 var config=null,isOnline=false,wolSent=false,checking=false,checkInterval=null;
 var relayReachable=true;
+// v8.53 — true once a wake attempt has FAILED in this session (relay refused,
+// relay unreachable, or the 5-min boot timeout expired). Drives the promotion
+// of the manual-wake page: the family can follow that page (it lists free WoL
+// apps per OS with their parameters pre-filled), so a failed wake must lead
+// them there instead of leaving them on a dead power button. Cleared by a
+// successful wake / any green settle, and by a fresh tap.
+var wakeFailed=false;
 // v8.2 — N-consecutive-miss debounce on the relay-DOWN cosmetic only. A relay
 // /status transport failure is most often a slow-but-alive e2-micro (cold
 // burstable CPU spanning more than one 15 s tick) or a last-mile blip, NOT a
@@ -574,7 +581,7 @@ function startApp(){
   buildLinks();
   clearWolPoll();
   releaseWakeLock();
-  isOnline=false;wolSent=false;remoteWaking=false;checking=false;checkStartedAt=0;relayReachable=true;relayMissStreak=0;hasConfirmedState=false;
+  isOnline=false;wolSent=false;remoteWaking=false;checking=false;checkStartedAt=0;relayReachable=true;relayMissStreak=0;hasConfirmedState=false;wakeFailed=false;
   // v8.28 — restore the persisted relay-served ETA so a wake fired right after an
   // offline open still seeds a shared-value countdown before the first poll lands.
   relayEtaMs=(config&&typeof config.eta==='number'&&config.eta*1000>=BOOT_MIN_MS&&config.eta*1000<=BOOT_MAX_MS)?config.eta*1000:0;
@@ -942,16 +949,23 @@ function setFallbackState(){
   var link=document.getElementById('fallbackLink');
   var a=document.getElementById('fallbackLinkA');
   link.classList.remove('promoted','warn');
-  if(!relayReachable){
+  // v8.53 — promote on ANY failed wake, not just an unreachable relay.
+  // The promotion used to key on relayReachable alone, i.e. the single case
+  // where the phone reached nobody. The cases where the manual page helps MOST
+  // never promoted it: a wake that timed out after 5 min (the home didn't come
+  // up), a 401/403, a 502 from a failed target resolution. In all of those the
+  // link stayed 11 px at 55 % opacity under the button, while the user had just
+  // been told "réveil manuel ↓" by a toast that had already faded.
+  if(!relayReachable||wakeFailed){
     if(isOnline){
       link.classList.add('warn');
       a.textContent='⚠ Réveil manuel';
     }else{
       link.classList.add('promoted');
-      a.textContent='Réveil manuel';
+      a.textContent='Réveil manuel — comment faire';
     }
   }else{
-    a.textContent='Réveil manuel';
+    a.textContent='Réveil ne marche pas ? Réveil manuel';
   }
 }
 
@@ -962,6 +976,8 @@ function setOnline(degraded){
   if(wolSent||remoteWaking)serverReadyHintUntil=Date.now()+APP_WARMUP_MS;
   isOnline=true;
   remoteWaking=false;
+  // The home is up — however it got there. Any earlier wake failure is moot.
+  wakeFailed=false;
   hasConfirmedState=true;
   lastVerdictAtMs=Date.now();
   // v8.7 — green cancels any in-progress down-confirmation (streak + pending
@@ -1114,13 +1130,20 @@ function postWol(){
     body:JSON.stringify({mac:macToColon(config.mac)})
   }).then(function(r){
     if(r.ok)return;
-    wolSent=false;wolStartTime=0;stopCountdown();clearWolPoll();releaseWakeLock();
-    var msg=(r.status===401||r.status===403)?'Relais : accès refusé':'Erreur relais HTTP '+r.status;
+    wolSent=false;wolStartTime=0;wakeFailed=true;stopCountdown();clearWolPoll();releaseWakeLock();
+    // v8.53 — name the case. These are genuinely different situations for the
+    // reader: 401/403 and 502 are the admin's problem and retrying is pointless,
+    // 429 clears on its own, and only "réessaie" is honest for the rest.
+    var msg;
+    if(r.status===401||r.status===403)msg='Relais : accès refusé (config)';
+    else if(r.status===429)msg='Trop d\'essais — patiente une minute';
+    else if(r.status===502)msg='Le relais ne trouve pas le serveur';
+    else msg='Erreur relais HTTP '+r.status;
     if(navigator.vibrate)navigator.vibrate(300);
     showToast('⚠ '+msg+' — réveil manuel ↓',true,5000);
     setOffline();
   }).catch(function(){
-    wolSent=false;wolStartTime=0;stopCountdown();clearWolPoll();releaseWakeLock();
+    wolSent=false;wolStartTime=0;wakeFailed=true;stopCountdown();clearWolPoll();releaseWakeLock();
     // Flip relayReachable manually — a checkStatus() right now would race
     // the WoL POST, and we already know the relay just failed. This is a
     // CONFIRMED failure (the user actually tried to wake), so bypass the
@@ -1211,6 +1234,9 @@ function sendWol(){
   // the cost of the old guard was a dead button.
   if(navigator.vibrate)navigator.vibrate(50);
   wolSent=true;
+  // A fresh attempt clears the previous failure: the promoted fallback link
+  // would otherwise stay shouting through a wake that is going fine.
+  wakeFailed=false;
   wolStartTime=Date.now();
   acquireWakeLock();
   document.getElementById('powerBtn').className='power-btn sent';
@@ -1231,7 +1257,7 @@ function sendWol(){
   wolPollTimer=setInterval(function(){
     if(!wolSent||isOnline){clearWolPoll();return;}
     if(Date.now()-wolStartTime>WOL_TIMEOUT_MS){
-      wolSent=false;wolStartTime=0;clearWolPoll();stopCountdown();releaseWakeLock();checkStatus();
+      wolSent=false;wolStartTime=0;wakeFailed=true;clearWolPoll();stopCountdown();releaseWakeLock();checkStatus();
       if(navigator.vibrate)navigator.vibrate(300);
       // Surface the timeout — silent failure (vibration + flip to red) used to
       // leave family members wondering whether the app was broken. Toast tells

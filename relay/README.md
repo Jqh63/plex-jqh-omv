@@ -89,6 +89,7 @@ each owned by the relevant service user:
 
 - `/etc/wol-relay.env` (mode `0640 root:wol`) — FastAPI variables:
   `ALLOWED_MAC`, `WOL_TOKEN`, `TARGET_HOST`, `TARGET_PORT`. Optional:
+  `TARGET_IP` (static-IP fallback, see below),
   `STATUS_TARGET_URL` (enables `/status`),
   `STATUS_POLL_FIRST_TIMEOUT_S`/`STATUS_POLL_RETRY_TIMEOUT_S`/`STATUS_CACHE_FRESH_S`/`STATUS_CACHE_STALE_S`
   (tuning), `WAKE_SIGNAL_TTL_S` (how long `/status` advertises `waking` after a
@@ -111,6 +112,33 @@ each owned by the relevant service user:
 Templates with placeholders live in this folder (`*.env.example`). The
 `bootstrap-wol-relay.sh` script seeds them on the VM but never
 overwrites existing files — you must edit the real values manually.
+
+### Static-IP fallback (`TARGET_IP`)
+
+`TARGET_HOST` is resolved server-side on every burst, which is what stops a
+client from redirecting magic packets at an arbitrary address. The cost is a
+hard dependency on the dynamic-DNS provider: when it goes down, `/wol` answers
+`502 dns_resolution_failed` and **nobody can wake the home** — while the home
+itself is fine and the packet would have been delivered.
+
+Set `TARGET_IP` to the public address and that failure mode disappears: the
+resolver falls back to it, and only when DNS has already failed.
+
+```
+TARGET_IP=203.0.113.10
+```
+
+- **Only set it if the address is genuinely stable** (fixed/dedicated ISP
+  address, or a static reservation). On a rotating address a stale value fans
+  magic packets at whoever holds that IP now. Harmless in content — a magic
+  packet is inert to anything but the matching NIC — but it is someone else's
+  network, and the wake silently stops working.
+- It is **never** client-supplied, so the redirect property above is preserved.
+- Exercising it logs a `WARNING` ("dns resolution of the target failed"). That
+  line is the only signal the provider is down, since wakes keep working.
+- `GET /health/deep` reports `dns: fallback_ip` (still `503` overall — this is
+  a degraded state worth seeing) instead of `dns: fail`. The PWA's "Tester le
+  relais" surfaces it inline.
 
 ## Runtime architecture
 

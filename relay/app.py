@@ -40,6 +40,22 @@ ALLOWED_MAC = os.environ["ALLOWED_MAC"].lower()
 SHARED_TOKEN = os.environ["WOL_TOKEN"]
 TARGET_HOST = os.environ["TARGET_HOST"]
 TARGET_PORT = int(os.environ.get("TARGET_PORT", "9"))
+# Static last-resort address for TARGET_HOST, used ONLY when DNS resolution
+# fails. The target is reached by name through a dynamic-DNS provider, so a
+# provider outage — not a home outage — used to make every wake fail with
+# 502 dns_resolution_failed while the magic packet would have been perfectly
+# deliverable. That failure mode is worth removing rather than documenting:
+# it strands the family on a working home.
+#
+# Safe against the "clients cannot redirect packets" property: this is an
+# operator-set env var, never client input, and it is consulted only after
+# the DNS path has already failed. Leave unset on a link whose public
+# address is not stable — a wrong static IP would silently fan packets at a
+# stranger's network. See relay/README.md § Static-IP fallback.
+TARGET_IP = os.environ.get("TARGET_IP", "").strip()
+_IPV4_RE = re.compile(r"^(\d{1,3}\.){3}\d{1,3}$")
+if TARGET_IP and not _IPV4_RE.match(TARGET_IP):
+    raise RuntimeError(f"TARGET_IP malformed (want a dotted IPv4): {TARGET_IP!r}")
 
 # Status oracle (v7.0). The relay also answers "is the home server up?" so
 # the PWA needs only a single fetch (vs. v6.0's 2 concurrent probes). When
@@ -293,6 +309,25 @@ def magic_packet(mac: str) -> bytes:
     return b"\xff" * 6 + payload * 16
 
 
+def resolve_target() -> str | None:
+    """TARGET_HOST → IP, falling back to the static TARGET_IP on DNS failure.
+
+    Returns None only when the name does not resolve AND no static fallback is
+    configured. Every packet-sending path goes through here, so a dynamic-DNS
+    outage degrades to "wake still works" instead of "nobody can wake anything".
+    Logged at WARNING when the fallback is exercised: it is a silent-by-default
+    condition that would otherwise only be visible as wakes mysteriously working.
+    """
+    try:
+        return socket.gethostbyname(TARGET_HOST)
+    except socket.gaierror:
+        if TARGET_IP:
+            logger.warning("dns resolution of the target failed — using the static "
+                           "TARGET_IP fallback (dynamic-DNS outage?)")
+            return TARGET_IP
+        return None
+
+
 def client_ip(request: Request) -> str:
     # Caddy (the sole ingress, on localhost) strips any client-supplied
     # X-Forwarded-For and sets X-Real-IP to the real connecting peer it sees
@@ -392,7 +427,10 @@ def health_deep():
         socket.gethostbyname(TARGET_HOST)
         checks["dns"] = "ok"
     except socket.gaierror:
-        checks["dns"] = "fail"
+        # "degraded, still able to wake" is a materially different state from
+        # "cannot wake at all" — the settings screen's "Tester le relais" says
+        # so rather than reporting a flat failure on a relay that works.
+        checks["dns"] = "fallback_ip" if TARGET_IP else "fail"
         overall = False
 
     try:
@@ -832,7 +870,11 @@ async def status(request: Request, x_token: str | None = Header(None)):
                request.headers.get("user-agent"), client_ip(request))
     return JSONResponse(
         content=body,
-        headers={"Cache-Control": "public, max-age=5"},
+        # `private`: this response is gated on the shared X-Token and describes
+        # the home's state, so it must never be held by a shared cache and
+        # replayed to another client. The PWA fetches with cache:'no-store'
+        # anyway, so `public` was buying nothing and risking that.
+        headers={"Cache-Control": "private, max-age=5"},
     )
 
 
@@ -852,9 +894,8 @@ def _send_packets(target_ip: str, pkt: bytes) -> None:
 def _resolve_and_send() -> bool:
     # DNS re-resolved on every burst: a campaign outlives a single request, and
     # a transient DNS failure must not kill the remaining bursts.
-    try:
-        target_ip = socket.gethostbyname(TARGET_HOST)
-    except socket.gaierror:
+    target_ip = resolve_target()
+    if target_ip is None:
         return False
     _send_packets(target_ip, magic_packet(ALLOWED_MAC))
     return True
@@ -919,9 +960,8 @@ def wol(req: WolReq, request: Request, x_token: str = Header(...)):
     if req.mac.lower() != ALLOWED_MAC:
         logger.warning("wol ip=%s status=403 reason=mac_not_allowed", ip)
         raise HTTPException(status_code=403, detail="mac not allowed")
-    try:
-        target_ip = socket.gethostbyname(TARGET_HOST)
-    except socket.gaierror:
+    target_ip = resolve_target()
+    if target_ip is None:
         logger.error("wol ip=%s status=502 reason=dns_resolution_failed", ip)
         raise HTTPException(status_code=502, detail="dns resolution failed")
     _send_packets(target_ip, magic_packet(req.mac))

@@ -83,12 +83,16 @@ def _status_body(verdict):
     return '{"up": false, "stale": false, "age_s": null, "eta_s": 80}'
 
 
-def _mk_handler(counters, relay_plan, home_plan):
+def _mk_handler(counters, relay_plan, home_plan, wol_status=200):
     def handle(route: Route):
         parsed = urlparse(route.request.url)
         host, path = parsed.netloc, parsed.path
         if host == RELAY_HOST and path == "/wol":
             counters["wol"] += 1
+            if wol_status != 200:
+                route.fulfill(status=wol_status, headers=JSON_H,
+                              body='{"detail": "refused"}')
+                return
             route.fulfill(status=200, headers=JSON_H, body='{"sent": true}')
             return
         if host == RELAY_HOST and path == "/status":
@@ -124,6 +128,8 @@ def card(page):
         card: document.getElementById('statusCard').className,
         power: document.getElementById('powerLabel').innerText,
         progress: document.getElementById('powerProgress').className,
+        fallback: document.getElementById('fallbackLink').className,
+        fallbackText: document.getElementById('fallbackLinkA').innerText,
     })"""
     )
 
@@ -340,6 +346,55 @@ def scenario_remote_wake_outlives_the_waking_signal(p):
     return ok
 
 
+def scenario_failed_wake_promotes_the_manual_page(p):
+    """v8.53 — a REFUSED wake must lead to the manual-wake page.
+
+    fallback.html is a real family procedure (parameters in copy-to-clipboard
+    fields, then a free WoL app per OS with numbered steps) — not admin-only
+    documentation. But it was only ever promoted on `relayReachable === false`,
+    the one case where the phone reached nobody. A wake refused by a reachable
+    relay (401/403 config, 502 target resolution, 429) left the link at 11 px
+    and 55 % opacity under the button, while the toast that said "réveil manuel
+    ↓" faded after 5 s.
+
+    Uses 401 because it settles in one round-trip; the timeout path (5 min) and
+    the transport path set the same flag.
+    """
+    print("\n## failed-wake-promotes-the-manual-wake-page (v8.53)")
+    counters = {"relay": 0, "home": 0, "wol": 0}
+
+    b = getattr(p, ENGINE).launch()
+    ctx = b.new_context(viewport={"width": 390, "height": 844})
+    page = ctx.new_page()
+    page.route("**/*", _mk_handler(counters, lambda n: "down", lambda n: "fail",
+                                   wol_status=401))
+    page.goto(PWA_URL, wait_until="load")
+    page.wait_for_selector("#statusLabel", state="attached", timeout=10000)
+    page.wait_for_timeout(3000)
+
+    before = card(page)
+    ok = check("the link is discreet while nothing has failed",
+               "promoted" not in before["fallback"],
+               f"class={before['fallback']!r} text={before['fallbackText']!r}")
+
+    page.click("#powerBtn")
+    page.wait_for_timeout(1500)
+    after = card(page)
+    print(f"  wake refused (401) → fallback class={after['fallback']!r} "
+          f"text={after['fallbackText']!r}")
+    ok &= check("the refused wake promotes the manual page",
+                "promoted" in after["fallback"],
+                f"class={after['fallback']!r}")
+    ok &= check("the promoted link says what it offers",
+                "comment faire" in after["fallbackText"],
+                f"text={after['fallbackText']!r}")
+    ok &= check("the wake button is left usable for a retry",
+                "unavailable" not in after["power"] and counters["wol"] == 1,
+                f"power={after['power']!r} wol POSTs={counters['wol']}")
+    b.close()
+    return ok
+
+
 def main():
     print("=" * 72)
     print(f"WAKE-path E2E (v8.31 + v8.32) — engine={ENGINE} base={PWA_BASE}")
@@ -354,6 +409,7 @@ def main():
         ok = scenario_stale_wake_on_resume(p)
         ok &= scenario_stale_remote_wake_on_resume(p)
         ok &= scenario_remote_wake_outlives_the_waking_signal(p)
+        ok &= scenario_failed_wake_promotes_the_manual_page(p)
 
     print("\n" + "=" * 72)
     print("ALL PASS" if ok else "FAILURES — see above")

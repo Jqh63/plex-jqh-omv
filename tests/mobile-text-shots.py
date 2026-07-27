@@ -37,14 +37,17 @@ def main():
         page.screenshot(path=str(OUT / 'main-360.png'))
 
         # Power-label worst cases (set DOM directly — we test rendering, not logic).
+        # v8.53: the old 'unavailable' shot is gone with the state it framed —
+        # the button is never disabled now. Its replacement is the longest label
+        # the armed button can carry (relay presumed down but still tappable).
         page.evaluate("""() => {
           const l = document.getElementById('powerLabel');
-          l.textContent = 'Réveil indisponible — voir ↓';
-          l.className = 'power-label unavailable';
-          document.getElementById('powerBtn').className = 'power-btn unavailable';
+          l.textContent = 'Allumer (relais incertain)';
+          l.className = 'power-label';
+          document.getElementById('powerBtn').className = 'power-btn';
         }""")
         page.wait_for_timeout(200)
-        page.screenshot(path=str(OUT / 'power-unavailable-360.png'))
+        page.screenshot(path=str(OUT / 'power-relay-uncertain-360.png'))
 
         page.evaluate("""() => {
           const l = document.getElementById('powerLabel');

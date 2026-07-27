@@ -81,14 +81,12 @@
   .power-ring::after{content:'';position:absolute;inset:-4px;border-radius:50%;border:2px solid transparent;border-top-color:var(--green);opacity:0;pointer-events:none;transition:opacity .3s}
   .power-ring:has(.power-btn.sent)::after{opacity:1;animation:spin 1.2s linear infinite}
   .power-btn{width:106px;height:106px;border-radius:50%;border:3px solid var(--border);background:var(--surface);color:var(--text-dim);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .3s}
-  .power-btn:active:not(.online):not(.unavailable){transform:scale(.93)}
+  .power-btn:active:not(.online){transform:scale(.93)}
   .power-btn.sent{border-color:var(--green);color:var(--green);box-shadow:0 0 40px var(--green-glow);pointer-events:none}
   .power-btn.online{border-color:var(--green);color:var(--green);cursor:default;pointer-events:none;box-shadow:0 0 24px var(--green-glow)}
-  .power-btn.unavailable{border-color:var(--red);color:var(--red);opacity:.5;cursor:not-allowed;pointer-events:none}
   .power-btn.checking{border-color:var(--orange);color:var(--orange);cursor:default;pointer-events:none}
   .power-ring:has(.power-btn.sent)::before{border-color:var(--green);opacity:.3}
   .power-ring:has(.power-btn.online)::before{border-color:var(--green);opacity:.4}
-  .power-ring:has(.power-btn.unavailable)::before{border-color:var(--red);opacity:.3}
   .power-ring:has(.power-btn.checking)::before{border-color:var(--orange);opacity:.3}
   .power-btn .ico{width:42px;height:42px}
   .power-btn .ico-check{display:none}
@@ -96,7 +94,6 @@
   .power-btn.online .ico-check{display:block}
   .power-label{font-size:13px;color:var(--text-dim);text-align:center;min-height:18px;transition:color .3s}
   .power-label.sent{color:var(--green)}
-  .power-label.unavailable{color:var(--red)}
   .power-label.checking{color:var(--orange)}
   .power-progress{display:none;width:120px;height:3px;background:var(--border);border-radius:2px;overflow:hidden;margin-top:6px}
   .power-progress.active{display:block}
@@ -252,7 +249,13 @@
     <div class="power-label" id="powerLabel">Allumer le serveur</div>
     <div class="power-progress" id="powerProgress" aria-hidden="true"><div class="power-progress-bar" id="powerProgressBar"></div></div>
     <div class="fallback-link" id="fallbackLink" style="display:none">
-      <a id="fallbackLinkA" href="./fallback.html" target="_blank" rel="noopener">Réveil ne marche pas ? Réveil manuel</a>
+      <!-- v8.53 — no target="_blank". From an installed PWA that opens an
+           ephemeral in-app browser context; this page is now a real family
+           procedure (copy the parameters, install a WoL app), so it must run
+           in the normal browser where the clipboard and the store links
+           behave, and where a back gesture returns here. Same reasoning as
+           the app links in buildLinks(). -->
+      <a id="fallbackLinkA" href="./fallback.html">Réveil ne marche pas ? Réveil manuel</a>
     </div>
   </div>
 

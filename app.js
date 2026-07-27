@@ -195,16 +195,21 @@ var serverReadyHintUntil=0;
 // The relay measures the wall-clock from /wol to the next "up" flip and serves
 // the median, so EVERY open PWA seeds its wake countdown from the same value —
 // the timer is identical across devices instead of each running its own local
-// boot-history median (the desync the user saw: one device 80 s fallback, another
-// 70 s). Preferred by getEta() when present (and sane); the local boot history
-// below stays the offline / no-relay fallback. Adopted on each /status poll and
-// persisted (config.eta) so an offline open still seeds a sane countdown.
+// boot-history median (the desync the user saw: one device 80 s fallback,
+// another 70 s). Adopted on each /status poll and persisted (config.eta) so an
+// offline open still seeds a sane countdown.
+//
+// v8.53 — the per-device boot history that used to sit behind this is GONE
+// (getBootHistory / recordBootTime / a localStorage ring of the last 10 boots,
+// ~30 lines). It could only ever be consulted when the relay served no eta_s,
+// i.e. when the relay is unreachable or has never measured a wake — and in that
+// state there is no wake to run a countdown for in the first place, since the
+// PWA's only wake path is POST <relay>/wol. It was measuring, storing and
+// medianing a value that could not be reached. The persisted config.eta covers
+// the one real case (an offline open right after a relay outage).
 var relayEtaMs=0;
-var BOOT_HISTORY_KEY='plex-jqh-omv-boot-history';
-var BOOT_HISTORY_MAX=10;
-// Exclude outliers: <10s = false positive (server was already up when we
-// fired), >5min = anomaly (network glitch, manual interference). Either
-// would skew the median for the rest of the user's sessions.
+// Sanity bounds on any ETA we adopt: <10 s = the server was already up when the
+// wake fired, >5 min = an anomaly (network glitch, manual interference).
 var BOOT_MIN_MS=10000, BOOT_MAX_MS=300000;
 
 var APP_CATALOG={
@@ -272,24 +277,12 @@ function windowStartLabel(){
 // explanatory failures with a "use the manual fallback" call to action).
 function showToast(msg,warn,ms){var t=document.getElementById('toast');t.textContent=msg;t.className=warn?'toast warn show':'toast show';setTimeout(function(){t.className='toast'},ms||3000)}
 
-function getBootHistory(){try{var r=localStorage.getItem(BOOT_HISTORY_KEY);if(r){var a=JSON.parse(r);if(Array.isArray(a))return a;}}catch(e){}return [];}
-function recordBootTime(ms){
-  if(ms<BOOT_MIN_MS||ms>BOOT_MAX_MS)return;
-  var h=getBootHistory();
-  h.push(ms);
-  if(h.length>BOOT_HISTORY_MAX)h=h.slice(-BOOT_HISTORY_MAX);
-  try{localStorage.setItem(BOOT_HISTORY_KEY,JSON.stringify(h))}catch(e){}
-}
 function getEta(){
-  // Prefer the relay-served canonical ETA (shared across devices) when present
-  // and within sane bounds; fall back to the local boot-history median, then the
+  // The relay-served canonical ETA (shared across devices, persisted as
+  // config.eta and restored in startApp) when it is present and sane, else the
   // hardcoded fallback. This is what syncs the wake countdown between devices.
   if(relayEtaMs>=BOOT_MIN_MS&&relayEtaMs<=BOOT_MAX_MS)return relayEtaMs;
-  var h=getBootHistory();
-  if(h.length===0)return ETA_FALLBACK_MS;
-  var sorted=h.slice().sort(function(a,b){return a-b;});
-  var mid=Math.floor(sorted.length/2);
-  return sorted.length%2===0?Math.round((sorted[mid-1]+sorted[mid])/2):sorted[mid];
+  return ETA_FALLBACK_MS;
 }
 
 function parseApps(str){
@@ -1023,10 +1016,10 @@ function setOnline(degraded){
     setFallbackState();
   }
   if(wolSent){
-    if(wolStartTime){
-      recordBootTime(Date.now()-wolStartTime);
-      wolStartTime=0;
-    }
+    // v8.53 — no local boot sample is recorded any more: the relay measures the
+    // wake it actually served (and to services-ready, which this client-side
+    // timing never could — it only sees the host answering).
+    wolStartTime=0;
     showToast('✓ Serveur démarré avec succès',false,5000);
     if(navigator.vibrate)navigator.vibrate([100,50,100]);
     wolSent=false;

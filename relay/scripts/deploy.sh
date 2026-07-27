@@ -43,9 +43,20 @@ echo "[deploy] apply ..."
 ssh "$ALIAS" apply
 
 echo "[deploy] health ..."
-if ssh "$ALIAS" health; then
+# Retry, don't single-shot. `apply` returns as soon as systemd has restarted the
+# unit, but uvicorn takes ~1-3 s more to bind :8000 — so a single probe fired
+# right behind it hits "connection refused" on a deploy that went fine and
+# reports a WARN nobody should act on (observed 2026-07-27: WARN at 19:40:22,
+# "Uvicorn running" at 19:40:24). A false alarm on the deploy path is worse than
+# useless: it teaches the operator to ignore the one line that would matter.
+health_ok=0
+for attempt in 1 2 3 4 5 6; do
+  if ssh "$ALIAS" health; then health_ok=1; break; fi
+  [ "$attempt" -lt 6 ] && { echo "[deploy]   not up yet (attempt $attempt/6) — retrying in 2 s"; sleep 2; }
+done
+if [ "$health_ok" -eq 1 ]; then
   echo "[deploy] DONE — wol-relay restarted, /health OK"
 else
-  echo "[deploy] WARN — /health KO post-restart, investigate VM side (journalctl -u wol-relay)" >&2
+  echo "[deploy] WARN — /health still KO after ~10 s, investigate VM side (journalctl -u wol-relay)" >&2
   exit 2
 fi

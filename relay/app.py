@@ -423,6 +423,16 @@ def health_deep():
     checks = {"uvicorn": "ok"}
     overall = True
 
+    # Whether the static fallback is ARMED — never its value (this endpoint is
+    # anonymous). Without this an operator has no way to confirm a TARGET_IP
+    # they just added actually took effect: the env file is unreadable from
+    # anywhere but the VM, and the fallback is invisible while DNS works.
+    # Reported as "ok" when armed and OMITTED when unset, deliberately: the PWA's
+    # "Tester le relais" lists the non-"ok" checks as failures in its degraded
+    # branch, so an optional feature must never appear there.
+    if TARGET_IP:
+        checks["target_ip_fallback"] = "ok"
+
     try:
         socket.gethostbyname(TARGET_HOST)
         checks["dns"] = "ok"

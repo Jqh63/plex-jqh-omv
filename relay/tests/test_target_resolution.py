@@ -82,3 +82,20 @@ def test_health_deep_distinguishes_fallback_from_dead(no_dns, monkeypatch):
     monkeypatch.setattr(relay, "TARGET_IP", "")
     body = TestClient(relay.app).get("/health/deep").json()
     assert body["checks"]["dns"] == "fail"
+
+
+def test_health_deep_shows_whether_the_fallback_is_armed(monkeypatch):
+    """The only way for an operator to confirm a freshly-added TARGET_IP took
+    effect: the env file is unreadable off-VM and the fallback is invisible
+    while DNS works."""
+    monkeypatch.setattr(relay.socket, "gethostbyname", lambda h: "198.51.100.7")
+    monkeypatch.setattr(relay, "TARGET_IP", "203.0.113.10")
+    body = TestClient(relay.app).get("/health/deep").json()
+    assert body["checks"]["target_ip_fallback"] == "ok"
+    assert body["status"] == "ok"
+
+    # Unset: the key is ABSENT, not "fail". An optional feature must never land
+    # in the degraded branch's failed-checks list that "Tester le relais" shows.
+    monkeypatch.setattr(relay, "TARGET_IP", "")
+    body = TestClient(relay.app).get("/health/deep").json()
+    assert "target_ip_fallback" not in body["checks"]

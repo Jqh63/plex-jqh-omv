@@ -12,6 +12,22 @@ state machine.
 | `wake-e2e.py` | Playwright headless on the **wake** paths, which `cold-radio-e2e.py` does not touch — and where the 2026-07-14 bug lived. Pins v8.45: a wake must not survive a background freeze and repaint its countdown when the app is reopened — both for a wake this device TAPPED (`wolSent`) and, crucially, for one it merely ADOPTED from the relay (`remoteWaking`, the AM5 logon task's wake — the variant actually hit). Uses Playwright's **clock API** to reproduce the Android freeze/thaw. Two traps it exists to avoid, both of which produced a green-but-worthless test on the first pass: for the **reap** scenarios assert on the countdown (`powerProgress`), not the status card; and jump time with `set_system_time`, **not** `fast_forward` (the latter also fires the thawed poll timer, which reaps the wake on its own — the test would pass even without the fix). ⚠️ v8.53 — that first trap was half a misreading: the card being "repainted to Vérification… while the countdown keeps ticking" was not only a fixture artefact, it was a **real defect** on adopted wakes (`setRechecking` guarded `wolSent` but not `remoteWaking`). `remote-wake-outlives-the-relay-waking-signal` now asserts on the card ON PURPOSE. It also has to **sample** across the ~2.5 s (`DOWN_RECHECK_MS`) contradiction window rather than snapshot once — a single late snapshot passes against the bug. | ~30 s |
 | `screenshots/` | E2E output, gitignored. | — |
 
+> ⚠️ **WebKit and route interception (2026-07-27).** Playwright's WebKit drops
+> route interception for *some* requests: the first `/status` is served by the
+> handler, a later one escapes to the real network and dies on DNS. The app then
+> gets a genuine transport failure and correctly commits red — so the scenario
+> goes red while the code behaved perfectly. Three scenarios had been failing
+> for that reason alone (`relay-fail-fallback-home-up`,
+> `relay-single-miss-debounced-no-warn`, `transient-relay-false-down-no-red`),
+> long enough that WebKit's whole verdict had become background noise. The
+> danger is not the noise but what it hides: on those runs WebKit is not testing
+> what the scenario claims, and the family does use iOS. `_watch_interception`
+> now detects a mock host reaching the real network and reports those scenarios
+> as **`SKIP-ENV`**, so the remaining FAILs stay meaningful. `ctx.route` instead
+> of `page.route` was tried and does **not** fix it; a real fix needs a local
+> HTTPS mock server (the PWA's `validRelay` refuses plain http), which is worth
+> doing the day WebKit coverage of those three paths actually matters.
+
 > **The wake paths went untested in a browser until 2026-07-14** — which is exactly
 > why two bugs shipped there. If you touch `sendWol()`, the countdown, `setOffline()`
 > or `setRechecking()`, `wake-e2e.py` is the layer that has to stay green.

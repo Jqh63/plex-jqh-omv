@@ -274,11 +274,11 @@ class BaseApp:
             self.button_paints.append((round(self.clock.now, 2), kind))
 
     def _button_for(self, up, relay_ok):
-        # up → confident green wake-done; down → the wake affordance, or
-        # "unavailable" when the relay is unreachable too.
-        if up:
-            return "on"
-        return "wake" if relay_ok else "unavailable"
+        # up → confident green wake-done; down → the wake affordance. v8.53: a
+        # presumed-unreachable relay no longer disables the button (the warning
+        # moved to the promoted fallback link), so relay_ok stops changing the
+        # affordance — the button is armed whenever the home is down.
+        return "on" if up else "wake"
 
     # ---- status card ------------------------------------------------------
     def _card_for(self, up):

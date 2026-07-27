@@ -132,6 +132,10 @@ def is_red(s):
 def is_warn(s):
     # Both "warn" (server up, relay down) and "promoted" (server down, relay
     # down) signal "relay unavailable" to the user — same visual semantics.
+    # v8.53: `promoted` now ALSO means "a wake attempt failed" (wakeFailed).
+    # Harmless here — this suite never fires a wake, so the only thing that can
+    # promote the link in these scenarios is still relay reachability. The wake
+    # meaning is covered in wake-e2e.py.
     return "warn" in s["fallbackClass"] or "promoted" in s["fallbackClass"]
 
 
@@ -147,9 +151,17 @@ def is_checking(s):
 
 
 def is_wol_disabled(s):
-    # The wake button goes to "power-btn unavailable" only when relayReachable
-    # is false. A *degraded* (answered) /status failure keeps it enabled.
-    return "unavailable" in s["powerClass"]
+    # v8.53 — the wake button is NEVER disabled any more. It used to render
+    # `power-btn unavailable` (pointer-events:none) on a presumed-unreachable
+    # relay; that presumption comes from status-poll misses, which are as often
+    # the phone's own connectivity, so it produced a dead button on a wake that
+    # would have worked. The relay-down warning now lives entirely in the
+    # promoted fallback link (is_warn) and in postWol's failure toast.
+    #
+    # Kept as an assertion (rather than deleted) so the property is PINNED: the
+    # scenarios below assert `not is_wol_disabled(...)`, and this now fails loudly
+    # if anything ever re-introduces a pointer-events:none wake button.
+    return "unavailable" in s["powerClass"] or "not-allowed" in s["powerClass"]
 
 
 def is_button_confident(s):
@@ -279,6 +291,7 @@ def run_scenario(p, name, relay_plan, home_plan, sample_delays_s, preseed_cache=
         "final_warn": is_warn(final),
         "final_wol_disabled": is_wol_disabled(final),
         "final_sub": final["statusSub"],
+        "final_label": final["statusLabel"],
         "button_confident_at": [t for t, s in samples if is_button_confident(s)],
         "button_checking_at": [t for t, s in samples if is_button_checking(s)],
         "final_button_confident": is_button_confident(final),
@@ -475,14 +488,14 @@ def run_watchdog_scenario(p):
     # declares these as top-level `var`s, so they live on window.
     relay_verdict["v"] = "down"
     page.evaluate("() => { window.checking = true; window.checkStartedAt = Date.now() - 60000; }")
-    # Re-probe trigger (stands in for the self-healing tick) — the refresh
-    # button calls checkStatus(). v8.7: the reclaimed re-probe sees "down" → it
-    # paints orange and fires the confirm re-probe (DOWN_RECHECK_MS = 2.5 s), so
-    # red lands ~2.5 s later, not instantly. Wait past it (3.5 s) — the property
-    # under test is that the wedged flag is reclaimed and the app converges to red
-    # (not frozen green), not the latency.
-    page.click("#refreshBtn")
-    page.wait_for_timeout(3500)
+    # Re-probe trigger. v8.53 — this used to click the refresh button as a
+    # stand-in for the self-healing tick; the button is gone, so the test now
+    # waits for the REAL mechanism, which is what the property was always about:
+    # nothing but the 8 s self-healing poll can reclaim a wedged `checking`, and
+    # it must. Budget = one poll (8 s, up to two before the watchdog age clears)
+    # + the v8.7 confirm re-probe (DOWN_RECHECK_MS = 2.5 s) + slack. The property
+    # under test is convergence to red (not frozen green), not the latency.
+    page.wait_for_timeout(21000)
     post = capture_state(page)
     b.close()
     return {
@@ -712,13 +725,24 @@ def collect_results():
         # Discriminating samples: with a PROBED down, T+2 is still orange (the
         # DOWN_RECHECK re-probe fires at 2.5 s, red lands ≥T+3 — see r2); a
         # DECLARED down must already be red at T+2, with no orange re-check.
-        r16 = run_scenario(p, "heartbeat-declared-down-instant-red",
+        # v8.53 — a declared down is now painted the CALM blue, not the alarming
+        # red, and inside the uptime window at that. Rationale (relay log, July
+        # 2026): the home's shutdown is gated on the AM5 being on, not on the
+        # clock alone, so it stops inside its own window most evenings — 8 of the
+        # last 14 shutdowns, typically ~22h30. Keying the wording on the window
+        # alone painted every one of those normal stops as an outage. The red is
+        # now reserved for SILENCE, which is the only thing a crash produces.
+        # The instant-commit property (no orange re-check detour) is unchanged
+        # and still asserted, which is what v8.48 was about.
+        r16 = run_scenario(p, "heartbeat-declared-down-instant-calm",
                            relay_plan=lambda n: "down-declared", home_plan=lambda n: "ok",
-                           sample_delays_s=[2, 3])
-        ok16 = (r16["final_red"] and bool(r16["red_at"]) and r16["red_at"][0] <= 2
-                and not r16["checking_at"])
-        results.append(("heartbeat-declared-down-instant-red", ok16, r16,
-                        "declared down → red by T+2 (no DOWN_RECHECK orange detour)"))
+                           sample_delays_s=[2, 3],
+                           url_extra="&window=" + _window_excluding_now(inside=True))
+        ok16 = (r16["final_sleep"] and not r16["final_red"] and not r16["checking_at"]
+                and "teint" in r16["final_label"])
+        results.append(("heartbeat-declared-down-instant-calm", ok16, r16,
+                        "declared down INSIDE the window → calm blue 'Éteint', "
+                        "no orange detour, never the outage red"))
 
         # v8.48 — up+degraded paints the green card with the explanatory sub
         # ("services en cours de démarrage…") instead of the generic one.

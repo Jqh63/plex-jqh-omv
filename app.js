@@ -1,5 +1,23 @@
 var config=null,isOnline=false,wolSent=false,checking=false,checkInterval=null;
 var relayReachable=true;
+// v8.53 — true once a wake attempt has FAILED in this session (relay refused,
+// relay unreachable, or the 5-min boot timeout expired). Drives the promotion
+// of the manual-wake page: the family can follow that page (it lists free WoL
+// apps per OS with their parameters pre-filled), so a failed wake must lead
+// them there instead of leaving them on a dead power button. Cleared by a
+// successful wake / any green settle, and by a fresh tap.
+var wakeFailed=false;
+// v8.53 — true when the committed "down" came from the home's OWN last-gasp
+// (heartbeat up=false at clean shutdown, `source: "heartbeat"`), as opposed to
+// a probe that simply stopped getting answers. The distinction is free — a
+// crashed home cannot post "I'm dead", so a last-gasp means an ORDERLY stop and
+// silence means something went wrong — and it fixes an alarm that cried wolf
+// nightly: the home's shutdown is gated on the AM5 being on, not on the clock
+// alone, so it very often stops INSIDE its uptime window (8 of the last 14
+// shutdowns in the relay log, most of them around 22h30). The card keyed its
+// wording on the window alone, so every one of those normal stops was painted
+// the alarming red "Hors ligne" reserved for outages.
+var lastDownDeclared=false;
 // v8.2 — N-consecutive-miss debounce on the relay-DOWN cosmetic only. A relay
 // /status transport failure is most often a slow-but-alive e2-micro (cold
 // burstable CPU spanning more than one 15 s tick) or a last-mile blip, NOT a
@@ -177,16 +195,21 @@ var serverReadyHintUntil=0;
 // The relay measures the wall-clock from /wol to the next "up" flip and serves
 // the median, so EVERY open PWA seeds its wake countdown from the same value —
 // the timer is identical across devices instead of each running its own local
-// boot-history median (the desync the user saw: one device 80 s fallback, another
-// 70 s). Preferred by getEta() when present (and sane); the local boot history
-// below stays the offline / no-relay fallback. Adopted on each /status poll and
-// persisted (config.eta) so an offline open still seeds a sane countdown.
+// boot-history median (the desync the user saw: one device 80 s fallback,
+// another 70 s). Adopted on each /status poll and persisted (config.eta) so an
+// offline open still seeds a sane countdown.
+//
+// v8.53 — the per-device boot history that used to sit behind this is GONE
+// (getBootHistory / recordBootTime / a localStorage ring of the last 10 boots,
+// ~30 lines). It could only ever be consulted when the relay served no eta_s,
+// i.e. when the relay is unreachable or has never measured a wake — and in that
+// state there is no wake to run a countdown for in the first place, since the
+// PWA's only wake path is POST <relay>/wol. It was measuring, storing and
+// medianing a value that could not be reached. The persisted config.eta covers
+// the one real case (an offline open right after a relay outage).
 var relayEtaMs=0;
-var BOOT_HISTORY_KEY='plex-jqh-omv-boot-history';
-var BOOT_HISTORY_MAX=10;
-// Exclude outliers: <10s = false positive (server was already up when we
-// fired), >5min = anomaly (network glitch, manual interference). Either
-// would skew the median for the rest of the user's sessions.
+// Sanity bounds on any ETA we adopt: <10 s = the server was already up when the
+// wake fired, >5 min = an anomaly (network glitch, manual interference).
 var BOOT_MIN_MS=10000, BOOT_MAX_MS=300000;
 
 var APP_CATALOG={
@@ -254,24 +277,12 @@ function windowStartLabel(){
 // explanatory failures with a "use the manual fallback" call to action).
 function showToast(msg,warn,ms){var t=document.getElementById('toast');t.textContent=msg;t.className=warn?'toast warn show':'toast show';setTimeout(function(){t.className='toast'},ms||3000)}
 
-function getBootHistory(){try{var r=localStorage.getItem(BOOT_HISTORY_KEY);if(r){var a=JSON.parse(r);if(Array.isArray(a))return a;}}catch(e){}return [];}
-function recordBootTime(ms){
-  if(ms<BOOT_MIN_MS||ms>BOOT_MAX_MS)return;
-  var h=getBootHistory();
-  h.push(ms);
-  if(h.length>BOOT_HISTORY_MAX)h=h.slice(-BOOT_HISTORY_MAX);
-  try{localStorage.setItem(BOOT_HISTORY_KEY,JSON.stringify(h))}catch(e){}
-}
 function getEta(){
-  // Prefer the relay-served canonical ETA (shared across devices) when present
-  // and within sane bounds; fall back to the local boot-history median, then the
+  // The relay-served canonical ETA (shared across devices, persisted as
+  // config.eta and restored in startApp) when it is present and sane, else the
   // hardcoded fallback. This is what syncs the wake countdown between devices.
   if(relayEtaMs>=BOOT_MIN_MS&&relayEtaMs<=BOOT_MAX_MS)return relayEtaMs;
-  var h=getBootHistory();
-  if(h.length===0)return ETA_FALLBACK_MS;
-  var sorted=h.slice().sort(function(a,b){return a-b;});
-  var mid=Math.floor(sorted.length/2);
-  return sorted.length%2===0?Math.round((sorted[mid-1]+sorted[mid])/2):sorted[mid];
+  return ETA_FALLBACK_MS;
 }
 
 function parseApps(str){
@@ -574,7 +585,7 @@ function startApp(){
   buildLinks();
   clearWolPoll();
   releaseWakeLock();
-  isOnline=false;wolSent=false;remoteWaking=false;checking=false;checkStartedAt=0;relayReachable=true;relayMissStreak=0;hasConfirmedState=false;
+  isOnline=false;wolSent=false;remoteWaking=false;checking=false;checkStartedAt=0;relayReachable=true;relayMissStreak=0;hasConfirmedState=false;wakeFailed=false;lastDownDeclared=false;
   // v8.28 — restore the persisted relay-served ETA so a wake fired right after an
   // offline open still seeds a shared-value countdown before the first poll lands.
   relayEtaMs=(config&&typeof config.eta==='number'&&config.eta*1000>=BOOT_MIN_MS&&config.eta*1000<=BOOT_MAX_MS)?config.eta*1000:0;
@@ -695,8 +706,7 @@ function checkStatus(){
   if(checking&&Date.now()-checkStartedAt<CHECK_WATCHDOG_MS)return;
   checking=true;checkStartedAt=Date.now();
   var gen=++probeGen;
-  var label=document.getElementById('statusLabel'),sub=document.getElementById('statusSub'),btn=document.getElementById('refreshBtn');
-  btn.classList.add('spinning');
+  var label=document.getElementById('statusLabel'),sub=document.getElementById('statusSub');
   // v8.10 staleness guard — a confirmed state only earns the "keep the prior
   // visual" treatment while the last SETTLED verdict is fresh (in-memory
   // lastVerdictAtMs, same freshness window as the localStorage cache). A stale
@@ -709,8 +719,11 @@ function checkStatus(){
   // the variable is strictly fresher and storage-independent.
   if(hasConfirmedState&&Date.now()-lastVerdictAtMs>STATUS_LOCAL_TTL_MS)hasConfirmedState=false;
   // Keep the prior visual when we already have a confirmed (or cached) state:
-  // the card text is left UNTOUCHED and the spinning refresh button is the only
-  // in-flight signal. v8.29 — we used to flip the sub to "vérification…" on every
+  // the card text is left UNTOUCHED and the poll runs silently. v8.53 — there is
+  // no in-flight indicator any more (the refresh button that carried it is gone);
+  // freshness is communicated by the "vérifié …" age line, which is what the user
+  // actually needs to judge the verdict. v8.29 — we used to flip the sub to
+  // "vérification…" on every
   // 8 s poll, which strobed the subtitle back and forth under a steady green.
   // Orange "Vérification…" only appears when nothing is known yet (cold open).
   // v8.30 — never clobber during an active wake: setStarting() painted the
@@ -767,7 +780,7 @@ function checkStatus(){
     // A newer probe (e.g. a resume re-probe) superseded this one — drop the
     // stale verdict without touching `checking`, which the newer probe owns.
     if(gen!==probeGen)return;
-    checking=false;btn.classList.remove('spinning');
+    checking=false;
     // v8.12 — adopt the relay-served uptime window (UPTIME_WINDOW env on the
     // relay). The relay value wins over a locally-set one: it's the
     // admin-controlled source of truth, so changing it on the relay updates
@@ -837,6 +850,7 @@ function checkStatus(){
       // the orange re-confirmation detour. Covers "extinction avec app ouverte"
       // — the card flips to Éteint on the next poll, no Vérification… dance.
       downStreak=DOWN_CONFIRM;
+      lastDownDeclared=res.declared===true;
       writeLocalStatus(false,relayReachable);
       setOffline();
     }else{
@@ -852,10 +866,18 @@ function checkStatus(){
 // checkStatus(): here we already had a verdict (often a confident green) but a
 // single "down" is not trusted yet.
 function setRechecking(){
-  document.getElementById('refreshBtn').classList.add('spinning');
-  // During an active WoL wake, keep the "Démarrage…" state — a re-check card
-  // would contradict the wake-in-progress UI (mirrors setOffline's wolSent guard).
-  if(wolSent){setStarting();return;}
+  // During an active wake, keep the "Démarrage…" state — a re-check card would
+  // contradict the wake-in-progress UI (mirrors setOffline's wolSent guard).
+  // v8.53 — remoteWaking is guarded too, not just wolSent. An ADOPTED wake (the
+  // relay's `waking`, e.g. the AM5 logon task) whose boot outlives the relay's
+  // WAKE_SIGNAL_TTL_S stops being advertised while remoteWaking is still true
+  // here and the countdown is still ticking: the next non-waking "down" landed
+  // in this function and painted "Vérification…" over the card while the power
+  // label kept counting "Démarrage long…". Two widgets, two contradicting
+  // stories. tests/README.md documented the repaint as a trap to write tests
+  // AROUND ("the status card is repainted in ~200 ms while the countdown keeps
+  // ticking") — it was the bug, not a fixture quirk.
+  if(wolSent||remoteWaking){setStarting();return;}
   document.getElementById('statusDot').className='status-dot checking';
   document.getElementById('statusCard').className='status-card';
   document.getElementById('statusLabel').textContent='Vérification...';
@@ -869,7 +891,9 @@ function setRechecking(){
 // a down being re-confirmed). NOT during a WoL wake — the button owns the
 // "Démarrage…" / progress UI then — nor without a configured MAC (no wake to offer).
 function setButtonChecking(){
-  if(!config||!config.mac||wolSent)return;
+  // v8.53 — remoteWaking added alongside wolSent: during ANY wake the button
+  // owns the countdown UI, whether this device fired it or adopted it.
+  if(!config||!config.mac||wolSent||remoteWaking)return;
   var pBtn=document.getElementById('powerBtn'),pLbl=document.getElementById('powerLabel');
   pBtn.className='power-btn checking';
   pLbl.textContent='Vérification…';pLbl.className='power-label checking';
@@ -930,16 +954,23 @@ function setFallbackState(){
   var link=document.getElementById('fallbackLink');
   var a=document.getElementById('fallbackLinkA');
   link.classList.remove('promoted','warn');
-  if(!relayReachable){
+  // v8.53 — promote on ANY failed wake, not just an unreachable relay.
+  // The promotion used to key on relayReachable alone, i.e. the single case
+  // where the phone reached nobody. The cases where the manual page helps MOST
+  // never promoted it: a wake that timed out after 5 min (the home didn't come
+  // up), a 401/403, a 502 from a failed target resolution. In all of those the
+  // link stayed 11 px at 55 % opacity under the button, while the user had just
+  // been told "réveil manuel ↓" by a toast that had already faded.
+  if(!relayReachable||wakeFailed){
     if(isOnline){
       link.classList.add('warn');
       a.textContent='⚠ Réveil manuel';
     }else{
       link.classList.add('promoted');
-      a.textContent='Réveil manuel';
+      a.textContent='Réveil manuel — comment faire';
     }
   }else{
-    a.textContent='Réveil manuel';
+    a.textContent='Réveil ne marche pas ? Réveil manuel';
   }
 }
 
@@ -950,6 +981,8 @@ function setOnline(degraded){
   if(wolSent||remoteWaking)serverReadyHintUntil=Date.now()+APP_WARMUP_MS;
   isOnline=true;
   remoteWaking=false;
+  // The home is up — however it got there. Any earlier wake failure is moot.
+  wakeFailed=false;lastDownDeclared=false;
   hasConfirmedState=true;
   lastVerdictAtMs=Date.now();
   // v8.7 — green cancels any in-progress down-confirmation (streak + pending
@@ -962,8 +995,8 @@ function setOnline(degraded){
   // + success toast are actually seen before the screen may re-lock.
   applyLinksState();
   // Confident green. setOnline fires either from a cache pre-paint (open/resume
-  // with a <60 s verdict — reused, with the refresh spinner already running from
-  // checkStatus to signal the in-flight re-check) or from a live probe settle.
+  // with a <60 s verdict, reused while the re-check runs) or from a live probe
+  // settle.
   // Both are treated as "up"; a contradicting probe corrects to red within ~1
   // probe (see hasConfirmedState note).
   document.getElementById('statusDot').className='status-dot online';
@@ -983,10 +1016,10 @@ function setOnline(degraded){
     setFallbackState();
   }
   if(wolSent){
-    if(wolStartTime){
-      recordBootTime(Date.now()-wolStartTime);
-      wolStartTime=0;
-    }
+    // v8.53 — no local boot sample is recorded any more: the relay measures the
+    // wake it actually served (and to services-ready, which this client-side
+    // timing never could — it only sees the host answering).
+    wolStartTime=0;
     showToast('✓ Serveur démarré avec succès',false,5000);
     if(navigator.vibrate)navigator.vibrate([100,50,100]);
     wolSent=false;
@@ -1102,13 +1135,20 @@ function postWol(){
     body:JSON.stringify({mac:macToColon(config.mac)})
   }).then(function(r){
     if(r.ok)return;
-    wolSent=false;wolStartTime=0;stopCountdown();clearWolPoll();releaseWakeLock();
-    var msg=(r.status===401||r.status===403)?'Relais : accès refusé':'Erreur relais HTTP '+r.status;
+    wolSent=false;wolStartTime=0;wakeFailed=true;lastDownDeclared=false;stopCountdown();clearWolPoll();releaseWakeLock();
+    // v8.53 — name the case. These are genuinely different situations for the
+    // reader: 401/403 and 502 are the admin's problem and retrying is pointless,
+    // 429 clears on its own, and only "réessaie" is honest for the rest.
+    var msg;
+    if(r.status===401||r.status===403)msg='Relais : accès refusé (config)';
+    else if(r.status===429)msg='Trop d\'essais — patiente une minute';
+    else if(r.status===502)msg='Le relais ne trouve pas le serveur';
+    else msg='Erreur relais HTTP '+r.status;
     if(navigator.vibrate)navigator.vibrate(300);
     showToast('⚠ '+msg+' — réveil manuel ↓',true,5000);
     setOffline();
   }).catch(function(){
-    wolSent=false;wolStartTime=0;stopCountdown();clearWolPoll();releaseWakeLock();
+    wolSent=false;wolStartTime=0;wakeFailed=true;lastDownDeclared=false;stopCountdown();clearWolPoll();releaseWakeLock();
     // Flip relayReachable manually — a checkStatus() right now would race
     // the WoL POST, and we already know the relay just failed. This is a
     // CONFIRMED failure (the user actually tried to wake), so bypass the
@@ -1148,7 +1188,10 @@ function setOffline(){
   // v8.12 — the expected sleep also gets its own calm blue card/dot style
   // instead of the alarming outage red.
   var inWin=inUptimeWindow();
-  var sleeping=navigator.onLine&&inWin===false;
+  // v8.53 — calm blue for ANY orderly stop, not just one the clock predicted.
+  // A declared down (last-gasp) is orderly by construction; only silence is an
+  // anomaly worth the alarming red. See lastDownDeclared.
+  var sleeping=navigator.onLine&&(inWin===false||lastDownDeclared);
   document.getElementById('statusDot').className='status-dot '+(sleeping?'sleep':'offline');
   document.getElementById('statusCard').className='status-card '+(sleeping?'sleep':'offline');
   if(!navigator.onLine){
@@ -1162,6 +1205,12 @@ function setOffline(){
     // v8.13 — short copy: the power button sits right below, the "ou
     // allume-le ↓" hint wrapped on narrow phones (S24) for no added info.
     document.getElementById('statusSub').textContent='réveil auto à '+windowStartLabel();
+  }else if(lastDownDeclared){
+    // Inside the window, but the home said goodbye itself. No auto-wake time to
+    // promise here (the schedule expected it to be running), so the sub states
+    // the fact and the armed wake button says what to do about it.
+    document.getElementById('statusLabel').textContent='Éteint';
+    document.getElementById('statusSub').textContent='arrêt normal du serveur';
   }else{
     document.getElementById('statusLabel').textContent='Hors ligne';
     // v8.14 — single short copy for both branches: the red card already
@@ -1172,17 +1221,36 @@ function setOffline(){
   updateVerdictAge();
   if(wolReady()){
     var btn=document.getElementById('powerBtn'),lbl=document.getElementById('powerLabel');
-    if(relayReachable){btn.className='power-btn';lbl.textContent='Allumer le serveur';lbl.className='power-label';}
-    else{btn.className='power-btn unavailable';lbl.textContent='Réveil indisponible';lbl.className='power-label unavailable';}
+    // v8.53 — the button stays ARMED even when the relay is presumed unreachable.
+    // It used to render `.unavailable`, which is `pointer-events:none` — a dead
+    // button, on a presumption drawn from status-poll misses that are as often the
+    // phone's own connectivity as the relay's health (see the sendWol comment).
+    // The relay-down warning is not lost: setFallbackState() promotes the manual
+    // wake link to a red, full-size call to action, which is the actionable half
+    // of the old message. A tap that really can't reach the relay fails in one
+    // round-trip with an explicit toast.
+    btn.className='power-btn';lbl.className='power-label';
+    lbl.textContent=relayReachable?'Allumer le serveur':'Allumer (relais incertain)';
     setFallbackState();
   }
 }
 
 function sendWol(){
   if(isOnline||wolSent||!wolReady())return;
-  if(!relayReachable){showToast('⚠ Relais injoignable — réveil manuel ↓',true,5000);return;}
+  // v8.53 — a tap is no longer refused on the PRESUMED relay state. relayReachable
+  // is inferred from consecutive /status misses, and those misses include the
+  // phone's own connectivity blips (tunnel re-establishing, radio handover): the
+  // relay can be perfectly fine. Refusing meant the user had to wait for 3 clean
+  // polls (~24 s) before the button re-armed, on a wake that would have worked.
+  // Try instead: postWol answers in one round-trip and its failure path already
+  // paints the definitive "Relais injoignable" + manual-fallback toast. Optimistic
+  // action, then correct on evidence — the cost of being wrong is one round-trip,
+  // the cost of the old guard was a dead button.
   if(navigator.vibrate)navigator.vibrate(50);
   wolSent=true;
+  // A fresh attempt clears the previous failure: the promoted fallback link
+  // would otherwise stay shouting through a wake that is going fine.
+  wakeFailed=false;
   wolStartTime=Date.now();
   acquireWakeLock();
   document.getElementById('powerBtn').className='power-btn sent';
@@ -1203,7 +1271,7 @@ function sendWol(){
   wolPollTimer=setInterval(function(){
     if(!wolSent||isOnline){clearWolPoll();return;}
     if(Date.now()-wolStartTime>WOL_TIMEOUT_MS){
-      wolSent=false;wolStartTime=0;clearWolPoll();stopCountdown();releaseWakeLock();checkStatus();
+      wolSent=false;wolStartTime=0;wakeFailed=true;lastDownDeclared=false;clearWolPoll();stopCountdown();releaseWakeLock();checkStatus();
       if(navigator.vibrate)navigator.vibrate(300);
       // Surface the timeout — silent failure (vibration + flip to red) used to
       // leave family members wondering whether the app was broken. Toast tells
@@ -1317,8 +1385,8 @@ function onForeground(){
   // confirmation streak on resume; reset it (and any pending re-probe).
   downStreak=0;if(downRecheckTimer){clearTimeout(downRecheckTimer);downRecheckTimer=null;}
   // Reuse the local cache (<60 s) for an instant paint on rapid reopens. v8.7:
-  // only an "up" cache is pre-painted (the confident green, refresh spinner
-  // signalling the re-check); a cached "down" is NOT pre-painted red — it falls
+  // only an "up" cache is pre-painted (the confident green); a cached "down" is
+  // NOT pre-painted red — it falls
   // through to the orange "Vérification…" like a stale/empty cache. The
   // background checkStatus() below confirms or corrects within ~1 probe.
   var cached=readLocalStatus();
@@ -1391,14 +1459,13 @@ setInterval(function(){
   if(!nowHidden)updateVerdictAge();
 },1000);
 
-// Wire up the 5 button handlers (migrated from inline onclick="..." attributes
+// Wire up the button handlers (migrated from inline onclick="..." attributes
 // so the CSP can drop 'unsafe-inline' from script-src — see <meta http-equiv
 // "Content-Security-Policy"> in index.html).
 document.getElementById('testRelayBtn').addEventListener('click',function(){testRelay(this);});
 document.getElementById('cancelBtn').addEventListener('click',cancelSettings);
 document.getElementById('backBtn').addEventListener('click',cancelSettings);
 document.getElementById('saveBtn').addEventListener('click',saveConfig);
-document.getElementById('refreshBtn').addEventListener('click',checkStatus);
 document.getElementById('powerBtn').addEventListener('click',sendWol);
 
 // Derive footer version from the active SW cache name (mirrors debug.js

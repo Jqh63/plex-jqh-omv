@@ -83,12 +83,16 @@ def _status_body(verdict):
     return '{"up": false, "stale": false, "age_s": null, "eta_s": 80}'
 
 
-def _mk_handler(counters, relay_plan, home_plan):
+def _mk_handler(counters, relay_plan, home_plan, wol_status=200):
     def handle(route: Route):
         parsed = urlparse(route.request.url)
         host, path = parsed.netloc, parsed.path
         if host == RELAY_HOST and path == "/wol":
             counters["wol"] += 1
+            if wol_status != 200:
+                route.fulfill(status=wol_status, headers=JSON_H,
+                              body='{"detail": "refused"}')
+                return
             route.fulfill(status=200, headers=JSON_H, body='{"sent": true}')
             return
         if host == RELAY_HOST and path == "/status":
@@ -124,6 +128,8 @@ def card(page):
         card: document.getElementById('statusCard').className,
         power: document.getElementById('powerLabel').innerText,
         progress: document.getElementById('powerProgress').className,
+        fallback: document.getElementById('fallbackLink').className,
+        fallbackText: document.getElementById('fallbackLinkA').innerText,
     })"""
     )
 
@@ -271,6 +277,124 @@ def scenario_stale_remote_wake_on_resume(p):
     return ok
 
 
+def scenario_remote_wake_outlives_the_waking_signal(p):
+    """v8.53 — an ADOPTED wake whose boot outlasts the relay's WAKE_SIGNAL_TTL_S.
+
+    The relay only advertises `waking` for WAKE_SIGNAL_TTL_S (150 s). A boot that
+    runs longer (cold J5005, fsck, a wake that never lands) therefore stops being
+    advertised WHILE the PWA still has remoteWaking = true and a countdown ticking.
+    The next "down" verdict then lands in setRechecking(), whose early-return only
+    covered `wolSent` — so on an ADOPTED wake it fell through and painted
+    "Vérification…" over the card while the power label kept counting down.
+
+    Two widgets telling the user two different stories at the same instant. This
+    is the behaviour tests/README.md described as a trap to write tests AROUND
+    ("the card is repainted to Vérification… in ~200 ms while the countdown keeps
+    ticking") — it was the defect itself, not a fixture quirk. THIS scenario
+    asserts on the card on purpose: it is the widget that was lying.
+
+    Distinct from the stale-wake reap above: nothing is frozen and nothing is
+    stale here — the wake is live, in-window, and legitimately still running.
+    """
+    print("\n## remote-wake-outlives-the-relay-waking-signal (v8.53)")
+    counters = {"relay": 0, "home": 0, "wol": 0}
+    state = {"waking": True}
+
+    def relay_plan(n):
+        return "waking:18" if state["waking"] else "down"
+
+    b = getattr(p, ENGINE).launch()
+    ctx = b.new_context(viewport={"width": 390, "height": 844})
+    page = ctx.new_page()
+    page.route("**/*", _mk_handler(counters, relay_plan, lambda n: "fail"))
+    page.goto(PWA_URL, wait_until="load")
+    page.wait_for_selector("#statusLabel", state="attached", timeout=10000)
+    page.wait_for_timeout(800)
+
+    adopted = card(page)
+    print(f"  wake adopted → card={adopted['label']!r} countdown={adopted['power']!r}")
+    ok = check("the PWA adopts the wake (countdown running, no tap)",
+               is_counting_down(adopted) and counters["wol"] == 0,
+               f"countdown={adopted['power']!r} wol POSTs={counters['wol']}")
+
+    # The relay's waking signal expires mid-boot. The home is still down, the
+    # countdown is still legitimately running on this device. No freeze, no
+    # resume — just the next few 8 s polls landing on a bare "down".
+    state["waking"] = False
+
+    # SAMPLE, don't snapshot. The contradiction window is only DOWN_RECHECK_MS
+    # (2.5 s) wide: the first bare "down" paints it, and the confirming re-probe
+    # commits red — which stops the countdown — right after. A single wait_for_
+    # timeout lands past it and the test passes against the bug (verified: a 12 s
+    # snapshot reported card='Hors ligne', countdown stopped, all green on the
+    # unfixed app.js). Poll across the whole window instead and fail on ANY
+    # instant where the two widgets disagree.
+    contradictions = []
+    for _ in range(40):
+        page.wait_for_timeout(300)
+        s = card(page)
+        if is_counting_down(s) and "rification" in s["label"]:
+            contradictions.append(s)
+
+    print(f"  waking signal expired mid-boot → {len(contradictions)} sample(s) with "
+          f"a 'Vérification…' card over a running countdown")
+    ok &= check("the card never contradicts a countdown that is still running",
+                not contradictions,
+                f"e.g. card={contradictions[0]['label']!r} "
+                f"countdown={contradictions[0]['power']!r}" if contradictions else "")
+    b.close()
+    return ok
+
+
+def scenario_failed_wake_promotes_the_manual_page(p):
+    """v8.53 — a REFUSED wake must lead to the manual-wake page.
+
+    fallback.html is a real family procedure (parameters in copy-to-clipboard
+    fields, then a free WoL app per OS with numbered steps) — not admin-only
+    documentation. But it was only ever promoted on `relayReachable === false`,
+    the one case where the phone reached nobody. A wake refused by a reachable
+    relay (401/403 config, 502 target resolution, 429) left the link at 11 px
+    and 55 % opacity under the button, while the toast that said "réveil manuel
+    ↓" faded after 5 s.
+
+    Uses 401 because it settles in one round-trip; the timeout path (5 min) and
+    the transport path set the same flag.
+    """
+    print("\n## failed-wake-promotes-the-manual-wake-page (v8.53)")
+    counters = {"relay": 0, "home": 0, "wol": 0}
+
+    b = getattr(p, ENGINE).launch()
+    ctx = b.new_context(viewport={"width": 390, "height": 844})
+    page = ctx.new_page()
+    page.route("**/*", _mk_handler(counters, lambda n: "down", lambda n: "fail",
+                                   wol_status=401))
+    page.goto(PWA_URL, wait_until="load")
+    page.wait_for_selector("#statusLabel", state="attached", timeout=10000)
+    page.wait_for_timeout(3000)
+
+    before = card(page)
+    ok = check("the link is discreet while nothing has failed",
+               "promoted" not in before["fallback"],
+               f"class={before['fallback']!r} text={before['fallbackText']!r}")
+
+    page.click("#powerBtn")
+    page.wait_for_timeout(1500)
+    after = card(page)
+    print(f"  wake refused (401) → fallback class={after['fallback']!r} "
+          f"text={after['fallbackText']!r}")
+    ok &= check("the refused wake promotes the manual page",
+                "promoted" in after["fallback"],
+                f"class={after['fallback']!r}")
+    ok &= check("the promoted link says what it offers",
+                "comment faire" in after["fallbackText"],
+                f"text={after['fallbackText']!r}")
+    ok &= check("the wake button is left usable for a retry",
+                "unavailable" not in after["power"] and counters["wol"] == 1,
+                f"power={after['power']!r} wol POSTs={counters['wol']}")
+    b.close()
+    return ok
+
+
 def main():
     print("=" * 72)
     print(f"WAKE-path E2E (v8.31 + v8.32) — engine={ENGINE} base={PWA_BASE}")
@@ -284,6 +408,8 @@ def main():
             return 0
         ok = scenario_stale_wake_on_resume(p)
         ok &= scenario_stale_remote_wake_on_resume(p)
+        ok &= scenario_remote_wake_outlives_the_waking_signal(p)
+        ok &= scenario_failed_wake_promotes_the_manual_page(p)
 
     print("\n" + "=" * 72)
     print("ALL PASS" if ok else "FAILURES — see above")

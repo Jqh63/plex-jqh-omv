@@ -60,7 +60,7 @@
   .status-card.online{border-color:var(--green);box-shadow:0 0 24px var(--green-glow)}
   .status-card.offline{border-color:var(--red);box-shadow:0 0 24px var(--red-glow)}
   .status-card.sleep{border-color:var(--sleep);box-shadow:0 0 24px var(--sleep-glow)}
-  .status-left{display:flex;align-items:center;gap:14px}
+  .status-left{display:flex;align-items:center;gap:14px;flex:1;min-width:0}
   .status-dot{width:12px;height:12px;border-radius:50%;background:var(--text-dim);transition:background .4s,box-shadow .4s;flex-shrink:0}
   .status-dot.online{background:var(--green);box-shadow:0 0 8px var(--green)}
   .status-dot.offline{background:var(--red);box-shadow:0 0 8px var(--red)}
@@ -72,9 +72,7 @@
   .status-sub{font-size:12px;color:var(--text-dim);font-family:'JetBrains Mono',monospace;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .status-age{font-size:10px;color:var(--text-dim);opacity:.55;font-family:'JetBrains Mono',monospace;margin-top:2px;min-height:12px;white-space:nowrap}
 
-  .refresh-btn{background:none;border:1px solid var(--border);color:var(--text-dim);border-radius:10px;width:40px;height:40px;min-width:40px;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:all .2s}
-  .refresh-btn:active{background:var(--surface-hover)}
-  .refresh-btn.spinning svg{animation:spin .8s linear}
+  /* spin drives the power-ring wake halo (.power-ring:has(.power-btn.sent)::after) */
   @keyframes spin{from{transform:rotate(0)}to{transform:rotate(360deg)}}
 
   .power-section{display:flex;flex-direction:column;align-items:center;gap:12px;padding:8px 0}
@@ -242,9 +240,6 @@
         <div class="status-age" id="statusAge"></div>
       </div>
     </div>
-    <button class="refresh-btn" id="refreshBtn" type="button" aria-label="Vérifier le statut">
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
-    </button>
   </div>
 
   <div class="power-section" id="powerSection">

@@ -695,8 +695,7 @@ function checkStatus(){
   if(checking&&Date.now()-checkStartedAt<CHECK_WATCHDOG_MS)return;
   checking=true;checkStartedAt=Date.now();
   var gen=++probeGen;
-  var label=document.getElementById('statusLabel'),sub=document.getElementById('statusSub'),btn=document.getElementById('refreshBtn');
-  btn.classList.add('spinning');
+  var label=document.getElementById('statusLabel'),sub=document.getElementById('statusSub');
   // v8.10 staleness guard — a confirmed state only earns the "keep the prior
   // visual" treatment while the last SETTLED verdict is fresh (in-memory
   // lastVerdictAtMs, same freshness window as the localStorage cache). A stale
@@ -709,8 +708,11 @@ function checkStatus(){
   // the variable is strictly fresher and storage-independent.
   if(hasConfirmedState&&Date.now()-lastVerdictAtMs>STATUS_LOCAL_TTL_MS)hasConfirmedState=false;
   // Keep the prior visual when we already have a confirmed (or cached) state:
-  // the card text is left UNTOUCHED and the spinning refresh button is the only
-  // in-flight signal. v8.29 — we used to flip the sub to "vérification…" on every
+  // the card text is left UNTOUCHED and the poll runs silently. v8.53 — there is
+  // no in-flight indicator any more (the refresh button that carried it is gone);
+  // freshness is communicated by the "vérifié …" age line, which is what the user
+  // actually needs to judge the verdict. v8.29 — we used to flip the sub to
+  // "vérification…" on every
   // 8 s poll, which strobed the subtitle back and forth under a steady green.
   // Orange "Vérification…" only appears when nothing is known yet (cold open).
   // v8.30 — never clobber during an active wake: setStarting() painted the
@@ -767,7 +769,7 @@ function checkStatus(){
     // A newer probe (e.g. a resume re-probe) superseded this one — drop the
     // stale verdict without touching `checking`, which the newer probe owns.
     if(gen!==probeGen)return;
-    checking=false;btn.classList.remove('spinning');
+    checking=false;
     // v8.12 — adopt the relay-served uptime window (UPTIME_WINDOW env on the
     // relay). The relay value wins over a locally-set one: it's the
     // admin-controlled source of truth, so changing it on the relay updates
@@ -852,10 +854,18 @@ function checkStatus(){
 // checkStatus(): here we already had a verdict (often a confident green) but a
 // single "down" is not trusted yet.
 function setRechecking(){
-  document.getElementById('refreshBtn').classList.add('spinning');
-  // During an active WoL wake, keep the "Démarrage…" state — a re-check card
-  // would contradict the wake-in-progress UI (mirrors setOffline's wolSent guard).
-  if(wolSent){setStarting();return;}
+  // During an active wake, keep the "Démarrage…" state — a re-check card would
+  // contradict the wake-in-progress UI (mirrors setOffline's wolSent guard).
+  // v8.53 — remoteWaking is guarded too, not just wolSent. An ADOPTED wake (the
+  // relay's `waking`, e.g. the AM5 logon task) whose boot outlives the relay's
+  // WAKE_SIGNAL_TTL_S stops being advertised while remoteWaking is still true
+  // here and the countdown is still ticking: the next non-waking "down" landed
+  // in this function and painted "Vérification…" over the card while the power
+  // label kept counting "Démarrage long…". Two widgets, two contradicting
+  // stories. tests/README.md documented the repaint as a trap to write tests
+  // AROUND ("the status card is repainted in ~200 ms while the countdown keeps
+  // ticking") — it was the bug, not a fixture quirk.
+  if(wolSent||remoteWaking){setStarting();return;}
   document.getElementById('statusDot').className='status-dot checking';
   document.getElementById('statusCard').className='status-card';
   document.getElementById('statusLabel').textContent='Vérification...';
@@ -869,7 +879,9 @@ function setRechecking(){
 // a down being re-confirmed). NOT during a WoL wake — the button owns the
 // "Démarrage…" / progress UI then — nor without a configured MAC (no wake to offer).
 function setButtonChecking(){
-  if(!config||!config.mac||wolSent)return;
+  // v8.53 — remoteWaking added alongside wolSent: during ANY wake the button
+  // owns the countdown UI, whether this device fired it or adopted it.
+  if(!config||!config.mac||wolSent||remoteWaking)return;
   var pBtn=document.getElementById('powerBtn'),pLbl=document.getElementById('powerLabel');
   pBtn.className='power-btn checking';
   pLbl.textContent='Vérification…';pLbl.className='power-label checking';
@@ -962,8 +974,8 @@ function setOnline(degraded){
   // + success toast are actually seen before the screen may re-lock.
   applyLinksState();
   // Confident green. setOnline fires either from a cache pre-paint (open/resume
-  // with a <60 s verdict — reused, with the refresh spinner already running from
-  // checkStatus to signal the in-flight re-check) or from a live probe settle.
+  // with a <60 s verdict, reused while the re-check runs) or from a live probe
+  // settle.
   // Both are treated as "up"; a contradicting probe corrects to red within ~1
   // probe (see hasConfirmedState note).
   document.getElementById('statusDot').className='status-dot online';
@@ -1172,15 +1184,31 @@ function setOffline(){
   updateVerdictAge();
   if(wolReady()){
     var btn=document.getElementById('powerBtn'),lbl=document.getElementById('powerLabel');
-    if(relayReachable){btn.className='power-btn';lbl.textContent='Allumer le serveur';lbl.className='power-label';}
-    else{btn.className='power-btn unavailable';lbl.textContent='Réveil indisponible';lbl.className='power-label unavailable';}
+    // v8.53 — the button stays ARMED even when the relay is presumed unreachable.
+    // It used to render `.unavailable`, which is `pointer-events:none` — a dead
+    // button, on a presumption drawn from status-poll misses that are as often the
+    // phone's own connectivity as the relay's health (see the sendWol comment).
+    // The relay-down warning is not lost: setFallbackState() promotes the manual
+    // wake link to a red, full-size call to action, which is the actionable half
+    // of the old message. A tap that really can't reach the relay fails in one
+    // round-trip with an explicit toast.
+    btn.className='power-btn';lbl.className='power-label';
+    lbl.textContent=relayReachable?'Allumer le serveur':'Allumer (relais incertain)';
     setFallbackState();
   }
 }
 
 function sendWol(){
   if(isOnline||wolSent||!wolReady())return;
-  if(!relayReachable){showToast('⚠ Relais injoignable — réveil manuel ↓',true,5000);return;}
+  // v8.53 — a tap is no longer refused on the PRESUMED relay state. relayReachable
+  // is inferred from consecutive /status misses, and those misses include the
+  // phone's own connectivity blips (tunnel re-establishing, radio handover): the
+  // relay can be perfectly fine. Refusing meant the user had to wait for 3 clean
+  // polls (~24 s) before the button re-armed, on a wake that would have worked.
+  // Try instead: postWol answers in one round-trip and its failure path already
+  // paints the definitive "Relais injoignable" + manual-fallback toast. Optimistic
+  // action, then correct on evidence — the cost of being wrong is one round-trip,
+  // the cost of the old guard was a dead button.
   if(navigator.vibrate)navigator.vibrate(50);
   wolSent=true;
   wolStartTime=Date.now();
@@ -1317,8 +1345,8 @@ function onForeground(){
   // confirmation streak on resume; reset it (and any pending re-probe).
   downStreak=0;if(downRecheckTimer){clearTimeout(downRecheckTimer);downRecheckTimer=null;}
   // Reuse the local cache (<60 s) for an instant paint on rapid reopens. v8.7:
-  // only an "up" cache is pre-painted (the confident green, refresh spinner
-  // signalling the re-check); a cached "down" is NOT pre-painted red — it falls
+  // only an "up" cache is pre-painted (the confident green); a cached "down" is
+  // NOT pre-painted red — it falls
   // through to the orange "Vérification…" like a stale/empty cache. The
   // background checkStatus() below confirms or corrects within ~1 probe.
   var cached=readLocalStatus();
@@ -1391,14 +1419,13 @@ setInterval(function(){
   if(!nowHidden)updateVerdictAge();
 },1000);
 
-// Wire up the 5 button handlers (migrated from inline onclick="..." attributes
+// Wire up the button handlers (migrated from inline onclick="..." attributes
 // so the CSP can drop 'unsafe-inline' from script-src — see <meta http-equiv
 // "Content-Security-Policy"> in index.html).
 document.getElementById('testRelayBtn').addEventListener('click',function(){testRelay(this);});
 document.getElementById('cancelBtn').addEventListener('click',cancelSettings);
 document.getElementById('backBtn').addEventListener('click',cancelSettings);
 document.getElementById('saveBtn').addEventListener('click',saveConfig);
-document.getElementById('refreshBtn').addEventListener('click',checkStatus);
 document.getElementById('powerBtn').addEventListener('click',sendWol);
 
 // Derive footer version from the active SW cache name (mirrors debug.js

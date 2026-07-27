@@ -147,9 +147,17 @@ def is_checking(s):
 
 
 def is_wol_disabled(s):
-    # The wake button goes to "power-btn unavailable" only when relayReachable
-    # is false. A *degraded* (answered) /status failure keeps it enabled.
-    return "unavailable" in s["powerClass"]
+    # v8.53 — the wake button is NEVER disabled any more. It used to render
+    # `power-btn unavailable` (pointer-events:none) on a presumed-unreachable
+    # relay; that presumption comes from status-poll misses, which are as often
+    # the phone's own connectivity, so it produced a dead button on a wake that
+    # would have worked. The relay-down warning now lives entirely in the
+    # promoted fallback link (is_warn) and in postWol's failure toast.
+    #
+    # Kept as an assertion (rather than deleted) so the property is PINNED: the
+    # scenarios below assert `not is_wol_disabled(...)`, and this now fails loudly
+    # if anything ever re-introduces a pointer-events:none wake button.
+    return "unavailable" in s["powerClass"] or "not-allowed" in s["powerClass"]
 
 
 def is_button_confident(s):
@@ -475,14 +483,14 @@ def run_watchdog_scenario(p):
     # declares these as top-level `var`s, so they live on window.
     relay_verdict["v"] = "down"
     page.evaluate("() => { window.checking = true; window.checkStartedAt = Date.now() - 60000; }")
-    # Re-probe trigger (stands in for the self-healing tick) — the refresh
-    # button calls checkStatus(). v8.7: the reclaimed re-probe sees "down" → it
-    # paints orange and fires the confirm re-probe (DOWN_RECHECK_MS = 2.5 s), so
-    # red lands ~2.5 s later, not instantly. Wait past it (3.5 s) — the property
-    # under test is that the wedged flag is reclaimed and the app converges to red
-    # (not frozen green), not the latency.
-    page.click("#refreshBtn")
-    page.wait_for_timeout(3500)
+    # Re-probe trigger. v8.53 — this used to click the refresh button as a
+    # stand-in for the self-healing tick; the button is gone, so the test now
+    # waits for the REAL mechanism, which is what the property was always about:
+    # nothing but the 8 s self-healing poll can reclaim a wedged `checking`, and
+    # it must. Budget = one poll (8 s, up to two before the watchdog age clears)
+    # + the v8.7 confirm re-probe (DOWN_RECHECK_MS = 2.5 s) + slack. The property
+    # under test is convergence to red (not frozen green), not the latency.
+    page.wait_for_timeout(21000)
     post = capture_state(page)
     b.close()
     return {

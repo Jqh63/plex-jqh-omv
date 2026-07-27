@@ -132,6 +132,10 @@ def is_red(s):
 def is_warn(s):
     # Both "warn" (server up, relay down) and "promoted" (server down, relay
     # down) signal "relay unavailable" to the user — same visual semantics.
+    # v8.53: `promoted` now ALSO means "a wake attempt failed" (wakeFailed).
+    # Harmless here — this suite never fires a wake, so the only thing that can
+    # promote the link in these scenarios is still relay reachability. The wake
+    # meaning is covered in wake-e2e.py.
     return "warn" in s["fallbackClass"] or "promoted" in s["fallbackClass"]
 
 
@@ -287,6 +291,7 @@ def run_scenario(p, name, relay_plan, home_plan, sample_delays_s, preseed_cache=
         "final_warn": is_warn(final),
         "final_wol_disabled": is_wol_disabled(final),
         "final_sub": final["statusSub"],
+        "final_label": final["statusLabel"],
         "button_confident_at": [t for t, s in samples if is_button_confident(s)],
         "button_checking_at": [t for t, s in samples if is_button_checking(s)],
         "final_button_confident": is_button_confident(final),
@@ -720,13 +725,24 @@ def collect_results():
         # Discriminating samples: with a PROBED down, T+2 is still orange (the
         # DOWN_RECHECK re-probe fires at 2.5 s, red lands ≥T+3 — see r2); a
         # DECLARED down must already be red at T+2, with no orange re-check.
-        r16 = run_scenario(p, "heartbeat-declared-down-instant-red",
+        # v8.53 — a declared down is now painted the CALM blue, not the alarming
+        # red, and inside the uptime window at that. Rationale (relay log, July
+        # 2026): the home's shutdown is gated on the AM5 being on, not on the
+        # clock alone, so it stops inside its own window most evenings — 8 of the
+        # last 14 shutdowns, typically ~22h30. Keying the wording on the window
+        # alone painted every one of those normal stops as an outage. The red is
+        # now reserved for SILENCE, which is the only thing a crash produces.
+        # The instant-commit property (no orange re-check detour) is unchanged
+        # and still asserted, which is what v8.48 was about.
+        r16 = run_scenario(p, "heartbeat-declared-down-instant-calm",
                            relay_plan=lambda n: "down-declared", home_plan=lambda n: "ok",
-                           sample_delays_s=[2, 3])
-        ok16 = (r16["final_red"] and bool(r16["red_at"]) and r16["red_at"][0] <= 2
-                and not r16["checking_at"])
-        results.append(("heartbeat-declared-down-instant-red", ok16, r16,
-                        "declared down → red by T+2 (no DOWN_RECHECK orange detour)"))
+                           sample_delays_s=[2, 3],
+                           url_extra="&window=" + _window_excluding_now(inside=True))
+        ok16 = (r16["final_sleep"] and not r16["final_red"] and not r16["checking_at"]
+                and "teint" in r16["final_label"])
+        results.append(("heartbeat-declared-down-instant-calm", ok16, r16,
+                        "declared down INSIDE the window → calm blue 'Éteint', "
+                        "no orange detour, never the outage red"))
 
         # v8.48 — up+degraded paints the green card with the explanatory sub
         # ("services en cours de démarrage…") instead of the generic one.

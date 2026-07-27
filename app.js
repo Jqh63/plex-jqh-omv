@@ -7,6 +7,17 @@ var relayReachable=true;
 // them there instead of leaving them on a dead power button. Cleared by a
 // successful wake / any green settle, and by a fresh tap.
 var wakeFailed=false;
+// v8.53 — true when the committed "down" came from the home's OWN last-gasp
+// (heartbeat up=false at clean shutdown, `source: "heartbeat"`), as opposed to
+// a probe that simply stopped getting answers. The distinction is free — a
+// crashed home cannot post "I'm dead", so a last-gasp means an ORDERLY stop and
+// silence means something went wrong — and it fixes an alarm that cried wolf
+// nightly: the home's shutdown is gated on the AM5 being on, not on the clock
+// alone, so it very often stops INSIDE its uptime window (8 of the last 14
+// shutdowns in the relay log, most of them around 22h30). The card keyed its
+// wording on the window alone, so every one of those normal stops was painted
+// the alarming red "Hors ligne" reserved for outages.
+var lastDownDeclared=false;
 // v8.2 — N-consecutive-miss debounce on the relay-DOWN cosmetic only. A relay
 // /status transport failure is most often a slow-but-alive e2-micro (cold
 // burstable CPU spanning more than one 15 s tick) or a last-mile blip, NOT a
@@ -581,7 +592,7 @@ function startApp(){
   buildLinks();
   clearWolPoll();
   releaseWakeLock();
-  isOnline=false;wolSent=false;remoteWaking=false;checking=false;checkStartedAt=0;relayReachable=true;relayMissStreak=0;hasConfirmedState=false;wakeFailed=false;
+  isOnline=false;wolSent=false;remoteWaking=false;checking=false;checkStartedAt=0;relayReachable=true;relayMissStreak=0;hasConfirmedState=false;wakeFailed=false;lastDownDeclared=false;
   // v8.28 — restore the persisted relay-served ETA so a wake fired right after an
   // offline open still seeds a shared-value countdown before the first poll lands.
   relayEtaMs=(config&&typeof config.eta==='number'&&config.eta*1000>=BOOT_MIN_MS&&config.eta*1000<=BOOT_MAX_MS)?config.eta*1000:0;
@@ -846,6 +857,7 @@ function checkStatus(){
       // the orange re-confirmation detour. Covers "extinction avec app ouverte"
       // — the card flips to Éteint on the next poll, no Vérification… dance.
       downStreak=DOWN_CONFIRM;
+      lastDownDeclared=res.declared===true;
       writeLocalStatus(false,relayReachable);
       setOffline();
     }else{
@@ -977,7 +989,7 @@ function setOnline(degraded){
   isOnline=true;
   remoteWaking=false;
   // The home is up — however it got there. Any earlier wake failure is moot.
-  wakeFailed=false;
+  wakeFailed=false;lastDownDeclared=false;
   hasConfirmedState=true;
   lastVerdictAtMs=Date.now();
   // v8.7 — green cancels any in-progress down-confirmation (streak + pending
@@ -1130,7 +1142,7 @@ function postWol(){
     body:JSON.stringify({mac:macToColon(config.mac)})
   }).then(function(r){
     if(r.ok)return;
-    wolSent=false;wolStartTime=0;wakeFailed=true;stopCountdown();clearWolPoll();releaseWakeLock();
+    wolSent=false;wolStartTime=0;wakeFailed=true;lastDownDeclared=false;stopCountdown();clearWolPoll();releaseWakeLock();
     // v8.53 — name the case. These are genuinely different situations for the
     // reader: 401/403 and 502 are the admin's problem and retrying is pointless,
     // 429 clears on its own, and only "réessaie" is honest for the rest.
@@ -1143,7 +1155,7 @@ function postWol(){
     showToast('⚠ '+msg+' — réveil manuel ↓',true,5000);
     setOffline();
   }).catch(function(){
-    wolSent=false;wolStartTime=0;wakeFailed=true;stopCountdown();clearWolPoll();releaseWakeLock();
+    wolSent=false;wolStartTime=0;wakeFailed=true;lastDownDeclared=false;stopCountdown();clearWolPoll();releaseWakeLock();
     // Flip relayReachable manually — a checkStatus() right now would race
     // the WoL POST, and we already know the relay just failed. This is a
     // CONFIRMED failure (the user actually tried to wake), so bypass the
@@ -1183,7 +1195,10 @@ function setOffline(){
   // v8.12 — the expected sleep also gets its own calm blue card/dot style
   // instead of the alarming outage red.
   var inWin=inUptimeWindow();
-  var sleeping=navigator.onLine&&inWin===false;
+  // v8.53 — calm blue for ANY orderly stop, not just one the clock predicted.
+  // A declared down (last-gasp) is orderly by construction; only silence is an
+  // anomaly worth the alarming red. See lastDownDeclared.
+  var sleeping=navigator.onLine&&(inWin===false||lastDownDeclared);
   document.getElementById('statusDot').className='status-dot '+(sleeping?'sleep':'offline');
   document.getElementById('statusCard').className='status-card '+(sleeping?'sleep':'offline');
   if(!navigator.onLine){
@@ -1197,6 +1212,12 @@ function setOffline(){
     // v8.13 — short copy: the power button sits right below, the "ou
     // allume-le ↓" hint wrapped on narrow phones (S24) for no added info.
     document.getElementById('statusSub').textContent='réveil auto à '+windowStartLabel();
+  }else if(lastDownDeclared){
+    // Inside the window, but the home said goodbye itself. No auto-wake time to
+    // promise here (the schedule expected it to be running), so the sub states
+    // the fact and the armed wake button says what to do about it.
+    document.getElementById('statusLabel').textContent='Éteint';
+    document.getElementById('statusSub').textContent='arrêt normal du serveur';
   }else{
     document.getElementById('statusLabel').textContent='Hors ligne';
     // v8.14 — single short copy for both branches: the red card already
@@ -1257,7 +1278,7 @@ function sendWol(){
   wolPollTimer=setInterval(function(){
     if(!wolSent||isOnline){clearWolPoll();return;}
     if(Date.now()-wolStartTime>WOL_TIMEOUT_MS){
-      wolSent=false;wolStartTime=0;wakeFailed=true;clearWolPoll();stopCountdown();releaseWakeLock();checkStatus();
+      wolSent=false;wolStartTime=0;wakeFailed=true;lastDownDeclared=false;clearWolPoll();stopCountdown();releaseWakeLock();checkStatus();
       if(navigator.vibrate)navigator.vibrate(300);
       // Surface the timeout — silent failure (vibration + flip to red) used to
       // leave family members wondering whether the app was broken. Toast tells

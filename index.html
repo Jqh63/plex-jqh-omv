@@ -154,15 +154,24 @@
   .power-label{font-size:13px;color:var(--text-dim);text-align:center;min-height:18px;transition:color .3s}
   .power-label.sent{color:var(--green)}
   .power-label.checking{color:var(--orange)}
-  .power-progress{display:none;width:120px;height:3px;background:var(--border);border-radius:2px;overflow:hidden;margin-top:6px}
-  .power-progress.active{display:block}
+  /* v8.61 — the bar RESERVES its space instead of appearing. It used to toggle
+     display, which pushed everything below it down by 10,5 px the moment a wake
+     started (measured at 360 px) and pulled the power button up by as much —
+     the button moving under the thumb at the exact moment it is being used.
+     Hidden by opacity, so the box is always in the flow. */
+  .power-progress{display:block;opacity:0;width:120px;height:3px;background:var(--border);border-radius:2px;overflow:hidden;margin-top:6px;transition:opacity .3s}
+  .power-progress.active{opacity:1}
   .power-progress-bar{height:100%;width:0;background:var(--green);box-shadow:0 0 6px var(--green-glow)}
-  .fallback-link{font-size:11px;color:var(--text-dim);text-align:center;margin-top:-4px;opacity:.55;font-family:'JetBrains Mono',monospace;transition:opacity .3s,font-size .3s}
+  /* v8.61 — same rule as .power-progress: promoting this link (relay down, or a
+     failed wake) used to grow it by 6,5 px — bigger font AND a margin flip from
+     -4 to 6 — shifting the whole list of app links below it. The box now
+     reserves the promoted height at all times; only the type and colour change. */
+  .fallback-link{font-size:11px;color:var(--text-dim);text-align:center;margin-top:2px;min-height:20px;line-height:20px;opacity:.55;font-family:'JetBrains Mono',monospace;transition:opacity .3s,font-size .3s}
   .fallback-link a{color:var(--text-dim);text-decoration:underline;text-decoration-color:rgba(107,113,148,.4);text-underline-offset:3px}
   .fallback-link a:active{opacity:1}
-  .fallback-link.promoted{font-size:13px;opacity:1;font-family:'DM Sans',sans-serif;margin-top:6px}
+  .fallback-link.promoted{font-size:13px;opacity:1;font-family:'DM Sans',sans-serif}
   .fallback-link.promoted a{color:var(--red);text-decoration-color:rgba(248,113,113,.6);font-weight:500}
-  .fallback-link.warn{font-size:13px;opacity:1;font-family:'DM Sans',sans-serif;margin-top:6px}
+  .fallback-link.warn{font-size:13px;opacity:1;font-family:'DM Sans',sans-serif}
   .fallback-link.warn a{color:var(--orange);text-decoration-color:rgba(251,191,36,.6);font-weight:500}
 
   .links{width:100%;display:flex;flex-direction:column;gap:8px}

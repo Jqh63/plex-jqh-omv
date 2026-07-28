@@ -894,14 +894,15 @@ def collect_results():
                         "no orange detour, never the outage red"))
 
         # v8.48 — up+degraded paints the green card with the explanatory sub
-        # ("services en cours de démarrage…") instead of the generic one.
+        # ("services en démarrage…") instead of the generic one. v8.63 shortened it:
+        # the long form was cut by 13 px at 320 px CSS.
         r17 = run_scenario(p, "up-degraded-sub-label",
                            relay_plan=lambda n: "up-degraded", home_plan=lambda n: "ok",
                            sample_delays_s=[1, 3])
         ok17 = (r17["final_green"] and not r17["red_at"]
-                and "services en cours" in r17["final_sub"])
+                and "services en démarrage" in r17["final_sub"])
         results.append(("up-degraded-sub-label", ok17, r17,
-                        "green card with 'services en cours de démarrage…' sub"))
+                        "green card with 'services en démarrage…' sub"))
 
         # v8.54 — the red card INSTRUCTS instead of describing. Unexplained
         # silence is the one thing the family cannot act on alone, so the sub

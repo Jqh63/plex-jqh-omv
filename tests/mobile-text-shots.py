@@ -91,7 +91,7 @@ def main():
         heights, centring = {}, {}
         for name, cls, lbl, sub, age in (
             ("green-nominal", "online", "En ligne", "", ""),
-            ("green-degraded", "online", "En ligne", "services en cours de démarrage…", ""),
+            ("green-degraded", "online", "En ligne", "services en démarrage…", ""),
             ("blue-off", "sleep", "Éteint", "réveil auto à 13h50", ""),
             ("red-unexpected", "offline", "Hors ligne", "contacte l'administrateur", ""),
             ("hollow-no-network", "nonet", "Pas de connexion", "vérifie ta connexion", ""),

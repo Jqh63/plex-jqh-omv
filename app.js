@@ -316,7 +316,11 @@ function windowStartLabel(){
 var TOAST_MS=4500,TOAST_LONG_MS=7000;
 // Shared with setOnline so the warm-up toast can tell whether the tile already
 // says this — comparing loose substrings of display copy is how that rots.
-var SUB_DEGRADED='services en cours de démarrage…';
+// Kept SHORT on purpose: the full 'services en cours de démarrage…' was CUT
+// by 13 px at 320 px CSS (an Android phone on the 'large' display-size
+// setting), and this sub is shown right after a wake — the moment the family
+// is actually looking. Fourth truncation on this tile (v8.13, v8.14, v8.54).
+var SUB_DEGRADED='services en démarrage…';
 function showToast(msg,warn,ms){var t=document.getElementById('toast');t.textContent=msg;t.className=warn?'toast warn show':'toast show';setTimeout(function(){t.className='toast'},ms||TOAST_MS)}
 
 function getEta(){
@@ -547,7 +551,7 @@ function buildLinks(){
           // so a "j'ai cliqué et ça charge dans le vide" right after a wake is
           // explained rather than confusing. Only within the warm-up window.
           if(Date.now()<serverReadyHintUntil&&document.getElementById('statusSub').textContent!==SUB_DEGRADED)
-            showToast('⏳ Serveur tout juste démarré — l\'app peut mettre quelques secondes',false,TOAST_MS);
+            showToast('⏳ Serveur démarré — patiente',false,TOAST_MS);
           return;
         }
         e.preventDefault();
@@ -1215,7 +1219,7 @@ function postWol(){
     var msg;
     if(r.status===401||r.status===403)msg='Relais : accès refusé (config)';
     else if(r.status===429)msg='Trop d\'essais — patiente une minute';
-    else if(r.status===502)msg='Le relais ne trouve pas le serveur';
+    else if(r.status===502)msg='Relais : serveur introuvable';
     else msg='Erreur relais HTTP '+r.status;
     if(navigator.vibrate)navigator.vibrate(300);
     showToast('⚠ '+msg,true,TOAST_LONG_MS);

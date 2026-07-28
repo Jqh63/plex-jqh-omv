@@ -85,31 +85,50 @@ def main():
         # 16 px jump shifting the whole page under the user's thumb, several
         # times a minute. Screenshots would not have caught it — each one looks
         # fine on its own; only comparing them does.
-        heights = {}
-        for name, cls, lbl, sub in (
-            ("green-nominal", "online", "En ligne", ""),
-            ("green-degraded", "online", "En ligne", "services en cours de démarrage…"),
-            ("blue-off", "sleep", "Éteint", "réveil auto à 13h50"),
-            ("red-unexpected", "offline", "Hors ligne", "contacte l'administrateur"),
-            ("hollow-no-network", "nonet", "Pas de connexion", "vérifie ta connexion"),
+        # The tallest case (label + sub + verdict age) is included on purpose:
+        # it is what the reserved height has to be sized on, and it is the one
+        # a "3 states look fine" check would miss.
+        heights, centring = {}, {}
+        for name, cls, lbl, sub, age in (
+            ("green-nominal", "online", "En ligne", "", ""),
+            ("green-degraded", "online", "En ligne", "services en cours de démarrage…", ""),
+            ("blue-off", "sleep", "Éteint", "réveil auto à 13h50", ""),
+            ("red-unexpected", "offline", "Hors ligne", "contacte l'administrateur", ""),
+            ("hollow-no-network", "nonet", "Pas de connexion", "vérifie ta connexion", ""),
+            ("red-with-verdict-age", "offline", "Hors ligne", "contacte l'administrateur",
+             "vérifié il y a 5 min"),
         ):
-            page.evaluate("""([c,l,s]) => {
+            page.evaluate("""([c,l,s,a]) => {
               document.getElementById('statusCard').className = 'status-card ' + c;
               document.getElementById('statusDot').className = 'status-dot ' + c;
               document.getElementById('statusLabel').textContent = l;
               document.getElementById('statusSub').textContent = s;
-              document.getElementById('statusAge').textContent = '';
-            }""", [cls, lbl, sub])
+              document.getElementById('statusAge').textContent = a;
+            }""", [cls, lbl, sub, age])
             page.wait_for_timeout(120)
-            heights[name] = round(page.evaluate(
-                "document.getElementById('statusCard').getBoundingClientRect().height"), 1)
+            m = page.evaluate("""() => {
+              const c = document.getElementById('statusCard').getBoundingClientRect();
+              const l = document.getElementById('statusLabel').getBoundingClientRect();
+              return {h: c.height, top: l.top - c.top, bottom: c.bottom - l.bottom};
+            }""")
+            heights[name] = round(m["h"], 1)
+            centring[name] = (round(m["top"], 1), round(m["bottom"], 1))
         b.close()
 
     if len(set(heights.values())) != 1:
         print("FAIL status card height varies by state:", heights)
         return 1
+    # v8.56 — height alone is not enough: v8.55 kept it constant by padding the
+    # SUB line, which left a lone "En ligne" clinging to the top of the card
+    # over ~48 px of dead space. When the label is the only line, it must sit
+    # in the middle. Tolerance covers the label's line box, not a real offset.
+    top, bottom = centring["green-nominal"]
+    if abs(top - bottom) > 6:
+        print(f"FAIL lone label not vertically centred: top={top} bottom={bottom}")
+        return 1
     print(f"PASS status card height stable across {len(heights)} states "
-          f"({next(iter(heights.values()))} px)")
+          f"({next(iter(heights.values()))} px); lone label centred "
+          f"(top={top} bottom={bottom})")
     print("screenshots ->", OUT)
 
 if __name__ == '__main__':

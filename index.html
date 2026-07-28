@@ -60,12 +60,19 @@
   .status-card.online{border-color:var(--green);box-shadow:0 0 24px var(--green-glow)}
   .status-card.offline{border-color:var(--red);box-shadow:0 0 24px var(--red-glow)}
   .status-card.sleep{border-color:var(--sleep);box-shadow:0 0 24px var(--sleep-glow)}
+  /* v8.54 — "no network" is told apart by FORM, not hue: sleep-blue and a grey
+     would read the same on a sunlit phone screen or to anyone who separates
+     colours poorly. States where the app knows something and a tap helps are
+     solid, glowing cards; the one state where it knows nothing and no tap can
+     help is a hollow one — dashed, unlit, dimmed, and its button is hidden. */
+  .status-card.nonet{border-color:var(--border);border-style:dashed;box-shadow:none;opacity:.6}
   .status-left{display:flex;align-items:center;gap:14px;flex:1;min-width:0}
   .status-dot{width:12px;height:12px;border-radius:50%;background:var(--text-dim);transition:background .4s,box-shadow .4s;flex-shrink:0}
   .status-dot.online{background:var(--green);box-shadow:0 0 8px var(--green)}
   .status-dot.offline{background:var(--red);box-shadow:0 0 8px var(--red)}
   .status-dot.sleep{background:var(--sleep);box-shadow:0 0 8px var(--sleep)}
   .status-dot.checking{background:var(--orange);animation:pulse 1.2s infinite}
+  .status-dot.nonet{background:var(--text-dim);box-shadow:none}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
   .status-left > div:last-child{min-width:0;flex:1}
   .status-label{font-size:15px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -76,6 +83,13 @@
   @keyframes spin{from{transform:rotate(0)}to{transform:rotate(360deg)}}
 
   .power-section{display:flex;flex-direction:column;align-items:center;gap:12px;padding:8px 0}
+  /* v8.54 — while the phone itself has no network the wake button is hidden
+     (it cannot possibly work, and an armed button that does nothing teaches
+     the family to distrust it). Told apart from the ARMED-on-presumed-relay-
+     miss case (v8.53), which is a guess; navigator.onLine=false is not.
+     The hiding is done in app.js on style.display, NOT by a class here: this
+     element already carries an inline display, which no stylesheet rule can
+     override. */
   .power-ring{position:relative;width:130px;height:130px;display:flex;align-items:center;justify-content:center}
   .power-ring::before{content:'';position:absolute;inset:0;border-radius:50%;border:1px solid var(--border);transition:border-color .4s,opacity .4s;opacity:.5;pointer-events:none}
   .power-ring::after{content:'';position:absolute;inset:-4px;border-radius:50%;border:2px solid transparent;border-top-color:var(--green);opacity:0;pointer-events:none;transition:opacity .3s}

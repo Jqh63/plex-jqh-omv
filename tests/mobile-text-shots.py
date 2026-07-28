@@ -37,17 +37,33 @@ def main():
         page.screenshot(path=str(OUT / 'main-360.png'))
 
         # Power-label worst cases (set DOM directly — we test rendering, not logic).
-        # v8.53: the old 'unavailable' shot is gone with the state it framed —
-        # the button is never disabled now. Its replacement is the longest label
-        # the armed button can carry (relay presumed down but still tappable).
+        # v8.54: 'Allumer (relais incertain)' is gone with the state it framed —
+        # the button now always carries the plain label. The longest strings the
+        # tile can render moved to the STATUS SUB, so that is what needs the
+        # narrow-phone shot now (both v8.13 and v8.14 had to cut copy that
+        # wrapped on an S24 once Android font scaling kicked in).
         page.evaluate("""() => {
-          const l = document.getElementById('powerLabel');
-          l.textContent = 'Allumer (relais incertain)';
-          l.className = 'power-label';
-          document.getElementById('powerBtn').className = 'power-btn';
+          document.getElementById('statusCard').className = 'status-card nonet';
+          document.getElementById('statusDot').className = 'status-dot nonet';
+          document.getElementById('statusLabel').textContent = 'Pas de connexion';
+          document.getElementById('statusSub').textContent = 'vérifie ta connexion';
+          // Inline style, like the app does — a class cannot hide this element
+          // (it already carries an inline display; that is how the first cut of
+          // v8.54 shipped a hide that did nothing, caught only on the render).
+          document.getElementById('powerSection').style.display = 'none';
         }""")
         page.wait_for_timeout(200)
-        page.screenshot(path=str(OUT / 'power-relay-uncertain-360.png'))
+        page.screenshot(path=str(OUT / 'status-nonet-360.png'))
+
+        page.evaluate("""() => {
+          document.getElementById('statusCard').className = 'status-card offline';
+          document.getElementById('statusDot').className = 'status-dot offline';
+          document.getElementById('statusLabel').textContent = 'Hors ligne';
+          document.getElementById('statusSub').textContent = "contacte l'administrateur";
+          document.getElementById('powerSection').style.display = 'flex';
+        }""")
+        page.wait_for_timeout(200)
+        page.screenshot(path=str(OUT / 'status-contact-admin-360.png'))
 
         page.evaluate("""() => {
           const l = document.getElementById('powerLabel');

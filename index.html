@@ -83,6 +83,27 @@
   .status-dot.checking{background:var(--orange);animation:pulse 1.2s infinite}
   .status-dot.nonet{background:var(--text-dim);box-shadow:none}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+
+  /* Respect the OS "reduce motion" setting (iOS: Accessibility > Motion,
+     Android: Accessibility > Remove animations). This app runs TWO infinite
+     animations — the checking dot's pulse and the wake halo's spin — and an
+     infinite animation is exactly what that setting exists to stop for people
+     who get motion sickness from it. The information they carry is kept: the
+     dot stays orange, the halo stays visible; only the movement stops. */
+  @media (prefers-reduced-motion: reduce){
+    *,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important;scroll-behavior:auto!important}
+    .status-dot.checking{opacity:.75}
+    .power-ring:has(.power-btn.sent)::after{opacity:1}
+  }
+
+  /* Keyboard / switch-control focus. Every control here gave feedback on
+     :active only (touch), and -webkit-tap-highlight-color:transparent removes
+     even the platform default — so anyone driving the app with an external
+     keyboard or iOS Switch Control had no idea what was selected.
+     :focus-visible only shows for non-pointer input, so touch users see
+     nothing new. */
+  :focus-visible{outline:2px solid var(--accent);outline-offset:3px;border-radius:6px}
+  .power-btn:focus-visible{outline-offset:6px}
   .status-left > div:last-child{min-width:0;flex:1}
   .status-label{font-size:15px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .status-sub{font-size:12px;color:var(--text-dim);font-family:'JetBrains Mono',monospace;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -264,7 +285,13 @@
 
   <div class="power-section" id="powerSection">
     <div class="power-ring">
-      <button class="power-btn" id="powerBtn" type="button" aria-label="Allumer le serveur">
+      <!-- aria-labelledby, NOT a static aria-label: the visible label under the
+           button changes constantly ("Allumer le serveur" -> "Réveil… 45 s" ->
+           "Serveur allumé") while a hardcoded aria-label would keep announcing
+           "Allumer le serveur" — telling a screen-reader user to press a button
+           that is already done. Pointing at the label element tracks every
+           change with no JS to keep in sync. -->
+      <button class="power-btn" id="powerBtn" type="button" aria-labelledby="powerLabel">
         <svg class="ico ico-power" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/></svg>
         <svg class="ico ico-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
       </button>

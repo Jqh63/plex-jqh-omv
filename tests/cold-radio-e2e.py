@@ -738,16 +738,34 @@ def collect_results():
                         "outside window + slow relay → sleep card at once, never orange"))
 
         # Positive control for r15 — the SAME stalled relay INSIDE the window must
-        # still show the orange "Vérification…". Without this, r15 could pass on a
+        # never paint the "éteint" card. Without this, r15 could pass on a
         # presumption that fires everywhere (which would paint a false "éteint" over
         # a home that is simply slow to answer at 4 p.m.).
-        r15b = run_scenario(p, "cold-open-inside-window-still-checks",
+        # v8.60 — inside the window the card is now the presumed GREEN, not orange:
+        # the schedule is a prior too. What r15 asserts (no blind sleep card) still
+        # holds, and r15d below proves the presumption is correctable.
+        r15b = run_scenario(p, "cold-open-inside-window-presumes-up",
                             relay_plan=lambda n: "stall", home_plan=lambda n: "fail",
                             sample_delays_s=[1, 3],
                             url_extra="&window=" + _window_excluding_now(inside=True))
-        ok15b = r15b["checking_at"] == [1, 3] and not r15b["sleep_at"]
-        results.append(("cold-open-inside-window-still-checks", ok15b, r15b,
-                        "inside window + slow relay → orange, never a presumed sleep"))
+        ok15b = r15b["green_at"] == [1, 3] and not r15b["sleep_at"]
+        results.append(("cold-open-inside-window-presumes-up", ok15b, r15b,
+                        "inside window + slow relay → green at once, never a presumed sleep"))
+
+        # v8.60 positive control — the in-window green presumption must NOT fire
+        # over a freshly persisted "down": during a real outage the family re-opens
+        # the app, and a green flash on every open would be the mirror of the red
+        # flash v8.7 banned. Same stalled relay, same window, cache says down →
+        # orange. Without this case, the presumption above could pass while being
+        # blind to everything the client already knows.
+        r15d = run_scenario(p, "cold-open-inside-window-cached-down-still-checks",
+                            relay_plan=lambda n: "stall", home_plan=lambda n: "fail",
+                            sample_delays_s=[1, 3],
+                            preseed_cache={"up": False, "relayOk": True},
+                            url_extra="&window=" + _window_excluding_now(inside=True))
+        ok15d = r15d["checking_at"] == [1, 3] and not r15d["green_at"]
+        results.append(("cold-open-inside-window-cached-down-still-checks", ok15d, r15d,
+                        "inside window + cached down → orange, no green flash"))
 
         # v8.31 — the presumption must be CORRECTABLE: same off-hours open, but the
         # home is actually up (auto-WoL by home-watch, or another family member woke

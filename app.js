@@ -837,8 +837,19 @@ function checkStatus(){
     // reset downStreak on every re-check cycle, making red unreachable for up
     // to PRESUME_STALE_MAX_MS (deterministic e2e failure: clockjump-wake-
     // stale-green-demoted stuck on "Vérification..." forever).
+    // v8.60 — the SCHEDULE is a prior too, symmetrically with the off-window
+    // branch above: inside the window the home is up unless something failed
+    // (a missed RTC wake, itself covered by home-watch's auto-WoL). So a cold
+    // open with NO usable cache — first install, or a cache older than
+    // PRESUME_STALE_MAX_MS — no longer stares at orange for the whole cold-radio
+    // handshake; it renders green at once and the probe corrects if wrong.
+    // The one prior we do NOT overrule is a fresh PERSISTED down: during a real
+    // outage the family re-opens the app repeatedly, and flashing green on each
+    // open would be the mirror of the red flash v8.7 banned.
     var prior=readLocalStatus(PRESUME_STALE_MAX_MS);
-    if(prior&&prior.up&&navigator.onLine&&inUptimeWindow()!==false&&downStreak===0){
+    var presumeUp=navigator.onLine&&downStreak===0&&inUptimeWindow()!==false&&
+                  ((prior&&prior.up)||(inUptimeWindow()===true&&!(prior&&!prior.up)));
+    if(presumeUp){
       setOnline();
       hasConfirmedState=false;lastVerdictAtMs=0;updateVerdictAge();
     }else{

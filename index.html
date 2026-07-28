@@ -47,7 +47,13 @@
     content:'';position:fixed;inset:0;pointer-events:none;z-index:0;
     background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E");
   }
-  .screen{position:relative;z-index:1;width:100%;max-width:380px;display:flex;flex-direction:column;align-items:center;gap:24px}
+  .screen{position:relative;z-index:1;width:100%;max-width:380px;display:flex;flex-direction:column;align-items:center;gap:24px;transition:opacity .18s ease}
+  /* v8.59 — screen changes fade instead of cutting (switchScreen). Sequenced
+     out-then-in rather than a simultaneous cross-fade: the two screens are
+     siblings in the same centred flex column, so showing both at once would
+     make the layout jump. Neutralised by prefers-reduced-motion below, where
+     switchScreen also skips its own delay. */
+  .screen.leaving{opacity:0}
   .header{text-align:center;position:relative}
   .header h1{font-size:22px;font-weight:700;letter-spacing:-.5px;margin-bottom:4px}
   .header p{font-size:13px;color:var(--text-dim);font-family:'JetBrains Mono',monospace}

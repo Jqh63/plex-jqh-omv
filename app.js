@@ -63,23 +63,14 @@ function fmtAge(ms){
   if(m<60)return 'il y a '+m+' min';
   return 'il y a +1 h';
 }
-// v8.58 — the tile's words now CROSS OVER instead of teleporting. The card
-// border and the dot were already gliding (transition .5s / .4s in index.html)
-// while the label was replaced in one frame, so for half a second the tile read
-// "Éteint" over a card already turning green — the two halves of one change
-// moving at different speeds. paintTile is the single door for that text; two
-// guards keep it from becoming noise:
-//   - `tilePainted` remembers the pair last painted THROUGH HERE. An identical
-//     repaint is a no-op — the 8 s poll re-enters setOnline/setOffline every
-//     cycle, and without this the nominal tile would blink every 8 s.
-//   - the boot countdown writes the sub DIRECTLY, bypassing this: it changes
-//     every second and a fade per second would be a strobe. That path only
-//     fires on status-only devices (no mac/relay → power section hidden, the
-//     ticking label is mirrored into the sub); on a device with the button the
-//     counter lives under the button and the sub is left alone. Welcome side
-//     effect on those status-only devices: setStarting() re-entered by the 8 s
-//     poll no longer overwrites "réveil en cours · 45 s" with "réveil en
-//     cours" for the second until the next tick restored it.
+// v8.58 — single door for the tile's text, crossed over inside the window the
+// card border and the dot already glide in (.5s / .4s). Two guards:
+//   - `tilePainted` makes an identical repaint a no-op. The 8 s poll re-enters
+//     setOnline/setOffline every cycle: without this the tile would blink every
+//     8 s, in the state seen most.
+//   - the boot countdown writes the sub DIRECTLY, bypassing this — it ticks
+//     every second and a fade per second is a strobe. (Only fires on
+//     status-only devices, where the ticking label is mirrored into the sub.)
 var tilePainted=null,tileSwapTimer=null;
 function paintTile(label,sub){
   var key=label+'\n'+sub;
@@ -320,10 +311,16 @@ function windowStartLabel(){
   if(!w)return '';
   return ('0'+Math.floor(w.start/60)).slice(-2)+'h'+('0'+(w.start%60)).slice(-2);
 }
-// ms defaults to 3000 — short ack/validation toasts. Pass 5000 for messages
-// that the user needs time to read (success confirmation after a long wait,
-// explanatory failures with a "use the manual fallback" call to action).
-function showToast(msg,warn,ms){var t=document.getElementById('toast');t.textContent=msg;t.className=warn?'toast warn show':'toast show';setTimeout(function(){t.className='toast'},ms||3000)}
+// v8.59 — a toast ACKNOWLEDGES A GESTURE; what describes a STATE belongs on the
+// tile, where it persists. Hence no "— réveil manuel ↓" tails (setFallbackState
+// already promotes that link permanently) and a warm-up hint that stands down
+// when the sub carries it. Durations were calibrated for an ack and read too
+// fast for anything explanatory.
+var TOAST_MS=4500,TOAST_LONG_MS=7000;
+// Shared with setOnline so the warm-up toast can tell whether the tile already
+// says this — comparing loose substrings of display copy is how that rots.
+var SUB_DEGRADED='services en cours de démarrage…';
+function showToast(msg,warn,ms){var t=document.getElementById('toast');t.textContent=msg;t.className=warn?'toast warn show':'toast show';setTimeout(function(){t.className='toast'},ms||TOAST_MS)}
 
 function getEta(){
   // The relay-served canonical ETA (shared across devices, persisted as
@@ -381,9 +378,37 @@ function readUrlParams(){
   return true;
 }
 
+// v8.59 — fades the only navigation this app has: out, swap, in. Stays INSTANT
+// on the boot paint and when the source screen is already hidden. `done` runs
+// once the target is up, so a caller can focus a field that is on screen.
+var SCREEN_FADE_MS=180,screensShown=false;
+function switchScreen(fromId,toId,done){
+  var from=document.getElementById(fromId),to=document.getElementById(toId);
+  var swap=function(){
+    from.style.display='none';from.classList.remove('leaving');
+    to.style.display='flex';
+  };
+  var reduce=window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if(!screensShown||reduce||from.style.display==='none'){
+    screensShown=true;swap();to.classList.remove('leaving');if(done)done();return;
+  }
+  from.classList.add('leaving');
+  setTimeout(function(){
+    swap();
+    // The reflow between the add and the remove is load-bearing (verified by
+    // removing it: the pin goes red at opacity 1) — without it both collapse
+    // into one style recalculation and nothing transitions.
+    to.classList.add('leaving');
+    void to.offsetWidth;
+    to.classList.remove('leaving');
+    if(done)done();
+  },SCREEN_FADE_MS);
+}
+
 function showSettings(){
-  document.getElementById('mainScreen').style.display='none';
-  document.getElementById('settingsScreen').style.display='flex';
+  switchScreen('mainScreen','settingsScreen',function(){
+    document.getElementById('cfgHost').focus();
+  });
   document.getElementById('cancelBtn').style.display=config?'block':'none';
   document.getElementById('backBtn').style.display=config?'flex':'none';
   if(config){
@@ -405,7 +430,7 @@ function showSettings(){
       :'Si le serveur s\'éteint volontairement la nuit : hors plage, l\'arrêt s\'affiche « Éteint (prévu) » en bleu avec l\'heure de réveil auto';
   }
   if(checkInterval)clearInterval(checkInterval);
-  setTimeout(function(){document.getElementById('cfgHost').focus();},50);
+  // (focus is done by switchScreen's callback above, once the field is on screen)
 }
 
 function cancelSettings(){
@@ -533,7 +558,8 @@ function buildLinks(){
           // apps still spin up. Non-blocking heads-up (the link opens anyway)
           // so a "j'ai cliqué et ça charge dans le vide" right after a wake is
           // explained rather than confusing. Only within the warm-up window.
-          if(Date.now()<serverReadyHintUntil)showToast('⏳ Serveur tout juste démarré — l\'app peut mettre quelques secondes',false,4000);
+          if(Date.now()<serverReadyHintUntil&&document.getElementById('statusSub').textContent!==SUB_DEGRADED)
+            showToast('⏳ Serveur tout juste démarré — l\'app peut mettre quelques secondes',false,TOAST_MS);
           return;
         }
         e.preventDefault();
@@ -619,8 +645,7 @@ function releaseWakeLock(){
 }
 
 function startApp(){
-  document.getElementById('settingsScreen').style.display='none';
-  document.getElementById('mainScreen').style.display='flex';
+  switchScreen('settingsScreen','mainScreen');
   document.getElementById('appTitle').textContent=config.title||'Plex jqh omv';
   document.getElementById('headerSub').textContent=config.host;
   document.getElementById('powerSection').style.display=wolReady()?'flex':'none';
@@ -1000,13 +1025,9 @@ function setFallbackState(){
   var link=document.getElementById('fallbackLink');
   var a=document.getElementById('fallbackLinkA');
   link.classList.remove('promoted','warn');
-  // v8.53 — promote on ANY failed wake, not just an unreachable relay.
-  // The promotion used to key on relayReachable alone, i.e. the single case
-  // where the phone reached nobody. The cases where the manual page helps MOST
-  // never promoted it: a wake that timed out after 5 min (the home didn't come
-  // up), a 401/403, a 502 from a failed target resolution. In all of those the
-  // link stayed 11 px at 55 % opacity under the button, while the user had just
-  // been told "réveil manuel ↓" by a toast that had already faded.
+  // v8.53 — promote on ANY failed wake, not just an unreachable relay: a wake
+  // that timed out, a 401/403 or a 502 are exactly when the manual page helps
+  // most, and none of them used to promote it.
   if(!relayReachable||wakeFailed){
     if(isOnline){
       link.classList.add('warn');
@@ -1060,7 +1081,7 @@ function setOnline(degraded){
   // card and the "En ligne" label already said, in the state the family sees
   // most often. The degraded sub stays: that one carries information (a tapped
   // app may still spin) and self-corrects on the next non-degraded poll.
-  paintTile('En ligne',degraded?'services en cours de démarrage…':'');
+  paintTile('En ligne',degraded?SUB_DEGRADED:'');
   updateVerdictAge();
   if(config.mac){
     var pBtn=document.getElementById('powerBtn'),pLbl=document.getElementById('powerLabel');
@@ -1073,7 +1094,7 @@ function setOnline(degraded){
     // wake it actually served (and to services-ready, which this client-side
     // timing never could — it only sees the host answering).
     wolStartTime=0;
-    showToast('✓ Serveur démarré avec succès',false,5000);
+    showToast('✓ Serveur démarré avec succès',false,TOAST_LONG_MS);
     if(navigator.vibrate)navigator.vibrate([100,50,100]);
     wolSent=false;
     setTimeout(releaseWakeLock,10000);
@@ -1197,7 +1218,7 @@ function postWol(){
     else if(r.status===502)msg='Le relais ne trouve pas le serveur';
     else msg='Erreur relais HTTP '+r.status;
     if(navigator.vibrate)navigator.vibrate(300);
-    showToast('⚠ '+msg+' — réveil manuel ↓',true,5000);
+    showToast('⚠ '+msg,true,TOAST_LONG_MS);
     setOffline();
   }).catch(function(){
     wolSent=false;wolStartTime=0;wakeFailed=true;lastDownDeclared=false;stopCountdown();clearWolPoll();releaseWakeLock();
@@ -1208,7 +1229,7 @@ function postWol(){
     // confirmed-down ceiling so a following miss keeps it down.
     relayReachable=false;relayMissStreak=RELAY_DOWN_MISSES;
     if(navigator.vibrate)navigator.vibrate(300);
-    showToast('⚠ Relais injoignable — réveil manuel ↓',true,5000);
+    showToast('⚠ Relais injoignable',true,TOAST_LONG_MS);
     setOffline();
   });
 }
@@ -1352,7 +1373,7 @@ function sendWol(){
       // Surface the timeout — silent failure (vibration + flip to red) used to
       // leave family members wondering whether the app was broken. Toast tells
       // them what happened and points to the manual fallback.
-      showToast('⚠ Pas démarré — réessaie ou réveil manuel ↓',true,5000);
+      showToast('⚠ Pas démarré — réessaie',true,TOAST_LONG_MS);
       setOffline();
       return;
     }

@@ -76,7 +76,12 @@
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
   .status-left > div:last-child{min-width:0;flex:1}
   .status-label{font-size:15px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .status-sub{font-size:12px;color:var(--text-dim);font-family:'JetBrains Mono',monospace;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  /* min-height: v8.54 made this sub EMPTY in the nominal green state, which
+     collapsed the line and shrank the card from 85 px to 69 px — a 16 px jump
+     on every green<->red<->degraded flip, i.e. potentially every 8 s poll,
+     shifting the whole page under the user's thumb. Reserve the line, like
+     .status-age and .power-label already do. Pinned by mobile-text-shots.py. */
+  .status-sub{font-size:12px;color:var(--text-dim);font-family:'JetBrains Mono',monospace;margin-top:1px;min-height:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .status-age{font-size:10px;color:var(--text-dim);opacity:.55;font-family:'JetBrains Mono',monospace;margin-top:2px;min-height:12px;white-space:nowrap}
 
   /* spin drives the power-ring wake halo (.power-ring:has(.power-btn.sent)::after) */

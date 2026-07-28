@@ -105,6 +105,15 @@
   :focus-visible{outline:2px solid var(--accent);outline-offset:3px;border-radius:6px}
   .power-btn:focus-visible{outline-offset:6px}
   .status-left > div:last-child{min-width:0;flex:1}
+  /* v8.58 — the card border and the dot already glide (transition .5s / .4s
+     below), while textContent used to swap the words instantly: two halves of
+     the same tile changing at different speeds, which is what made a state
+     change feel abrupt. paintTile() crosses the text over inside that same
+     window. Neutralised by the prefers-reduced-motion block above (it forces
+     every transition-duration to .01ms) — and paintTile skips its own delay
+     there too, so the words land immediately rather than 220 ms late. */
+  .status-text{transition:opacity .22s ease}
+  .status-text.swapping{opacity:0}
   .status-label{font-size:15px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .status-sub{font-size:12px;color:var(--text-dim);font-family:'JetBrains Mono',monospace;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .status-age{font-size:10px;color:var(--text-dim);opacity:.55;font-family:'JetBrains Mono',monospace;margin-top:2px;white-space:nowrap}
@@ -275,7 +284,7 @@
   <div class="status-card" id="statusCard" role="status" aria-live="polite">
     <div class="status-left">
       <div class="status-dot checking" id="statusDot"></div>
-      <div>
+      <div class="status-text" id="statusText">
         <div class="status-label" id="statusLabel">Vérification...</div>
         <div class="status-sub" id="statusSub">ping en cours</div>
         <div class="status-age" id="statusAge"></div>

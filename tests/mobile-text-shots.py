@@ -21,7 +21,7 @@ TOASTS = [
     ("toast-not-started", "⚠ Pas démarré — réessaie ou réveil manuel ↓", True),
     ("toast-relay-unreachable", "⚠ Relais injoignable — réveil manuel ↓", True),
     ("toast-wake-progress", "⏳ Réveil en cours — patiente", True),
-    ("toast-server-off", "⚠ Serveur éteint — allume-le d'abord", True),
+    ("toast-server-off", "⚠ Serveur éteint — allume-le", True),
     ("toast-started-ok", "✓ Serveur démarré avec succès", False),
 ]
 

@@ -559,7 +559,7 @@ function buildLinks(){
         // the generic "allume-le" message is misleading and frustrating
         // ("but I just did!"). Differentiate the two cases.
         if(wolSent||remoteWaking)showToast('⏳ Réveil en cours — patiente',true);
-        else showToast('⚠ Serveur éteint — allume-le d\'abord',true);
+        else showToast('⚠ Serveur éteint — allume-le',true);
       });
     }
     var icon=document.createElement('div');
@@ -1218,7 +1218,7 @@ function postWol(){
     // 429 clears on its own, and only "réessaie" is honest for the rest.
     var msg;
     if(r.status===401||r.status===403)msg='Relais : accès refusé (config)';
-    else if(r.status===429)msg='Trop d\'essais — patiente une minute';
+    else if(r.status===429)msg='Trop d\'essais — patiente';
     else if(r.status===502)msg='Relais : serveur introuvable';
     else msg='Erreur relais HTTP '+r.status;
     if(navigator.vibrate)navigator.vibrate(300);

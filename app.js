@@ -63,6 +63,46 @@ function fmtAge(ms){
   if(m<60)return 'il y a '+m+' min';
   return 'il y a +1 h';
 }
+// v8.58 — the tile's words now CROSS OVER instead of teleporting. The card
+// border and the dot were already gliding (transition .5s / .4s in index.html)
+// while the label was replaced in one frame, so for half a second the tile read
+// "Éteint" over a card already turning green — the two halves of one change
+// moving at different speeds. paintTile is the single door for that text; two
+// guards keep it from becoming noise:
+//   - `tilePainted` remembers the pair last painted THROUGH HERE. An identical
+//     repaint is a no-op — the 8 s poll re-enters setOnline/setOffline every
+//     cycle, and without this the nominal tile would blink every 8 s.
+//   - the boot countdown writes the sub DIRECTLY, bypassing this: it changes
+//     every second and a fade per second would be a strobe. That path only
+//     fires on status-only devices (no mac/relay → power section hidden, the
+//     ticking label is mirrored into the sub); on a device with the button the
+//     counter lives under the button and the sub is left alone. Welcome side
+//     effect on those status-only devices: setStarting() re-entered by the 8 s
+//     poll no longer overwrites "réveil en cours · 45 s" with "réveil en
+//     cours" for the second until the next tick restored it.
+var tilePainted=null,tileSwapTimer=null;
+function paintTile(label,sub){
+  var key=label+'\n'+sub;
+  if(tilePainted===key)return;
+  var first=tilePainted===null;
+  tilePainted=key;
+  var box=document.getElementById('statusText');
+  var write=function(){
+    document.getElementById('statusLabel').textContent=label;
+    document.getElementById('statusSub').textContent=sub;
+  };
+  // No fade on the very first paint (nothing to cross over from), and none when
+  // the user asked for reduced motion — there the delay would buy nothing.
+  var reduce=window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if(first||reduce||!box){write();return;}
+  if(tileSwapTimer)clearTimeout(tileSwapTimer);
+  box.classList.add('swapping');
+  tileSwapTimer=setTimeout(function(){
+    write();
+    box.classList.remove('swapping');
+    tileSwapTimer=null;
+  },220);
+}
 // v8.54 — a verdict age is only worth a line when it is ABNORMALLY old. The
 // status poll runs every 8 s, so in the overwhelming majority of paints this
 // line said "vérifié il y a quelques secondes" — one more thing to read, every
@@ -714,7 +754,6 @@ function checkStatus(){
   if(checking&&Date.now()-checkStartedAt<CHECK_WATCHDOG_MS)return;
   checking=true;checkStartedAt=Date.now();
   var gen=++probeGen;
-  var label=document.getElementById('statusLabel'),sub=document.getElementById('statusSub');
   // v8.10 staleness guard — a confirmed state only earns the "keep the prior
   // visual" treatment while the last SETTLED verdict is fresh (in-memory
   // lastVerdictAtMs, same freshness window as the localStorage cache). A stale
@@ -780,7 +819,7 @@ function checkStatus(){
     }else{
       document.getElementById('statusDot').className='status-dot checking';
       document.getElementById('statusCard').className='status-card';
-      label.textContent='Vérification...';sub.textContent='interrogation du relais…';
+      paintTile('Vérification...','interrogation du relais…');
       setButtonChecking();
     }
   }
@@ -888,8 +927,7 @@ function setRechecking(){
   if(wolSent||remoteWaking){setStarting();return;}
   document.getElementById('statusDot').className='status-dot checking';
   document.getElementById('statusCard').className='status-card';
-  document.getElementById('statusLabel').textContent='Vérification...';
-  document.getElementById('statusSub').textContent='nouvelle tentative…';
+  paintTile('Vérification...','nouvelle tentative…');
   setButtonChecking();
 }
 
@@ -1009,7 +1047,6 @@ function setOnline(degraded){
   // probe (see hasConfirmedState note).
   document.getElementById('statusDot').className='status-dot online';
   document.getElementById('statusCard').className='status-card online';
-  document.getElementById('statusLabel').textContent='En ligne';
   // v8.54 — undo the no-network hide (setOffline may have set it before the
   // radio came back): never leave the button hidden on a state that can arm
   // it. Same inline-style mechanism, same wolReady() guard as l.586.
@@ -1023,7 +1060,7 @@ function setOnline(degraded){
   // card and the "En ligne" label already said, in the state the family sees
   // most often. The degraded sub stays: that one carries information (a tapped
   // app may still spin) and self-corrects on the next non-degraded poll.
-  document.getElementById('statusSub').textContent=degraded?'services en cours de démarrage…':'';
+  paintTile('En ligne',degraded?'services en cours de démarrage…':'');
   updateVerdictAge();
   if(config.mac){
     var pBtn=document.getElementById('powerBtn'),pLbl=document.getElementById('powerLabel');
@@ -1048,8 +1085,7 @@ function setOnline(degraded){
 function setStarting(){
   document.getElementById('statusDot').className='status-dot checking';
   document.getElementById('statusCard').className='status-card';
-  document.getElementById('statusLabel').textContent='Démarrage…';
-  document.getElementById('statusSub').textContent='réveil en cours';
+  paintTile('Démarrage…','réveil en cours');
 }
 
 // v8.25 — render a wake THIS device didn't initiate (relay `waking`). Mirror the
@@ -1234,26 +1270,23 @@ function setOffline(){
   document.getElementById('powerSection').style.display=
     (noNet||!wolReady())?'none':'flex';
   if(noNet){
-    document.getElementById('statusLabel').textContent='Pas de connexion';
-    // Says what the user can actually do — the one actionable thing left.
+    // Sub says what the user can actually do — the one actionable thing left.
     // Kept SHORT on purpose: "vérifie ton wifi ou tes données mobiles" was
     // truncated to "…données m…" at 360 px in tests/screenshots. Third time
     // this tile has had to cut copy for narrow phones (v8.13, v8.14).
-    document.getElementById('statusSub').textContent='vérifie ta connexion';
+    paintTile('Pas de connexion','vérifie ta connexion');
   }else if(sleeping){
     // v8.15 — "En veille" implied a suspend; the box actually powers OFF
     // (autoshutdown + RTC wake). "Éteint" matches reality while the blue card
     // keeps the calm "this is expected" framing.
-    document.getElementById('statusLabel').textContent='Éteint';
-    // v8.54 — the auto-wake time when the schedule knows it, the plain fact
-    // otherwise. Keep it short: v8.13/v8.14 both had to cut copy that wrapped
-    // on narrow phones (S24) once Android font scaling kicked in.
-    document.getElementById('statusSub').textContent=(inWin===false)
+    // v8.54 — sub carries the auto-wake time when the schedule knows it, the
+    // plain fact otherwise. Keep it short: v8.13/v8.14 both had to cut copy
+    // that wrapped on narrow phones (S24) once Android font scaling kicked in.
+    paintTile('Éteint',(inWin===false)
       ?'réveil auto à '+windowStartLabel()
-      :'arrêt normal du serveur';
+      :'arrêt normal du serveur');
   }else{
-    document.getElementById('statusLabel').textContent='Hors ligne';
-    document.getElementById('statusSub').textContent='contacte l\'administrateur';
+    paintTile('Hors ligne','contacte l\'administrateur');
   }
   updateVerdictAge();
   if(wolReady()){

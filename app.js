@@ -63,10 +63,18 @@ function fmtAge(ms){
   if(m<60)return 'il y a '+m+' min';
   return 'il y a +1 h';
 }
+// v8.54 — a verdict age is only worth a line when it is ABNORMALLY old. The
+// status poll runs every 8 s, so in the overwhelming majority of paints this
+// line said "vérifié il y a quelques secondes" — one more thing to read, every
+// time, carrying nothing. Above the threshold it means something real (the
+// oracle has gone quiet) and it appears. Well clear of the 8 s poll and of a
+// screen-off gap, so a normal resume does not flash it.
+var VERDICT_AGE_SHOW_MS=120000;
 function updateVerdictAge(){
   var el=document.getElementById('statusAge');
   if(!el)return;
-  el.textContent=(hasConfirmedState&&lastVerdictAtMs)?'vérifié '+fmtAge(Date.now()-lastVerdictAtMs):'';
+  var age=(hasConfirmedState&&lastVerdictAtMs)?Date.now()-lastVerdictAtMs:0;
+  el.textContent=(age>=VERDICT_AGE_SHOW_MS)?'vérifié '+fmtAge(age):'';
 }
 // True once setOnline / setOffline has fired this session (a cache pre-paint or
 // a live probe settle). Two jobs:
@@ -1002,12 +1010,20 @@ function setOnline(degraded){
   document.getElementById('statusDot').className='status-dot online';
   document.getElementById('statusCard').className='status-card online';
   document.getElementById('statusLabel').textContent='En ligne';
+  // v8.54 — undo the no-network hide (setOffline may have set it before the
+  // radio came back): never leave the button hidden on a state that can arm
+  // it. Same inline-style mechanism, same wolReady() guard as l.586.
+  document.getElementById('powerSection').style.display=wolReady()?'flex':'none';
   // v8.48 — surface the relay's `degraded` on the card itself: host up but the
   // apps (Seerr…) still starting. Green stays (no pointless wake) but the sub
   // says WHY a tapped app may spin — the toast hint alone was invisible until
   // the user actually tapped a link. Self-corrects: the next non-degraded poll
   // repaints the normal sub.
-  document.getElementById('statusSub').textContent=degraded?'services en cours de démarrage…':'serveur accessible';
+  // v8.54 — silent when nominal. "serveur accessible" restated what the green
+  // card and the "En ligne" label already said, in the state the family sees
+  // most often. The degraded sub stays: that one carries information (a tapped
+  // app may still spin) and self-corrects on the next non-degraded poll.
+  document.getElementById('statusSub').textContent=degraded?'services en cours de démarrage…':'';
   updateVerdictAge();
   if(config.mac){
     var pBtn=document.getElementById('powerBtn'),pLbl=document.getElementById('powerLabel');
@@ -1191,32 +1207,53 @@ function setOffline(){
   // v8.53 — calm blue for ANY orderly stop, not just one the clock predicted.
   // A declared down (last-gasp) is orderly by construction; only silence is an
   // anomaly worth the alarming red. See lastDownDeclared.
-  var sleeping=navigator.onLine&&(inWin===false||lastDownDeclared);
-  document.getElementById('statusDot').className='status-dot '+(sleeping?'sleep':'offline');
-  document.getElementById('statusCard').className='status-card '+(sleeping?'sleep':'offline');
-  if(!navigator.onLine){
-    document.getElementById('statusLabel').textContent='Hors ligne';
-    document.getElementById('statusSub').textContent='pas de réseau';
-  }else if(inWin===false){
+  // v8.54 — three painted states instead of four, on ONE rule: the colour now
+  // answers "what do I do?", not "what is the internal state?".
+  //   hollow  — the PHONE has no network. The app knows nothing and no tap can
+  //             help, so the card is unlit and the button is hidden.
+  //   blue    — off as EXPECTED (outside the window, or a declared last-gasp
+  //             stop). One state now, not two: both meant the same user action
+  //             (press the button); only the auto-wake time differed, so that
+  //             moved into the sub, shown when known.
+  //   red     — UNEXPECTED. Reserved for silence we cannot explain, and it no
+  //             longer describes, it INSTRUCTS: "contacte l'administrateur".
+  //             A relay we cannot reach lands here by construction (probe() at
+  //             l.929 resolves up:false when the relay misses), which is right:
+  //             a broken relay IS a real problem worth reporting, not a shrug.
+  var noNet=!navigator.onLine;
+  var sleeping=!noNet&&(inWin===false||lastDownDeclared);
+  var paint=noNet?'nonet':(sleeping?'sleep':'offline');
+  document.getElementById('statusDot').className='status-dot '+paint;
+  document.getElementById('statusCard').className='status-card '+paint;
+  // The wake button is hidden ONLY here: navigator.onLine=false is a fact, not
+  // the presumption that v8.53 stopped disarming the button on.
+  // ⚠️ Drive the INLINE style, not a class: l.586 sets style.display on this
+  // same element, and an inline style beats any stylesheet rule — a `.hidden`
+  // class silently did nothing here. Keep the wolReady() guard so we never
+  // reveal a power section that a status-only device is meant to be without.
+  document.getElementById('powerSection').style.display=
+    (noNet||!wolReady())?'none':'flex';
+  if(noNet){
+    document.getElementById('statusLabel').textContent='Pas de connexion';
+    // Says what the user can actually do — the one actionable thing left.
+    // Kept SHORT on purpose: "vérifie ton wifi ou tes données mobiles" was
+    // truncated to "…données m…" at 360 px in tests/screenshots. Third time
+    // this tile has had to cut copy for narrow phones (v8.13, v8.14).
+    document.getElementById('statusSub').textContent='vérifie ta connexion';
+  }else if(sleeping){
     // v8.15 — "En veille" implied a suspend; the box actually powers OFF
-    // (autoshutdown + RTC wake). "Éteint (prévu)" matches reality while the
-    // blue card + auto-wake time keep the calm "this is expected" framing.
-    document.getElementById('statusLabel').textContent='Éteint (prévu)';
-    // v8.13 — short copy: the power button sits right below, the "ou
-    // allume-le ↓" hint wrapped on narrow phones (S24) for no added info.
-    document.getElementById('statusSub').textContent='réveil auto à '+windowStartLabel();
-  }else if(lastDownDeclared){
-    // Inside the window, but the home said goodbye itself. No auto-wake time to
-    // promise here (the schedule expected it to be running), so the sub states
-    // the fact and the armed wake button says what to do about it.
+    // (autoshutdown + RTC wake). "Éteint" matches reality while the blue card
+    // keeps the calm "this is expected" framing.
     document.getElementById('statusLabel').textContent='Éteint';
-    document.getElementById('statusSub').textContent='arrêt normal du serveur';
+    // v8.54 — the auto-wake time when the schedule knows it, the plain fact
+    // otherwise. Keep it short: v8.13/v8.14 both had to cut copy that wrapped
+    // on narrow phones (S24) once Android font scaling kicked in.
+    document.getElementById('statusSub').textContent=(inWin===false)
+      ?'réveil auto à '+windowStartLabel()
+      :'arrêt normal du serveur';
   }else{
     document.getElementById('statusLabel').textContent='Hors ligne';
-    // v8.14 — single short copy for both branches: the red card already
-    // signals the anomaly; any longer string collides with the refresh
-    // button on narrow phones once Android font scaling kicks in (S24).
-    document.getElementById('statusSub').textContent='serveur éteint';
+    document.getElementById('statusSub').textContent='contacte l\'administrateur';
   }
   updateVerdictAge();
   if(wolReady()){
@@ -1230,7 +1267,13 @@ function setOffline(){
     // of the old message. A tap that really can't reach the relay fails in one
     // round-trip with an explicit toast.
     btn.className='power-btn';lbl.className='power-label';
-    lbl.textContent=relayReachable?'Allumer le serveur':'Allumer (relais incertain)';
+    // v8.54 — always the plain label. "(relais incertain)" was admin vocabulary
+    // on the one control the family uses: it named a component they have no
+    // model of, and it changed nothing about the gesture (v8.53 already arms the
+    // button either way, and a tap that truly can't reach the relay fails in one
+    // round-trip with an explicit toast). The uncertainty belongs on the status
+    // card — which now says "contacte l'administrateur" — not on the action.
+    lbl.textContent='Allumer le serveur';
     setFallbackState();
   }
 }

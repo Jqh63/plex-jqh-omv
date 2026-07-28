@@ -796,6 +796,36 @@ def collect_results():
         results.append(("up-degraded-sub-label", ok17, r17,
                         "green card with 'services en cours de démarrage…' sub"))
 
+        # v8.54 — the red card INSTRUCTS instead of describing. Unexplained
+        # silence is the one thing the family cannot act on alone, so the sub
+        # tells them the only useful thing: report it. A relay we cannot reach
+        # lands here too (probe() resolves up:false on a relay miss), which is
+        # deliberate — a broken relay is a real problem, not a shrug.
+        # Fails on v8.53, which said "serveur éteint".
+        r18 = run_scenario(p, "unexplained-down-says-contact-admin",
+                           relay_plan=lambda n: "down", home_plan=lambda n: "fail",
+                           sample_delays_s=[3, 4],
+                           url_extra="&window=" + _window_excluding_now(inside=True))
+        ok18 = (r18["final_red"] and not r18["final_sleep"]
+                and "administrateur" in r18["final_sub"])
+        results.append(("unexplained-down-says-contact-admin", ok18, r18,
+                        "unexplained silence → red card instructing to contact the admin"))
+
+        # v8.54 — the two blue states collapsed into one. A scheduled stop and a
+        # declared stop asked for the SAME user action (press the button); only
+        # the auto-wake time differed, and that lives in the sub now. The label
+        # must be the bare "Éteint" — fails on v8.53, which said "Éteint (prévu)"
+        # outside the window. r16 above is the other half: the declared stop
+        # inside the window must reach the SAME label.
+        r19 = run_scenario(p, "scheduled-off-single-blue-label",
+                           relay_plan=lambda n: "down", home_plan=lambda n: "fail",
+                           sample_delays_s=[3],
+                           url_extra="&window=" + _window_excluding_now(inside=False))
+        ok19 = (r19["final_sleep"] and r19["final_label"].strip() == "Éteint"
+                and "réveil auto" in r19["final_sub"])
+        results.append(("scheduled-off-single-blue-label", ok19, r19,
+                        "scheduled off → bare 'Éteint' label, auto-wake time in the sub"))
+
     return results
 
 

@@ -39,3 +39,8 @@ tests/screenshots/
 
 # Claude Code — personal local allow-list (not versioned)
 .claude/settings.local.json
+
+# Browser crash dumps left by the Playwright suites (6 GB seen 2026-07-28,
+# nearly committed by a git add -A).
+core
+core.*

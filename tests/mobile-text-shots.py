@@ -78,7 +78,38 @@ def main():
             page.wait_for_timeout(500)
             page.screenshot(path=str(OUT / f'{name}-360.png'))
 
+        # v8.54 — the status card must keep the SAME height in every state.
+        # This is an assertion, not a shot: v8.54 made the nominal green sub
+        # empty, which collapsed the line and shrank the card 85 -> 69 px. The
+        # green<->red<->degraded flips happen on an 8 s poll, so that was a
+        # 16 px jump shifting the whole page under the user's thumb, several
+        # times a minute. Screenshots would not have caught it — each one looks
+        # fine on its own; only comparing them does.
+        heights = {}
+        for name, cls, lbl, sub in (
+            ("green-nominal", "online", "En ligne", ""),
+            ("green-degraded", "online", "En ligne", "services en cours de démarrage…"),
+            ("blue-off", "sleep", "Éteint", "réveil auto à 13h50"),
+            ("red-unexpected", "offline", "Hors ligne", "contacte l'administrateur"),
+            ("hollow-no-network", "nonet", "Pas de connexion", "vérifie ta connexion"),
+        ):
+            page.evaluate("""([c,l,s]) => {
+              document.getElementById('statusCard').className = 'status-card ' + c;
+              document.getElementById('statusDot').className = 'status-dot ' + c;
+              document.getElementById('statusLabel').textContent = l;
+              document.getElementById('statusSub').textContent = s;
+              document.getElementById('statusAge').textContent = '';
+            }""", [cls, lbl, sub])
+            page.wait_for_timeout(120)
+            heights[name] = round(page.evaluate(
+                "document.getElementById('statusCard').getBoundingClientRect().height"), 1)
         b.close()
+
+    if len(set(heights.values())) != 1:
+        print("FAIL status card height varies by state:", heights)
+        return 1
+    print(f"PASS status card height stable across {len(heights)} states "
+          f"({next(iter(heights.values()))} px)")
     print("screenshots ->", OUT)
 
 if __name__ == '__main__':

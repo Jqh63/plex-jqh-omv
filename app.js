@@ -253,9 +253,6 @@ var BOOT_MIN_MS=10000, BOOT_MAX_MS=300000;
 
 var APP_CATALOG={
   seerr:      {sub:'seerr',      label:'Demander un film / une série', icon:'🎬', cls:'seerr'},
-  overseerr:  {sub:'overseerr',  label:'Demander un film / une série', icon:'🎬', cls:'seerr'},
-  jellyseerr: {sub:'jellyseerr', label:'Demander un film / une série', icon:'🎬', cls:'seerr'},
-  jellyfin:   {sub:'jellyfin',   label:'Regarder sur Jellyfin',        icon:'▶',  cls:'plex'},
   // `gated`: an external app.url link that should STILL be blocked while the
   // home server is offline. app.plex.tv loads fine on its own, but with the
   // server down it just lands the user on Plex's own "server unavailable"
@@ -512,15 +509,6 @@ function testRelay(btn){
           var failed=Object.keys(c).filter(function(k){return c[k]!=='ok'});
           done('warn','⚠ Dégradé : '+(failed.join(', ')||'inconnu'));
         }).catch(function(){done('warn','⚠ Relais dégradé');});
-      }else if(r.status===404){
-        // Older relay without /health/deep — fall back to /health for compat.
-        // fetchOnce (not bare fetch) so this inherits the AbortController +
-        // timeout: a half-open relay socket would otherwise never resolve/reject
-        // and leave the "Tester le relais" button stuck disabled (v7.8 fix).
-        fetchOnce(cleaned+'/health').then(function(r2){
-          if(r2.ok)done('ok','✓ Relais OK (legacy /health)');
-          else done('fail','✕ Relais répond mais /health KO ('+r2.status+')');
-        }).catch(function(){done('fail','✕ Relais injoignable');});
       }else{
         done('fail','✕ HTTP '+r.status);
       }
@@ -987,7 +975,7 @@ function setButtonChecking(){
 //   - relay *answers* but degraded      → relay alive, oracle off: fall back to
 //     (503 STATUS_TARGET_URL unset, 404)  direct-home for up/down, keep WoL on.
 //   - relay *transport*-fails (timeout) → relay unreachable: fall back, mark it
-//                                         down (→ "Réveil indisponible").
+//                                         down (the fallback link is promoted).
 // No retry, no hold, no streak — the generous PROBE_TIMEOUT_MS absorbs the
 // cold-radio handshake that the old cascade was built to paper over.
 function probe(){
@@ -1029,8 +1017,9 @@ function applyLinksState(){
 }
 
 // Three-state fallback link reflecting both server and relay reachability.
-// Style/wording chosen so the admin sees a relay outage even while the server
-// is up — otherwise the issue only surfaces the next time WoL is needed.
+// Style/wording chosen so a relay outage is visible even while the server is
+// up — otherwise the issue only surfaces the next time WoL is needed. v8.53
+// widened it past the admin-only case: ANY failed wake promotes the link.
 function setFallbackState(){
   if(!config||!config.mac)return;
   var link=document.getElementById('fallbackLink');
@@ -1081,7 +1070,7 @@ function setOnline(degraded){
   document.getElementById('statusCard').className='status-card online';
   // v8.54 — undo the no-network hide (setOffline may have set it before the
   // radio came back): never leave the button hidden on a state that can arm
-  // it. Same inline-style mechanism, same wolReady() guard as l.586.
+  // it. Same inline-style mechanism, same wolReady() guard as startApp().
   document.getElementById('powerSection').style.display=wolReady()?'flex':'none';
   // v8.48 — surface the relay's `degraded` on the card itself: host up but the
   // apps (Seerr…) still starting. Green stays (no pointless wake) but the sub
@@ -1286,7 +1275,7 @@ function setOffline(){
   //   red     — UNEXPECTED. Reserved for silence we cannot explain, and it no
   //             longer describes, it INSTRUCTS: "contacte l'administrateur".
   //             A relay we cannot reach lands here by construction (probe() at
-  //             l.929 resolves up:false when the relay misses), which is right:
+  //             probe() resolves up:false when the relay misses), which is right:
   //             a broken relay IS a real problem worth reporting, not a shrug.
   var noNet=!navigator.onLine;
   var sleeping=!noNet&&(inWin===false||lastDownDeclared);
@@ -1295,7 +1284,7 @@ function setOffline(){
   document.getElementById('statusCard').className='status-card '+paint;
   // The wake button is hidden ONLY here: navigator.onLine=false is a fact, not
   // the presumption that v8.53 stopped disarming the button on.
-  // ⚠️ Drive the INLINE style, not a class: l.586 sets style.display on this
+  // ⚠️ Drive the INLINE style, not a class: startApp() sets style.display on this
   // same element, and an inline style beats any stylesheet rule — a `.hidden`
   // class silently did nothing here. Keep the wolReady() guard so we never
   // reveal a power section that a status-only device is meant to be without.
@@ -1543,8 +1532,8 @@ document.addEventListener('visibilitychange',function(){if(!document.hidden)onFo
 // net for the Android PWA standalone case where neither focus nor
 // visibilitychange fires reliably on app-switcher resume — the IRL bug behind
 // "il faut attendre au moins 15 s pour voir le statut passer à rouge". The
-// 15 s self-healing interval is still the eventual catch-up; this poll cuts
-// the worst case from CHECK_INTERVAL_MS (15 s) down to ~1 s without depending
+// The STATUS_POLL_INTERVAL_MS (8 s) self-healing tick is still the eventual
+// catch-up; this poll cuts the worst case from 8 s down to ~1 s without depending
 // on any DOM event firing.
 // v8.10 — clock-jump detector folded into the same 1 s poll. A prolonged device
 // sleep can end WITHOUT any hidden→visible flip (screen lock that never fired

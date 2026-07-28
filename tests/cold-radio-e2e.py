@@ -119,10 +119,20 @@ def capture_state(page):
         dotClass: document.getElementById('statusDot').className,
         cardClass: document.getElementById('statusCard').className,
         fallbackClass: document.getElementById('fallbackLink') ? document.getElementById('fallbackLink').className : '',
+        powerHidden: (() => { const e = document.getElementById('powerSection');
+                              return !e || getComputedStyle(e).display === 'none'; })(),
+        onLine: navigator.onLine,
         fallbackText: document.getElementById('fallbackLinkA') ? document.getElementById('fallbackLinkA').innerText : '',
         powerClass: document.getElementById('powerBtn') ? document.getElementById('powerBtn').className : '',
     })"""
     )
+
+
+# 2026-07-28 — the "no network" state: the app knows nothing and no tap can help,
+# so the card is hollow (dashed, unlit) and the power button is hidden. Told
+# apart from every other state by FORM, not hue (v8.54).
+def is_nonet(s):
+    return "nonet" in s["cardClass"] and "nonet" in s["dotClass"]
 
 
 def is_red(s):
@@ -177,7 +187,7 @@ def is_button_checking(s):
     return "checking" in s["powerClass"]
 
 
-def _relay_fulfill(route, verdict):
+def _relay_fulfill(route, verdict, aborted=None):
     h = {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"}
     if verdict == "up":
         route.fulfill(status=200, headers=h, body='{"up": true, "stale": false, "age_s": 0}')
@@ -207,6 +217,8 @@ def _relay_fulfill(route, verdict):
         # the PWA's own PROBE_TIMEOUT_MS eventually fires underneath.
         return
     else:  # 'fail' → transport failure
+        if aborted is not None:
+            aborted.add(route.request.url)
         route.abort()
 
 
@@ -250,31 +262,55 @@ def _window_excluding_now(inside):
 _MOCK_HOSTS = (RELAY_HOST, CONFIG_HOST)
 
 
-def _watch_interception(page, flag):
+def _watch_interception(page, flag, deliberate=None):
+    """deliberate: set of request URLs the handler aborted ON PURPOSE (a mocked
+    network failure). Without it, every scenario that simulates a dead leg looks
+    like lost interception — and since a lost-interception FAIL is downgraded to
+    SKIP-ENV, a REAL failure in those scenarios would be silently swallowed.
+    Found while adding the offline scenarios, whose failures were reported
+    SKIP-ENV until this was fixed."""
     def on_failed(req):
         host = urlparse(req.url).netloc
+        if deliberate is not None and req.url in deliberate:
+            return
         if any(host == h or host.endswith("." + h) for h in _MOCK_HOSTS):
             flag["lost"] = True
     page.on("requestfailed", on_failed)
 
 
-def run_scenario(p, name, relay_plan, home_plan, sample_delays_s, preseed_cache=None, url_extra=""):
+def run_scenario(p, name, relay_plan, home_plan, sample_delays_s, preseed_cache=None,
+                 url_extra="", offline=False, restore_online_at_s=None, phase=None):
     """relay_plan(n) → 'up'|'down'|'degraded'|'fail' for the n-th relay /status
     call (1-indexed). home_plan(n) → 'ok'|'fail' for the n-th direct-home call.
-    preseed_cache: inject {up, relayOk} under STATUS_LOCAL_KEY before nav."""
+    preseed_cache: inject {up, relayOk} under STATUS_LOCAL_KEY before nav.
+    offline: start with the browser context offline — navigator.onLine is false
+    AND requests fail, which is what a phone in airplane mode does (setting the
+    flag alone would let fetches succeed and test a state that cannot exist).
+    restore_online_at_s: bring the network back at that sample, to pin that the
+    app leaves the state on its own.
+    phase: a dict flipped to {"online": True} at that moment, so the plans can
+    key on the RADIO rather than on a call count. Necessary, not cosmetic: route
+    interception answers even while the context is offline, so a plan that
+    served "up" on its second call greened the tile with the radio still off —
+    a state that cannot happen on a real phone."""
     print(f"\n## Scenario: {name}")
     counters = {"relay": 0, "home": 0}
+    _aborted = set()
 
     def handle(route: Route):
         parsed = urlparse(route.request.url)
         host = parsed.netloc
         if host == RELAY_HOST and parsed.path == "/status":
             counters["relay"] += 1
-            _relay_fulfill(route, relay_plan(counters["relay"]))
+            _relay_fulfill(route, relay_plan(counters["relay"]), _aborted)
             return
         if host == CONFIG_HOST or host.endswith("." + CONFIG_HOST):
             counters["home"] += 1
-            route.fulfill(status=200, body="") if home_plan(counters["home"]) == "ok" else route.abort()
+            if home_plan(counters["home"]) == "ok":
+                route.fulfill(status=200, body="")
+            else:
+                _aborted.add(route.request.url)
+                route.abort()
             return
         route.continue_()
 
@@ -293,9 +329,15 @@ def run_scenario(p, name, relay_plan, home_plan, sample_delays_s, preseed_cache=
         )
     page = ctx.new_page()
     _iflag = {"lost": False}
-    _watch_interception(page, _iflag)
+    _watch_interception(page, _iflag, _aborted)
     page.route("**/*", handle)
     page.goto(PWA_URL + url_extra, wait_until="load")
+    # AFTER the navigation on purpose: WebKit refuses to load even a file:// URL
+    # in an offline context (30 s goto timeout). The app's first probe is aborted
+    # by the plans anyway, and the tile only reads navigator.onLine when that
+    # probe settles ~2 s later — long after this line.
+    if offline:
+        ctx.set_offline(True)
     page.wait_for_selector("#statusLabel", state="attached", timeout=10000)
 
     samples = []
@@ -303,6 +345,11 @@ def run_scenario(p, name, relay_plan, home_plan, sample_delays_s, preseed_cache=
     for t in sample_delays_s:
         page.wait_for_timeout(int((t - last_t) * 1000))
         last_t = t
+        if restore_online_at_s is not None and t >= restore_online_at_s and not ctx.is_closed():
+            ctx.set_offline(False)
+            if phase is not None:
+                phase["online"] = True
+            restore_online_at_s = None
         s = capture_state(page)
         samples.append((t, s))
         flags = [f for f, on in (("RED", is_red(s)), ("WARN", is_warn(s)), ("green", is_green(s))) if on]
@@ -318,6 +365,9 @@ def run_scenario(p, name, relay_plan, home_plan, sample_delays_s, preseed_cache=
         "green_at": [t for t, s in samples if is_green(s)],
         "checking_at": [t for t, s in samples if is_checking(s)],
         "sleep_at": [t for t, s in samples if is_sleep(s)],
+        "nonet_at": [t for t, s in samples if is_nonet(s)],
+        "power_hidden_at": [t for t, s in samples if s["powerHidden"]],
+        "final_nonet": is_nonet(final),
         "final_sleep": is_sleep(final),
         "final_green": is_green(final),
         "final_red": is_red(final),
@@ -356,13 +406,14 @@ def run_resume_scenario(p, name, relay_plan, fg_event, bg_at_s, fg_at_s, sample_
     the foreground event. v8 must converge to red (not stay frozen green)."""
     print(f"\n## Resume scenario: {name} (fg_event={fg_event})")
     counters = {"relay": 0, "home": 0}
+    _aborted = set()
 
     def handle(route: Route):
         parsed = urlparse(route.request.url)
         host = parsed.netloc
         if host == RELAY_HOST and parsed.path == "/status":
             counters["relay"] += 1
-            _relay_fulfill(route, relay_plan(counters["relay"]))
+            _relay_fulfill(route, relay_plan(counters["relay"]), _aborted)
             return
         if host == CONFIG_HOST or host.endswith("." + CONFIG_HOST):
             counters["home"] += 1
@@ -379,7 +430,7 @@ def run_resume_scenario(p, name, relay_plan, fg_event, bg_at_s, fg_at_s, sample_
     )
     page = ctx.new_page()
     _iflag = {"lost": False}
-    _watch_interception(page, _iflag)
+    _watch_interception(page, _iflag, _aborted)
     page.route("**/*", handle)
     page.goto(PWA_URL, wait_until="load")
     page.wait_for_selector("#statusLabel", state="attached", timeout=10000)
@@ -751,6 +802,44 @@ def collect_results():
         ok15b = r15b["green_at"] == [1, 3] and not r15b["sleep_at"]
         results.append(("cold-open-inside-window-presumes-up", ok15b, r15b,
                         "inside window + slow relay → green at once, never a presumed sleep"))
+
+        # 2026-07-28 — THE PHONE has no network (airplane mode, no signal). Until now
+        # this state was only covered by reading the code and by a render
+        # fixture: run_scenario had no way to take the network away, so the one
+        # state where the app must NOT offer its button was the one state never
+        # exercised end to end. The card must go hollow (form, not hue — v8.54)
+        # and the power button must be HIDDEN: no relay is reachable, so a tap
+        # could only fail. Never red (that colour is an instruction to call the
+        # admin, and the admin can do nothing about a phone with no signal),
+        # never green.
+        # The plans must FAIL too: an offline browser context still lets
+        # Playwright's own route interception answer, so a plan that served "up"
+        # would test a phone with no radio and a working relay — a state that
+        # cannot exist. Failing both legs is what airplane mode does.
+        r16 = run_scenario(p, "offline-phone-hollow-card-no-button",
+                           relay_plan=lambda n: "fail", home_plan=lambda n: "fail",
+                           sample_delays_s=[3, 5], offline=True,
+                           url_extra="&window=" + _window_excluding_now(inside=True))
+        ok16 = (r16["nonet_at"] == [3, 5] and r16["power_hidden_at"] == [3, 5]
+                and not r16["red_at"] and not r16["green_at"])
+        results.append(("offline-phone-hollow-card-no-button", ok16, r16,
+                        "no network → hollow card + hidden button, never red/green"))
+
+        # 2026-07-28 — and it must LEAVE that state when the signal comes back. The
+        # app has no 'online' listener, so recovery rides the 8 s poll: sampled
+        # at T+14, ~10 s after the radio returns at T+4. If that ever becomes
+        # too slow to live with, THIS is the pin that will have to move.
+        _phase = {"online": False}
+        r16b = run_scenario(p, "offline-phone-recovers-when-network-returns",
+                            relay_plan=lambda n: "up" if _phase["online"] else "fail",
+                            home_plan=lambda n: "ok" if _phase["online"] else "fail",
+                            sample_delays_s=[3, 4, 14], offline=True,
+                            restore_online_at_s=4, phase=_phase,
+                            url_extra="&window=" + _window_excluding_now(inside=True))
+        ok16b = (r16b["nonet_at"] == [3, 4] and r16b["final_green"]
+                 and not r16b["final_nonet"] and 14 not in r16b["power_hidden_at"])
+        results.append(("offline-phone-recovers-when-network-returns", ok16b, r16b,
+                        "network back → leaves the hollow card, button returns, greens"))
 
         # v8.60 positive control — the in-window green presumption must NOT fire
         # over a freshly persisted "down": during a real outage the family re-opens

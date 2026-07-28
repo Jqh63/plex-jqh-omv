@@ -1,16 +1,30 @@
 # plex-jqh-omv tests
 
 Two-layer test suite for the PWA's v8 status / probe / cold-radio resume
-state machine.
+state machine, plus the render pins that guard what the eye actually sees.
+
+> **Why the render pins exist.** Four defects in a single day (2026-07-28) were
+> found by looking at the RENDER while every assertion stayed green: a mask
+> applied by a CSS class that an inline style silently beat, a string truncated
+> at 360 px, a label off-centre in a card of the right height, and a focus ring
+> that Chromium was drawing by itself. On this tile, an assertion about styles
+> is not an assertion about what the family sees — measure positions, sizes and
+> computed values, and verify the pin FAILING against the code before the fix.
 
 ## Layout
 
 | File | What | Speed |
 |---|---|---|
 | `state-machine-sim.py` | Deterministic Python sim of the app.js v8 timer/fetch logic. `OldCascade` (v7 baseline) vs `V8App` on the status scenarios + a contrast check. Models the v8.4 power-button honesty (`BuggyButtonApp` baseline) AND the v8.5 status-card honesty (`BuggyCardApp` baseline) — the confident green ("Serveur allumé" / "En ligne") lights once a live probe settles, never off a cache pre-paint; a relay `stale=true` up is still trusted as up (a healthy home is almost always served stale → gating green on `!stale` stuck the indicator orange, so honesty keys on "a live probe settled this session", not the stale flag). v8.5 also shortens the self-healing poll (15 s → 8 s) so a just-stopped home corrects to red in ~8 s, asserted via `expect_red_by`. | ~50 ms |
-| `cold-radio-e2e.py` | Playwright headless drives the PWA on Chromium **and WebKit/Safari** (cross-browser, see § Engines) with mocked network + spoofed visibilitychange. 15 scenarios × engine. Covers the **status** machine — it never fires a wake. | ~30 s/engine |
+| `cold-radio-e2e.py` | Playwright headless drives the PWA on Chromium **and WebKit/Safari** (cross-browser, see § Engines) with mocked network + spoofed visibilitychange. 26 scenarios × engine. Covers the **status** machine — it never fires a wake. Since 2026-07-28 it can also take the **radio** away (`offline=True`, plus `restore_online_at_s`/`phase` to give it back): route interception answers even in an offline context, so an offline scenario whose plans still serve `up` tests a state that cannot exist — the plans must fail too, and `phase` lets them key on the radio rather than on a call count. | ~30 s/engine |
 | `wake-e2e.py` | Playwright headless on the **wake** paths, which `cold-radio-e2e.py` does not touch — and where the 2026-07-14 bug lived. Pins v8.45: a wake must not survive a background freeze and repaint its countdown when the app is reopened — both for a wake this device TAPPED (`wolSent`) and, crucially, for one it merely ADOPTED from the relay (`remoteWaking`, the AM5 logon task's wake — the variant actually hit). Uses Playwright's **clock API** to reproduce the Android freeze/thaw. Two traps it exists to avoid, both of which produced a green-but-worthless test on the first pass: for the **reap** scenarios assert on the countdown (`powerProgress`), not the status card; and jump time with `set_system_time`, **not** `fast_forward` (the latter also fires the thawed poll timer, which reaps the wake on its own — the test would pass even without the fix). ⚠️ v8.53 — that first trap was half a misreading: the card being "repainted to Vérification… while the countdown keeps ticking" was not only a fixture artefact, it was a **real defect** on adopted wakes (`setRechecking` guarded `wolSent` but not `remoteWaking`). `remote-wake-outlives-the-relay-waking-signal` now asserts on the card ON PURPOSE. It also has to **sample** across the ~2.5 s (`DOWN_RECHECK_MS`) contradiction window rather than snapshot once — a single late snapshot passes against the bug. | ~30 s |
 | `fallback-e2e.py` | Playwright on **`fallback.html`**, the manual-wake page — which had zero coverage until 2026-07-27 while becoming the family's real degraded path (v8.53 promotes it to a full-size call to action on ANY failed wake). Static page, so no network mocking. Pins: parameters rendered from the URL, the copyable PowerShell / `wakeonlan` commands filled with the user's OWN values, `?ip=` winning over the domain in those commands (its whole reason to exist is a DNS outage) with a malformed-IP control, click-to-copy actually reaching the clipboard, and its **failure** state being visible rather than silent. ⚠️ Two traps met while writing it: the Linux/macOS command sits in a collapsed `<details>`, so `inner_text` returns `""` and reads as an app bug — assert on `text_content`; and the test MAC must differ from the page's own placeholder, or "filled with the real value" cannot be told apart from "fell back to the example". Clipboard cases need a secure context (`http://127.0.0.1`), and self-skip on `file://`. | ~10 s |
+| `layout-stability-e2e.py` | Render pins: **nothing below the tile may move** when a line appears. Reported by the user in 2026-07-28 and measured at 360 px — the wake progress bar shifted the page 10,5 px (and the power button under the thumb), promoting the manual-wake link 6,5 px, both at once 17 px. Asserts **absolute positions** of what sits below, so a shift reintroduced by another route (margin, display toggle, extra line) still fails; carries a positive control that the promotion still reads as an alarm, since "reserve space" could otherwise be passed by deleting the feature. | ~5 s |
+| `tile-crossfade-e2e.py` | Render pins for the v8.58 tile text fade — measures **computed opacity over time**, not a resting state. Includes the anti-blink control: an identical repaint must be a no-op, or the tile would fade every 8 s in the most common state. | ~5 s |
+| `screen-fade-e2e.py` | Render pins for the v8.59 `main ↔ settings` fade + toast timing. The reflow between the class add and remove is load-bearing: without it the fade silently no-ops while every `display` assertion stays green. | ~5 s |
+| `a11y-e2e.py` | Accessibility pins (v8.55): the power button announces its **visible** label (`aria-labelledby`, not a frozen `aria-label`), `prefers-reduced-motion` stops the two infinite animations **without losing their information**, and `:focus-visible` draws OUR ring — a pin that first passed against the unfixed code because Chromium draws its own. | ~5 s |
+| `mobile-text-shots.py` | Renders the tile's states at phone widths and pins card height + vertical centring across them, plus truncation. The suite that caught "…données m…" at 360 px. | ~10 s |
+| `../relay/tests/` | `pytest` on the relay itself (heartbeat oracle, stale verdict, wake campaign, boot ETA to services-ready, target resolution + `TARGET_IP` fallback). Run: `cd relay && python3 -m pytest -q` (30 tests, ~2 s). The PWA suites mock the relay; these pin the thing being mocked. | ~2 s |
 | `screenshots/` | E2E output, gitignored. | — |
 
 > ⚠️ **WebKit and route interception (2026-07-27).** Playwright's WebKit drops
@@ -24,7 +38,13 @@ state machine.
 > danger is not the noise but what it hides: on those runs WebKit is not testing
 > what the scenario claims, and the family does use iOS. `_watch_interception`
 > now detects a mock host reaching the real network and reports those scenarios
-> as **`SKIP-ENV`**, so the remaining FAILs stay meaningful. `ctx.route` instead
+> as **`SKIP-ENV`**, so the remaining FAILs stay meaningful. ⚠️ **A mocked
+> failure is not lost interception** (fixed 2026-07-28 while adding the offline
+> scenarios): `route.abort()` also raises `requestfailed`, so every scenario
+> that simulates a dead leg looked like a harness failure — and since that
+> downgrades a FAIL to `SKIP-ENV`, a REAL regression in those scenarios was
+> being swallowed. The handlers now record the URLs they abort ON PURPOSE, and
+> the watcher ignores them. `ctx.route` instead
 > of `page.route` was tried and does **not** fix it; a real fix needs a local
 > HTTPS mock server (the PWA's `validRelay` refuses plain http), which is worth
 > doing the day WebKit coverage of those three paths actually matters.
@@ -93,7 +113,25 @@ python3 -m playwright install chromium
 # Validate the WORKING TREE before merge (flat HTML/JS → file:// works):
 PWA_BASE="file:///config/workspace/plex-jqh-omv/index.html" python3 tests/cold-radio-e2e.py
 # Or the live deploy (post-merge gate): leave PWA_BASE unset.
-# expect: [chromium] ALL PASS (15 scenarios)  /  ALL ENGINES PASS
+# expect: [chromium] ALL PASS (26 scenarios)  /  ALL ENGINES PASS
+```
+
+⚠️ `PWA_BASE` is **not** shared vocabulary: `cold-radio-e2e.py` takes the page
+URL, while `fallback-e2e.py` treats anything not ending in `.html` as a base
+directory and appends `fallback.html` — pointing it at `index.html` runs the
+whole suite against the wrong page and reports a wall of failures that say
+nothing. Run `fallback-e2e.py` with no `PWA_BASE` (it defaults to the local
+file), or with a directory URL.
+
+The render + a11y pins take no `PWA_BASE` — they always read the working tree:
+
+```bash
+for t in layout-stability tile-crossfade screen-fade a11y; do
+  python3 tests/$t-e2e.py || echo "FAILED: $t"
+done
+python3 tests/mobile-text-shots.py
+python3 tests/fallback-e2e.py
+( cd relay && python3 -m pytest -q )
 ```
 
 ### Engines (cross-browser — Chromium + WebKit/iOS)

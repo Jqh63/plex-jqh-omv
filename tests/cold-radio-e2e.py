@@ -77,7 +77,9 @@ browser can't reproduce the Android suspend that wedges the flag — that race i
 covered by the offline state-machine sim).
 """
 
+import time
 import os
+import sys
 from urllib.parse import urlparse
 from playwright.sync_api import sync_playwright, Route
 
@@ -127,6 +129,11 @@ ENGINES = [e.strip() for e in
 # is asserted, with a sample before the warn as the positive control that it
 # still doesn't cry wolf. Kept at 2 s rather than the 200 ms floor so the margin
 # between "one miss" and "three misses" stays wider than webkit's jitter.
+# PWA_TIMING=1 prints a per-scenario cost breakdown (total / fixed waits /
+# overhead). Off by default — it is diagnostic, not a verdict — but kept in the
+# suite because the one time it was needed, it overturned two confident wrong
+# guesses in a row about where the runtime went (see _run_engines_in_parallel).
+TIMING = os.environ.get("PWA_TIMING") == "1"
 POLL_MS = int(os.environ.get("PWA_POLL_MS", "2000"))
 P = POLL_MS / 1000.0        # poll cadence in seconds, for the delay arithmetic
 _CURRENT_ENGINE = "chromium"
@@ -354,6 +361,7 @@ def run_scenario(p, name, relay_plan, home_plan, sample_delays_s, preseed_cache=
     decides. A scenario that passes `no_relay=True` and still expects relay calls
     is asserting on a request that cannot exist."""
     print(f"\n## Scenario: {name}")
+    _t0 = time.monotonic()
     counters = {"relay": 0, "home": 0}
     _aborted = set()
 
@@ -418,6 +426,10 @@ def run_scenario(p, name, relay_plan, home_plan, sample_delays_s, preseed_cache=
 
     final = samples[-1][1]
     b.close()
+    if TIMING:
+        _waited = max(sample_delays_s) if sample_delays_s else 0
+        print(f"  [timing] total={time.monotonic()-_t0:.1f}s waits={_waited:.1f}s "
+              f"overhead={time.monotonic()-_t0-_waited:.1f}s")
     return {
         "name": name,
         "interception_lost": _iflag["lost"],
@@ -486,6 +498,7 @@ def run_resume_scenario(p, name, relay_plan, fg_event, bg_at_s, fg_at_s, sample_
             return
         route.continue_()
 
+    _t0 = time.monotonic()
     b = _launch(p)
     ctx = b.new_context(viewport={"width": 390, "height": 844})
     import json
@@ -517,6 +530,8 @@ def run_resume_scenario(p, name, relay_plan, fg_event, bg_at_s, fg_at_s, sample_
 
     final = samples[-1][1]
     b.close()
+    if TIMING:
+        print(f'  [timing:run_resume_scenario] {time.monotonic()-_t0:.1f}s')
     return {
         "name": name,
         "interception_lost": _iflag["lost"],
@@ -559,6 +574,7 @@ def run_clockjump_scenario(p):
             return
         route.continue_()
 
+    _t0 = time.monotonic()
     b = _launch(p)
     ctx = b.new_context(viewport={"width": 390, "height": 844})
     page = ctx.new_page()
@@ -590,6 +606,8 @@ def run_clockjump_scenario(p):
 
     final = samples[-1][1]
     b.close()
+    if TIMING:
+        print(f'  [timing:run_clockjump_scenario] {time.monotonic()-_t0:.1f}s')
     return {
         "name": name,
         "interception_lost": _iflag["lost"],
@@ -632,6 +650,7 @@ def run_watchdog_scenario(p):
             return
         route.continue_()
 
+    _t0 = time.monotonic()
     b = _launch(p)
     ctx = b.new_context(viewport={"width": 390, "height": 844})
     page = ctx.new_page()
@@ -658,6 +677,8 @@ def run_watchdog_scenario(p):
     page.wait_for_timeout(21000)
     post = capture_state(page)
     b.close()
+    if TIMING:
+        print(f'  [timing:run_watchdog_scenario] {time.monotonic()-_t0:.1f}s')
     return {
         "name": name,
         "interception_lost": _iflag["lost"],
@@ -1143,12 +1164,64 @@ def _short(e):
     return (lines[0] if lines else str(e))[:160]
 
 
+def _run_engines_in_parallel():
+    """Fan the engines out over one subprocess each, and merge their verdicts.
+
+    Measured 2026-07-29, and the measurement is the point — the first two things
+    I assumed were both wrong. Browser launch is 0.15 s, not the bottleneck; and
+    there is no hidden overhead outside the scenarios. Per engine:
+
+        sample waits (27 scenarios)                108 s
+        browser/context/goto overhead               28 s
+        the 4 special runners (resume x2, clockjump, watchdog)  51 s
+        -------------------------------------------------------------
+        total                                     ~187 s  (wall: 190 s webkit,
+                                                           177 s chromium)
+
+    So the time IS the waiting, and the waiting encodes real timing properties
+    (DOWN_RECHECK_MS, the 3-miss relay debounce, CHECK_WATCHDOG_MS) that cannot
+    be shortened without weakening what the scenarios prove. What CAN go is the
+    engines waiting for each other: they share nothing, and running them
+    back-to-back was costing a full second engine for free. 370 s -> ~190 s.
+
+    Subprocesses rather than threads on purpose: `_CURRENT_ENGINE` is a module
+    global that two in-process engines would race on, and Playwright's sync API
+    wants one instance per thread anyway. Each child runs the ordinary
+    single-engine path — the code under test is identical, only the scheduling
+    changed.
+
+    The cost is live output: a child's progress is printed only once it finishes,
+    in engine order. Set PWA_PARALLEL=0 to get the streaming sequential run back
+    when watching a scenario in flight.
+    """
+    import subprocess
+    procs = []
+    for eng in ENGINES:
+        env = dict(os.environ, PWA_ENGINES=eng, PWA_PARALLEL="0", PWA_CHILD="1")
+        procs.append((eng, subprocess.Popen(
+            [sys.executable, os.path.abspath(__file__)], env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)))
+    print(f"running {len(procs)} engines in parallel: "
+          f"{', '.join(e for e, _ in procs)} (output buffered per engine)\n")
+    worst = 0
+    for eng, pr in procs:
+        out, _ = pr.communicate()
+        print(f"\n{'#' * 72}\n# ENGINE: {eng}\n{'#' * 72}")
+        print(out, end="")
+        worst = max(worst, pr.returncode)
+    print("\n" + "#" * 72)
+    print("ALL ENGINES PASS" if worst == 0 else "AT LEAST ONE ENGINE FAILED")
+    return worst
+
+
 def main():
     # Validate on every requested engine (Chromium baseline + WebKit/Safari for
     # iOS). An engine whose browser can't launch here (missing system libs, not
     # installed) is SKIPPED with a note — it does NOT fail the run, so the
     # Chromium gate still works on a host without the WebKit deps. The real iOS
     # gold standard stays a physical iPhone; this is the headless first line.
+    if len(ENGINES) > 1 and os.environ.get("PWA_PARALLEL", "1") != "0":
+        return _run_engines_in_parallel()
     global _CURRENT_ENGINE
     overall_ok = True
     ran, skipped = [], []
@@ -1165,6 +1238,13 @@ def main():
                 continue
         overall_ok = print_verdict(collect_results(), eng) and overall_ok
         ran.append(eng)
+    if os.environ.get("PWA_CHILD") == "1":
+        # One engine of a parallel fan-out: the cross-engine footer belongs to
+        # the PARENT, which is the only process that knows what the full gate
+        # was. Printing it here repeated a global verdict per child and, worse,
+        # fired the PARTIAL warning on every one of them — telling the reader to
+        # "re-run both engines" inside the output of a run that did exactly that.
+        return 0 if overall_ok else 1
     print("\n" + "#" * 72)
     print(f"engines run: {', '.join(ran) or '(none)'}"
           + (f" | skipped: {', '.join(skipped)}" if skipped else ""))

@@ -41,6 +41,7 @@ TILE_STATES = [
     ('Éteint', 'réveil auto à 13h50'),
     ('Éteint', 'arrêt normal du serveur'),
     ('Hors ligne', "contacte l'administrateur"),
+    ('Statut inconnu', 'relais injoignable'),   # v8.65 — relay silent, no verdict
 ]
 
 TOASTS = [

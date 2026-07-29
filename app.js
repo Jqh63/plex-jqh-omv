@@ -169,6 +169,18 @@ var RELAY_DOWN_MISSES=3;
 // then warm on the re-probe. A genuine down still reaches red, ~DOWN_RECHECK_MS
 // later — the accepted cost (validated in tests/state-machine-sim.py).
 var DOWN_CONFIRM=2,DOWN_RECHECK_MS=2500,downStreak=0,downRecheckTimer=null;
+
+// v8.65 — what the status card is CURRENTLY showing, as a claim about how much
+// it is worth. The distinction the card itself has to make honest:
+//   'verdict'  — an oracle answered (setOnline / setOffline). The only kind that
+//                may be green or red, and the only one that claims a "vérifié…".
+//   'presumed' — nobody answered yet; we render a PRIOR (the schedule's
+//                "Éteint (prévu)", a fresh cached up) with its own framing.
+//   'checking' — we are asking. 'wake' — a boot is owning the card.
+//   'unknown'  — we asked and got no usable answer (see setUnknown).
+// Read by the res.unknown branch of checkStatus, which must never overwrite a
+// better-informed card with a shrug.
+var cardKind='none';
 // v8.2 — `checking` watchdog. A check still in flight past this is presumed
 // WEDGED: the Android suspend-mid-fetch race can tear down the socket and
 // freeze the abort timer with it, so a probe never resolves and never resets
@@ -650,7 +662,7 @@ function startApp(){
   buildLinks();
   clearWolPoll();
   releaseWakeLock();
-  isOnline=false;wolSent=false;remoteWaking=false;checking=false;checkStartedAt=0;relayReachable=true;relayMissStreak=0;hasConfirmedState=false;wakeFailed=false;lastDownDeclared=false;
+  isOnline=false;wolSent=false;remoteWaking=false;checking=false;checkStartedAt=0;relayReachable=true;relayMissStreak=0;hasConfirmedState=false;wakeFailed=false;lastDownDeclared=false;cardKind='none';
   // v8.28 — restore the persisted relay-served ETA so a wake fired right after an
   // offline open still seeds a shared-value countdown before the first poll lands.
   relayEtaMs=(config&&typeof config.eta==='number'&&config.eta*1000>=BOOT_MIN_MS&&config.eta*1000<=BOOT_MAX_MS)?config.eta*1000:0;
@@ -813,7 +825,7 @@ function checkStatus(){
   // orange re-check — it agrees with what is already on screen.
   if(!hasConfirmedState&&!wolSent&&!remoteWaking&&navigator.onLine&&inUptimeWindow()===false){
     setOffline();
-    hasConfirmedState=false;lastVerdictAtMs=0;updateVerdictAge();
+    hasConfirmedState=false;lastVerdictAtMs=0;cardKind='presumed';updateVerdictAge();
   }else if(!hasConfirmedState&&!wolSent&&!remoteWaking){
     // v8.49 — inside the window, presume the LAST PERSISTED verdict instead of
     // orange when one exists (bounded by PRESUME_STALE_MAX_MS). The relay knows
@@ -843,8 +855,9 @@ function checkStatus(){
                   ((prior&&prior.up)||(inUptimeWindow()===true&&!(prior&&!prior.up)));
     if(presumeUp){
       setOnline();
-      hasConfirmedState=false;lastVerdictAtMs=0;updateVerdictAge();
+      hasConfirmedState=false;lastVerdictAtMs=0;cardKind='presumed';updateVerdictAge();
     }else{
+      cardKind='checking';
       document.getElementById('statusDot').className='status-dot checking';
       document.getElementById('statusCard').className='status-card';
       paintTile('Vérification...','interrogation du relais…');
@@ -882,6 +895,31 @@ function checkStatus(){
     }else{
       relayMissStreak++;
       relayReachable=!(relayMissStreak>=RELAY_DOWN_MISSES||!relayReachable);
+    }
+    // v8.65 — no oracle answered: we do not know. An unknown is NOT a verdict,
+    // so it commits nothing (no green, no red, no cache write, no streak move,
+    // no hasConfirmedState) and it never overwrites something better already on
+    // screen: a confirmed verdict keeps its card and lets the "vérifié il y a…"
+    // age line carry the growing doubt, and a presumption (the blue scheduled
+    // "Éteint (prévu)", or a reused fresh cache) keeps its own honest framing.
+    // It paints only when the alternative is spinning on "Vérification…"
+    // forever — the one case where the user is owed an answer we don't have.
+    // One rule, deliberately blunt: the card shows what the RELAY said. When it
+    // said nothing, the card says so — including over a presumption (the
+    // schedule's blue "Éteint (prévu)", a reused cache), because a prior that no
+    // probe could confirm is exactly the "fausse indication" this version is
+    // about. Two exceptions, and only two:
+    //   - a wake owns the card (the countdown is its own honest state);
+    //   - the phone has NO network — that is a fact we hold first-hand, and
+    //     setOffline() renders it as the hollow "Pas de connexion" card.
+    // A verdict that is still fresh is kept (the poll runs silently under it);
+    // once it ages past the staleness guard it is demoted here like the rest.
+    // Idempotent: a second unknown leaves the unknown card alone.
+    if(res.unknown){
+      if(wolSent||remoteWaking)return;
+      if(!navigator.onLine){setOffline();return;}
+      if(!(cardKind==='verdict'&&hasConfirmedState))setUnknown();
+      return;
     }
     // v8.7 asymmetric verdict commit. UP commits green instantly and resets the
     // down streak. DOWN is held: the first live "down" paints orange and fires
@@ -953,6 +991,7 @@ function setRechecking(){
   // AROUND ("the status card is repainted in ~200 ms while the countdown keeps
   // ticking") — it was the bug, not a fixture quirk.
   if(wolSent||remoteWaking){setStarting();return;}
+  cardKind='checking';
   document.getElementById('statusDot').className='status-dot checking';
   document.getElementById('statusCard').className='status-card';
   paintTile('Vérification...','nouvelle tentative…');
@@ -999,10 +1038,28 @@ function probe(){
     function(j){return {up:j.up,relayReachable:true,window:(typeof j.window==='string'?j.window:null),waking:j.waking===true,wakeAgeS:(typeof j.wake_age_s==='number'?j.wake_age_s+((j._rtMs||0)/2000):0),etaS:(typeof j.eta_s==='number'?j.eta_s:0),degraded:j.degraded===true,declared:j.source==='heartbeat'};},
     function(err){
       var relayUp=!!(err&&err.answered);
-      return fetchHomeDirectly().then(
-        function(){return {up:true,relayReachable:relayUp};},
-        function(){return {up:false,relayReachable:relayUp};}
-      );
+      // v8.65 — the direct-home fallback no longer produces a VERDICT.
+      //
+      // IRL bug (2026-07-29, wifi d'une autre box, homelab éteint hors fenêtre):
+      // carte bleue "Éteint (prévu)" → VERT quasi instantané → "Vérification…"
+      // 2,5 s → éteint. The green was a real setOnline(): first cycle on a cold
+      // radio timed out the relay, the fallback fetch *fulfilled*, and that was
+      // promoted to {up:true}.
+      //
+      // A `no-cors` response is OPAQUE: a fulfilled promise says only "something
+      // accepted the TCP/TLS handshake at that name" — it identifies NOTHING. On
+      // a foreign wifi (captive portal, DNS interception) or against the still-
+      // powered box in front of a shut-down host, that "something" is not the
+      // home. Symmetrically, a rejection can be the wifi blocking us rather than
+      // the home being off. Neither direction is evidence, so neither is painted.
+      // The relay stays the ONLY oracle; when it doesn't answer we say we don't
+      // know (see the res.unknown branch in checkStatus).
+      //
+      // Since neither outcome carries information, the fallback fetch is not
+      // made at all on this path: it only bought a HOME_FALLBACK_TIMEOUT_MS wait
+      // before we could admit we don't know. (fetchHomeDirectly survives for the
+      // relay-less mode below, where it is the only oracle there is.)
+      return Promise.resolve({unknown:true,up:false,relayReachable:relayUp});
     }
   );
 }
@@ -1070,6 +1127,7 @@ function setOnline(degraded){
   // settle.
   // Both are treated as "up"; a contradicting probe corrects to red within ~1
   // probe (see hasConfirmedState note).
+  cardKind='verdict';
   document.getElementById('statusDot').className='status-dot online';
   document.getElementById('statusCard').className='status-card online';
   // v8.54 — undo the no-network hide (setOffline may have set it before the
@@ -1107,7 +1165,39 @@ function setOnline(degraded){
   }
 }
 
+// v8.65 — the honest non-answer. Reached when the relay (the only oracle we can
+// authenticate) neither answered nor could be reached. It deliberately looks
+// like NO state: dashed, dimmed, no coloured dot — a card that claims nothing,
+// so it can never be mistaken for the green or the red at a glance.
+//
+// Nothing internal moves: isOnline is left as-is (an unknown does not "turn the
+// server off"), hasConfirmedState stays false, downStreak is untouched and no
+// cache is written. Only the picture changes, and the next poll can still settle
+// it either way.
+//
+// The wake button stays ARMED (same reasoning as v8.53's relay-down case): not
+// knowing is precisely when the family should still be able to act, and a magic
+// packet sent to a host that is already up is ignored by the NIC. The manual-
+// wake link is promoted by setFallbackState() through relayReachable.
+function setUnknown(){
+  cardKind='unknown';
+  document.getElementById('statusDot').className='status-dot unknown';
+  document.getElementById('statusCard').className='status-card unknown';
+  document.getElementById('powerSection').style.display=wolReady()?'flex':'none';
+  // Copy kept short — narrow phones (256-300 px CSS) truncated longer subs in
+  // v8.13/v8.14/v8.54.
+  paintTile('Statut inconnu','relais injoignable');
+  updateVerdictAge();
+  if(wolReady()){
+    var btn=document.getElementById('powerBtn'),lbl=document.getElementById('powerLabel');
+    btn.className='power-btn';lbl.className='power-label';
+    lbl.textContent='Allumer le serveur';
+    setFallbackState();
+  }
+}
+
 function setStarting(){
+  cardKind='wake';
   document.getElementById('statusDot').className='status-dot checking';
   document.getElementById('statusCard').className='status-card';
   paintTile('Démarrage…','réveil en cours');
@@ -1284,6 +1374,7 @@ function setOffline(){
   var noNet=!navigator.onLine;
   var sleeping=!noNet&&(inWin===false||lastDownDeclared);
   var paint=noNet?'nonet':(sleeping?'sleep':'offline');
+  cardKind='verdict';
   document.getElementById('statusDot').className='status-dot '+paint;
   document.getElementById('statusCard').className='status-card '+paint;
   // The wake button is hidden ONLY here: navigator.onLine=false is a fact, not
@@ -1529,6 +1620,16 @@ function onForeground(){
     }
   }
 }
+// v8.65 — react to the ONE thing we know first-hand. Losing the radio used to be
+// noticed only when the next 8 s poll happened to settle, so the card could sit
+// on a green (or on "Statut inconnu") while the phone had no network at all —
+// and recovery waited for the poll too. Both are facts, not verdicts, so they
+// are painted / re-probed at once. Guarded on a wake, which owns the card.
+window.addEventListener('offline',function(){
+  if(!config||wolSent||remoteWaking)return;
+  hasConfirmedState=false;setOffline();
+});
+window.addEventListener('online',function(){if(config)checkStatus();});
 window.addEventListener('focus',onForeground);
 document.addEventListener('visibilitychange',function(){if(!document.hidden)onForeground();});
 // v7.9 — fast-path visibility-transition poll (1 s). Reads document.hidden

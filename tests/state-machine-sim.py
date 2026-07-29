@@ -191,6 +191,14 @@ class Scenario:
     # V8App's confirm-before-red avoids. Pairs with forbid_red_flash=True.
     is_falsered_contrast: bool = False
     horizon: float = 60.0
+    # v8.65 — no green may EVER be painted in this scenario. The IRL false green
+    # (2026-07-29) was a real setOnline() fed by an opaque fallback, so the
+    # forbidden paint is "online", not a colour transition.
+    forbid_online_paint: bool = False
+    # v8.65 — assert RawDownApp (which keeps the shipped opaque direct-home
+    # fallback) paints the green V8App refuses to, so the scenario proves the
+    # fix is load-bearing. Pairs with forbid_online_paint=True.
+    is_opaquegreen_contrast: bool = False
     # If set, an "offline" (red) card paint must land at or before this time.
     # Locks the v8.5 faster-correction (8 s poll): a "just stopped" home must
     # flip to red within ~one poll, not ~15 s — even when a recent cache reused
@@ -248,14 +256,20 @@ class BaseApp:
         # or cache pre-paint). Mirrors app.js lastVerdictAtMs. Far in the past
         # initially so a never-confirmed state can't read as fresh.
         self.last_verdict_at = -1e9
+        self.card_kind = "none"   # v8.65 — see paint()
 
     # ---- paint bookkeeping -------------------------------------------------
     def paint(self, kind):
         self.paints.append((round(self.clock.now, 2), kind))
+        # v8.65 — what the card currently CLAIMS (mirrors cardKind in app.js).
+        # An "unknown" may only overwrite a spinner, an empty card or a STALE
+        # verdict — never a fresh one.
+        if kind not in ("warn-relay", "offline-relay-promoted"):   # cosmetics, not the card
+            self.card_kind = "verdict" if kind in ("online", "offline") else kind
         if kind == "checking":
             if self._orange_start is None:
                 self._orange_start = self.clock.now
-        elif kind in ("online", "offline"):
+        elif kind in ("online", "offline", "unknown"):
             if self._orange_start is not None:
                 self.max_orange = max(self.max_orange, self.clock.now - self._orange_start)
                 self._orange_start = None
@@ -452,9 +466,44 @@ class V8App(BaseApp):
         # yesterday's, the re-probe must show as such).
         if self.has_confirmed_state and (self.clock.now - self.last_verdict_at) > STATUS_LOCAL_TTL:
             self.has_confirmed_state = False
-        if not self.has_confirmed_state:
+        # v8.65 — an "unknown" card is a settled answer of its own, not a
+        # placeholder: don't strobe it back to the orange spinner on every tick.
+        if not self.has_confirmed_state and self.card_kind != "unknown":
             self.paint("checking")
         self._start_probe()
+
+    # v8.65 — the relay is the only oracle we can AUTHENTICATE. The direct-home
+    # fallback is a `no-cors` fetch whose response is OPAQUE: a fulfilled promise
+    # proves only that *something* completed a handshake at that name (a captive
+    # portal on a foreign wifi, or the still-powered box in front of a shut-down
+    # host), and a rejection can be the wifi blocking us rather than the home
+    # being off. Neither direction is evidence, so the fallback is not attempted
+    # at all here and the probe settles UNKNOWN — immediately, since waiting
+    # HOME_TIMEOUT only delays admitting we don't know. This is the IRL false
+    # green of 2026-07-29; see the opaque-green contrast in main().
+    def _relay_failed(self, gen, answered):
+        self._settle_unknown(gen, relay_ok=answered)
+
+    def _settle_unknown(self, gen, relay_ok):
+        if gen != self.probe_gen:
+            return  # superseded by a newer probe (resume race) — drop it
+        self.checking = False
+        # The relay-down cosmetic debounces exactly as on a settled probe.
+        if relay_ok:
+            eff, self.relay_miss_streak = True, 0
+        else:
+            self.relay_miss_streak += 1
+            eff = not (self.relay_miss_streak >= RELAY_DOWN_MISSES or not self.relay_reachable)
+        was_reachable, self.relay_reachable = self.relay_reachable, eff
+        if not eff and was_reachable:
+            self.paint("offline-relay-promoted")
+        # Nothing else moves: no verdict, no cache, no down_streak, no
+        # has_confirmed_state — an unknown is not a state, it is the absence of
+        # one. Only the picture changes, and only when the alternative is
+        # spinning on "Vérification…" indefinitely.
+        stale_verdict = self.card_kind == "verdict" and not self.has_confirmed_state
+        if self.card_kind in ("none", "checking") or stale_verdict:
+            self.paint("unknown")
 
     def _on_clock_jump(self):
         # v8.10 — the 1 s poll notices Date.now() jumped > SLEEP_JUMP_MS and
@@ -484,8 +533,10 @@ class V8App(BaseApp):
             self._settle(gen, up=up, relay_ok=True)
             return
         # Relay failed. answered → alive but degraded (keep reachable);
-        # transport → unreachable. Either way, one direct-home fallback.
-        self._probe_home(gen, relay_ok=answered)
+        # transport → unreachable. What happens next is version-specific: the
+        # baselines fall back to the direct-home probe and promote its result to
+        # a verdict; V8App (v8.65) refuses to — see its override.
+        self._relay_failed(gen, answered)
 
     def _probe_home(self, gen, relay_ok):
         out = self._next_home()
@@ -538,6 +589,12 @@ class RawDownApp(V8App):
 
     # Shipped behaviour: a stale cached "down" pre-painted a confident red.
     PRE_PAINT_DOWN = "offline"
+
+    # ...and the shipped opaque direct-home fallback, promoted to a verdict.
+    # This is what makes RawDownApp the contrast baseline for the v8.65
+    # opaque-green scenarios: it paints the false green V8App now refuses to.
+    def _relay_failed(self, gen, answered):
+        self._probe_home(gen, relay_ok=answered)
 
     def _settle(self, gen, up, relay_ok):
         if gen != self.probe_gen:
@@ -633,6 +690,9 @@ def evaluate(app, scenario):
         issues.append(f"unexpected RED at {[p[0] for p in red]}")
     if scenario.forbid_warn_flash and warn:
         issues.append(f"unexpected WARN at {[p[0] for p in warn]}")
+    green = [p for p in app.paints if p[1] == "online"]
+    if scenario.forbid_online_paint and green:
+        issues.append(f"unexpected GREEN at {[p[0] for p in green]}")
     if scenario.forbid_checking_paint and checking:
         issues.append(f"unexpected CHECKING paint at {[p[0] for p in checking]}")
     if app.is_online != scenario.expect_final_online:
@@ -688,21 +748,31 @@ SCENARIOS = [
         horizon=40.0,
     ),
     Scenario(
-        # Relay transport-fails (timeout) on EVERY probe, home is up → green,
-        # and the relay-down warn appears only after the debounce confirms it
-        # (RELAY_DOWN_MISSES=3 consecutive misses). Detection survives a GCP
-        # relay outage. Each miss settles ≈ PROBE+HOME ≈ 8.3 s (home up, fast
-        # fallback). The 8 s probe timeout exceeds the 8 s tick, so a tick fired
-        # mid-probe is skipped and the effective re-probe cadence is ~16 s; misses
-        # at ~8 / ~24 / ~40 s → the 3rd confirms the warn → horizon > ~40 s.
-        # Green (home up) throughout.
-        name="relay-timeout-fallback-home-up",
+        # v8.65 THE FIX — the IRL false green of 2026-07-29. Foreign wifi, home
+        # OFF and outside its uptime window; the relay times out on the cold
+        # radio, and the direct-home `no-cors` fallback FULFILLS anyway (captive
+        # portal / DNS interception / the still-powered box answering :443 in
+        # front of a shut-down host). The shipped code promoted that opaque
+        # response to {up:true} → a real green card, refuted 8 s later by the
+        # warmed relay ("Vérification…" 2,5 s, then Éteint). The user's report:
+        # "elle affiche éteint, puis vert quasi instantanément, puis vérification
+        # 2s et ensuite éteint".
+        #
+        # The property: an opaque fallback NEVER paints green. The card admits
+        # "Statut inconnu" and the relay-down warn still hardens on the 3rd
+        # consecutive miss. NOTE the tape says the home fallback SUCCEEDS — the
+        # scenario is only meaningful that way, since that success is exactly the
+        # false evidence. is_opaquegreen_contrast proves RawDownApp still paints
+        # the green here.
+        name="opaque-fallback-must-not-paint-green",
         relay_outcomes=[FetchOutcome(None, ok=False)],
-        home_outcomes=[FetchOutcome(0.3, ok=True)],
-        expect_final_online=True,
+        home_outcomes=[FetchOutcome(0.3, ok=True)],   # opaque fulfil = NOT evidence
+        expect_final_online=False,
         expect_final_relay_reachable=False,
+        forbid_online_paint=True,
         forbid_red_flash=True,
         forbid_warn_flash=False,
+        is_opaquegreen_contrast=True,
         horizon=45.0,
     ),
     Scenario(
@@ -727,50 +797,60 @@ SCENARIOS = [
         horizon=20.0,
     ),
     Scenario(
-        # Both relay and home down → a GENUINE total outage still reaches red.
-        # v8.7 cost: each probe cycle is PROBE+HOME ≈ 13 s, and DOWN_CONFIRM=2
-        # means two of them (+ the 2.5 s re-probe gap) before red ≈ 28.5 s of
-        # honest orange. That's the deliberate trade for never flashing a false
-        # red — and it's still better than the v7 cascade (~31 s, see contrast).
-        # The relay warn hardens once the 3rd consecutive miss lands. Not a
-        # "bounded ≤13 s" property anymore (v8.6 had that but at the price of the
-        # false red); the property here is "a real outage converges to red".
-        name="relay-and-home-down-confirms-red",
+        # Relay unreachable, home unreachable too. v8.65 changes what this MEANS
+        # on screen: with the relay silent there is no oracle we can trust, so
+        # the honest card is "Statut inconnu" — NOT the red "Hors ligne" v8.7
+        # converged to. That old red was the mirror image of the false green: the
+        # home fallback timing out on a foreign wifi or a captive portal says
+        # nothing about the home either. The relay warn still hardens on the 3rd
+        # consecutive miss, and the promoted manual-wake link carries the
+        # actionable half. A real "the home is off" red still comes from the one
+        # source that can prove it: the relay answering up:false (see
+        # cold-launch-server-off-fast).
+        name="relay-and-home-down-shows-unknown-not-red",
         relay_outcomes=[FetchOutcome(None, ok=False)],
         home_outcomes=[FetchOutcome(None, ok=False)],
         expect_final_online=False,
         expect_final_relay_reachable=False,
-        forbid_red_flash=False,
+        forbid_online_paint=True,
+        forbid_red_flash=True,
         forbid_warn_flash=False,
-        max_orange_s=29.0,
+        max_orange_s=9.0,
         is_contrast=True,
         horizon=50.0,
     ),
     Scenario(
-        # Relay ANSWERS degraded (503 STATUS_TARGET_URL unset / 404 legacy),
-        # home up → green, NO warn, relay stays reachable (wake button enabled).
-        name="relay-answered-degraded-server-up",
+        # Relay ANSWERS degraded (503 STATUS_TARGET_URL unset / 404 legacy) —
+        # the process is alive and /wol still works, but the ORACLE is off. The
+        # home happens to be up, and the opaque fallback would "confirm" it —
+        # v8.65 still refuses (it cannot tell that fulfil from a captive
+        # portal's). Card: "Statut inconnu", relay stays reachable, wake button
+        # armed. The cost is explicit: an admin misconfiguration now READS as a
+        # misconfiguration instead of being papered over by a guess that happens
+        # to be right on a home wifi and wrong everywhere else.
+        name="relay-answered-degraded-shows-unknown",
         relay_outcomes=[FetchOutcome(0.3, ok=False, answered=True)],
         home_outcomes=[FetchOutcome(0.3, ok=True)],
-        expect_final_online=True,
+        expect_final_online=False,
         expect_final_relay_reachable=True,
+        forbid_online_paint=True,
         forbid_red_flash=True,
         forbid_warn_flash=True,
         horizon=5.0,
     ),
     Scenario(
-        # Degraded oracle, home actually down → red (server down) but NO warn
-        # and relay stays reachable so the user can still fire a WoL. The IRL
-        # "red relay + WoL gone while it was fine" case.
-        name="relay-answered-degraded-server-down",
+        # Same degraded oracle, home actually down. Symmetry check: v8.65 must
+        # not paint red here either — being right by luck is still a guess. The
+        # wake button stays armed (relay reachable), which is the one thing the
+        # user needs, and a magic packet to an already-up host is harmless.
+        name="relay-answered-degraded-home-down-still-unknown",
         relay_outcomes=[FetchOutcome(0.3, ok=False, answered=True)],
         home_outcomes=[FetchOutcome(None, ok=False)],
         expect_final_online=False,
         expect_final_relay_reachable=True,
-        forbid_red_flash=False,
+        forbid_online_paint=True,
+        forbid_red_flash=True,
         forbid_warn_flash=True,
-        # v8.7: each cycle is answered(0.3)+home-timeout(5) ≈ 5.3 s, ×2 confirms
-        # (+2.5 s gap) → red ≈ 13 s, so the horizon must outlast that.
         horizon=16.0,
     ),
     Scenario(
@@ -1028,6 +1108,7 @@ def main():
     v8_pass = True
     contrast_ok = True
     falsered_ok = True
+    opaque_ok = True
     for sc in SCENARIOS:
         print(f"\n## {sc.name}")
         v8 = evaluate(run(sc, V8App), sc)
@@ -1054,6 +1135,18 @@ def main():
                       f"(v8.7 avoids it)")
         # Cold-radio contrast: the v7 cascade must do measurably worse — longer
         # orange and/or a forbidden paint v8 avoids.
+        # v8.65 opaque-green contrast: the shipped opaque direct-home fallback
+        # (RawDownApp) must paint the false green that V8App now refuses to.
+        if sc.is_opaquegreen_contrast:
+            raw = evaluate(run(sc, RawDownApp), sc)
+            if not any(i.startswith("unexpected GREEN") for i in raw["issues"]):
+                opaque_ok = False
+                print(f"  [opaquegreen] FAIL  expected RawDown to paint the false green, "
+                      f"but none seen — paints: {fmt_paints(raw['paints'])}")
+            else:
+                greens = [t for t, k in raw["paints"] if k == "online"]
+                print(f"  [opaquegreen] OK    RawDown paints the false green at {greens} "
+                      f"(v8.65 paints 'unknown' instead)")
         if sc.is_contrast:
             old = evaluate(run(sc, OldCascadeApp), sc)
             old_worse = bool(old["issues"]) or old["max_orange"] > v8["max_orange"]
@@ -1070,9 +1163,11 @@ def main():
     print(f"v8.7 fixed: {'all scenarios PASS' if v8_pass else 'AT LEAST ONE SCENARIO FAILED'}")
     print(f"False-red (v8.7 avoids the red RawDown flashes): "
           f"{'confirmed' if falsered_ok else 'BROKEN — see [falsered] lines'}")
+    print(f"Opaque fallback (v8.65 refuses the green RawDown paints): "
+          f"{'confirmed' if opaque_ok else 'BROKEN — see [opaquegreen] lines'}")
     print(f"Contrast (v8 better than v7 on cold-radio): "
           f"{'confirmed' if contrast_ok else 'BROKEN — see [contrast] lines'}")
-    return 0 if (v8_pass and contrast_ok and falsered_ok) else 1
+    return 0 if (v8_pass and contrast_ok and falsered_ok and opaque_ok) else 1
 
 
 if __name__ == "__main__":

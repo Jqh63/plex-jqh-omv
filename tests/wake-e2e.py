@@ -124,6 +124,7 @@ def card(page):
     return page.evaluate(
         """() => ({
         label: document.getElementById('statusLabel').innerText,
+        sub: document.getElementById('statusSub').innerText,
         dot: document.getElementById('statusDot').className,
         card: document.getElementById('statusCard').className,
         power: document.getElementById('powerLabel').innerText,
@@ -395,6 +396,52 @@ def scenario_failed_wake_promotes_the_manual_page(p):
     return ok
 
 
+def scenario_failed_wake_says_contact_admin(p):
+    """v8.68 — the POSITIVE CONTROL for the alarming red, which now has exactly one
+    cause: a wake that was attempted and failed.
+
+    The red used to be reached by any down the app could not explain as "orderly",
+    where "orderly" meant the relay's last-gasp — a signal that expires after
+    HEARTBEAT_TTL_S = 45 s. So the nominal evening shutdown (gated on the AM5, so it
+    usually lands INSIDE the uptime window) was calm blue for forty-five seconds and
+    then told the family to call the admin for the rest of the night. That half is
+    pinned in cold-radio-e2e (`unexplained-down-stays-calm-no-admin-shout`), which
+    never fires a wake and must therefore never see the red; this is the other half,
+    and without it "no red" could be passed by deleting the state altogether.
+
+    Same 401 as the scenario above (settles in one round-trip); the transport
+    failure and the 5-min timeout set the same `wakeFailed`.
+    """
+    print("\n## failed-wake-says-contact-admin (v8.68)")
+    counters = {"relay": 0, "home": 0, "wol": 0}
+
+    b = getattr(p, ENGINE).launch()
+    ctx = b.new_context(viewport={"width": 390, "height": 844})
+    page = ctx.new_page()
+    page.route("**/*", _mk_handler(counters, lambda n: "down", lambda n: "fail",
+                                   wol_status=401))
+    page.goto(PWA_URL, wait_until="load")
+    page.wait_for_selector("#statusLabel", state="attached", timeout=10000)
+    page.wait_for_timeout(3000)
+
+    before = card(page)
+    print(f"  down, no wake attempted → {before['label']!r} / {before['sub']!r}")
+    ok = check("a plain down is calm and does not name the admin",
+               not is_red(before) and "administrateur" not in before["sub"],
+               f"card={before['card']!r} sub={before['sub']!r}")
+
+    page.click("#powerBtn")
+    page.wait_for_timeout(1500)
+    after = card(page)
+    print(f"  wake refused (401) → {after['label']!r} / {after['sub']!r}")
+    ok &= check("a FAILED wake turns the card red", is_red(after),
+                f"card={after['card']!r} dot={after['dot']!r}")
+    ok &= check("and only then does it say to contact the admin",
+                "administrateur" in after["sub"], f"sub={after['sub']!r}")
+    b.close()
+    return ok
+
+
 def main():
     print("=" * 72)
     print(f"WAKE-path E2E (v8.31 + v8.32) — engine={ENGINE} base={PWA_BASE}")
@@ -410,6 +457,7 @@ def main():
         ok &= scenario_stale_remote_wake_on_resume(p)
         ok &= scenario_remote_wake_outlives_the_waking_signal(p)
         ok &= scenario_failed_wake_promotes_the_manual_page(p)
+        ok &= scenario_failed_wake_says_contact_admin(p)
 
     print("\n" + "=" * 72)
     print("ALL PASS" if ok else "FAILURES — see above")

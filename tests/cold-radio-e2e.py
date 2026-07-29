@@ -173,6 +173,20 @@ def is_red(s):
     return "offline" in s["dotClass"] or "offline" in s["cardClass"]
 
 
+def is_down(s):
+    # v8.68 — "the app has COMMITTED a down verdict", whatever colour it wears.
+    # Most scenarios here are about CONVERGENCE (does a stale green get demoted?
+    # does the watchdog reclaim a wedged check? does resume re-probe?) and they
+    # used is_red as the shorthand for "settled on down" — which silently made
+    # them assertions about the palette too. Since the alarming red is now
+    # reserved for a FAILED WAKE and this suite never fires one, every one of
+    # them would fail for a reason that has nothing to do with what it tests.
+    # The colour rule itself is pinned separately, by the two scenarios that
+    # exist for it (`unexplained-down-stays-calm-no-admin-shout` here, and
+    # `failed-wake-says-contact-admin` in wake-e2e.py).
+    return is_red(s) or is_sleep(s)
+
+
 def is_warn(s):
     # Both "warn" (server up, relay down) and "promoted" (server down, relay
     # down) signal "relay unavailable" to the user — same visual semantics.
@@ -401,6 +415,7 @@ def run_scenario(p, name, relay_plan, home_plan, sample_delays_s, preseed_cache=
         "name": name,
         "interception_lost": _iflag["lost"],
         "red_at": [t for t, s in samples if is_red(s)],
+        "down_at": [t for t, s in samples if is_down(s)],
         "warn_at": [t for t, s in samples if is_warn(s)],
         "green_at": [t for t, s in samples if is_green(s)],
         "checking_at": [t for t, s in samples if is_checking(s)],
@@ -413,6 +428,7 @@ def run_scenario(p, name, relay_plan, home_plan, sample_delays_s, preseed_cache=
         "final_sleep": is_sleep(final),
         "final_green": is_green(final),
         "final_red": is_red(final),
+        "final_down": is_down(final),
         "final_warn": is_warn(final),
         "final_wol_disabled": is_wol_disabled(final),
         "final_sub": final["statusSub"],
@@ -498,9 +514,11 @@ def run_resume_scenario(p, name, relay_plan, fg_event, bg_at_s, fg_at_s, sample_
         "name": name,
         "interception_lost": _iflag["lost"],
         "red_at": [t for t, s in samples if is_red(s)],
+        "down_at": [t for t, s in samples if is_down(s)],
         "green_at": [t for t, s in samples if is_green(s)],
         "final_green": is_green(final),
         "final_red": is_red(final),
+        "final_down": is_down(final),
         "counters": dict(counters),
     }
 
@@ -573,6 +591,7 @@ def run_clockjump_scenario(p):
         # stale confident green (orange or already red are both honest).
         "demoted_early": not is_green(samples[0][1]),
         "final_red": is_red(final),
+        "final_down": is_down(final),
         "final_green": is_green(final),
         "counters": dict(counters),
     }
@@ -637,6 +656,7 @@ def run_watchdog_scenario(p):
         "interception_lost": _iflag["lost"],
         "pre_green": is_green(pre),
         "final_red": is_red(post),
+        "final_down": is_down(post),
         "final_green": is_green(post),
         "counters": dict(counters),
     }
@@ -661,11 +681,11 @@ def collect_results():
         r2 = run_scenario(p, "cold-launch-server-off-fast",
                           relay_plan=lambda n: "down", home_plan=lambda n: "ok",
                           sample_delays_s=[1, 3])
-        ok2 = (bool(r2["red_at"]) and r2["red_at"][0] <= 3 and not r2["green_at"]
+        ok2 = (bool(r2["down_at"]) and r2["down_at"][0] <= 3 and not r2["green_at"]
                and not r2["warn_at"] and bool(r2["checking_at"])
                and 1 in r2["button_checking_at"])
         results.append(("cold-launch-server-off-fast", ok2, r2,
-                        "orange card+button (T+1) then red ≤T+3, no green, no warn"))
+                        "orange card+button (T+1) then a committed down ≤T+3, no green"))
 
         # v8.2: a sustained relay failure stays optimistic until RELAY_DOWN_MISSES
         # (3) consecutive misses. With instant-abort, misses land one poll apart,
@@ -711,17 +731,17 @@ def collect_results():
         # v8.7: the reused green is held, then a "down" verdict shows orange (the
         # confirm re-probe) before committing red — green→orange→red, never the
         # bare green→red flash. checking_at catches the orange phase.
-        r5 = run_scenario(p, "cache-up-server-down-corrects-red",
+        r5 = run_scenario(p, "cache-up-server-down-corrects",
                           relay_plan=lambda n: "down", home_plan=lambda n: "ok",
                           sample_delays_s=[0, 1, 3], preseed_cache={"up": True, "relayOk": True})
         # v8.7 follow-up: the button must NOT stay a confident green while the
         # card is orange — it goes to the neutral "Vérification…" button at T+1
         # (the user's exact feedback: button green while a check is in progress).
-        ok5 = (r5["final_red"] and bool(r5["red_at"]) and r5["red_at"][0] <= 3
+        ok5 = (r5["final_down"] and bool(r5["down_at"]) and r5["down_at"][0] <= 3
                and bool(r5["checking_at"]) and 1 in r5["button_checking_at"]
                and 1 not in r5["button_confident_at"])
-        results.append(("cache-up-server-down-corrects-red", ok5, r5,
-                        "reused green → orange card+button → red ≤T+3 (button not green during check)"))
+        results.append(("cache-up-server-down-corrects", ok5, r5,
+                        "reused green → orange card+button → committed down ≤T+3 (button not green during check)"))
 
         # v8.6 — a cache up + a server still up: the reused green pre-paint is
         # confirmed by the live probe (no red/warn). Guards against the reuse
@@ -757,21 +777,22 @@ def collect_results():
         results.append(("relay-degraded-home-down-still-unknown", ok7, r7,
                         "unknown, no red/warn, WoL enabled"))
 
-        r8 = run_resume_scenario(p, "resume-focus-only-converges-red",
+        r8 = run_resume_scenario(p, "resume-focus-only-converges-down",
                                  relay_plan=lambda n: "up" if n == 1 else "down",
                                  fg_event="focus", bg_at_s=3, fg_at_s=6,
                                  sample_delays_s=[1, 3], preseed_cache={"up": True, "relayOk": True})
-        ok8 = r8["final_red"] and not r8["final_green"]
-        results.append(("resume-focus-only-converges-red", ok8, r8,
-                        "red after focus, NOT frozen green"))
+        ok8 = r8["final_down"] and not r8["final_green"]
+        results.append(("resume-focus-only-converges-down", ok8, r8,
+                        "committed down after focus, NOT frozen green"))
 
-        r9 = run_resume_scenario(p, "resume-no-event-self-heals-red",
+        r9 = run_resume_scenario(p, "resume-no-event-self-heals-down",
                                  relay_plan=lambda n: "up" if n == 1 else "down",
                                  fg_event="none", bg_at_s=3, fg_at_s=6,
                                  sample_delays_s=[3], preseed_cache={"up": True, "relayOk": True})
-        ok9 = r9["final_red"] and not r9["final_green"] and bool(r9["red_at"]) and r9["red_at"][0] <= 3
-        results.append(("resume-no-event-self-heals-red", ok9, r9,
-                        "red ≤ fg+3 s via 1 s visibility poll"))
+        ok9 = (r9["final_down"] and not r9["final_green"]
+               and bool(r9["down_at"]) and r9["down_at"][0] <= 3)
+        results.append(("resume-no-event-self-heals-down", ok9, r9,
+                        "committed down ≤ fg+3 s via 1 s visibility poll"))
 
         # v8.1 payoff: a lone relay transport miss (slow-but-alive e2-micro /
         # last-mile blip) then recovery on the next tick must NEVER paint the
@@ -790,15 +811,15 @@ def collect_results():
         # clock-jump detector is the only wake signal. Stale green must demote
         # (orange or red) within ~1 detector tick and converge to red.
         r9b = run_clockjump_scenario(p)
-        ok9b = (r9b["pre_green"] and r9b["demoted_early"] and r9b["final_red"]
+        ok9b = (r9b["pre_green"] and r9b["demoted_early"] and r9b["final_down"]
                 and not r9b["final_green"])
         results.append(("clockjump-wake-stale-green-demoted", ok9b, r9b,
-                        "clock jump alone demotes stale green → red, no event needed"))
+                        "clock jump alone demotes stale green → committed down, no event needed"))
 
         r11 = run_watchdog_scenario(p)
-        ok11 = r11["pre_green"] and r11["final_red"] and not r11["final_green"]
+        ok11 = r11["pre_green"] and r11["final_down"] and not r11["final_green"]
         results.append(("watchdog-reclaims-wedged-checking", ok11, r11,
-                        "wedged checking reclaimed on re-probe → red, not frozen green"))
+                        "wedged checking reclaimed on re-probe → committed down, not frozen green"))
 
         # The relay's /status carries extra JSON fields (stale/age_s) from its
         # server-side SWR cache. app.js keys only on the `up` boolean and ignores
@@ -971,20 +992,26 @@ def collect_results():
         results.append(("up-degraded-sub-label", ok17, r17,
                         "green card with 'services en démarrage…' sub"))
 
-        # v8.54 — the red card INSTRUCTS instead of describing. Unexplained
-        # silence is the one thing the family cannot act on alone, so the sub
-        # tells them the only useful thing: report it. A relay we cannot reach
-        # lands here too (probe() resolves up:false on a relay miss), which is
-        # deliberate — a broken relay is a real problem, not a shrug.
-        # Fails on v8.53, which said "serveur éteint".
-        r18 = run_scenario(p, "unexplained-down-says-contact-admin",
+        # v8.68 — the INVERSE of what v8.54 pinned here, and the reason this
+        # scenario is worth keeping: a down nobody can explain, INSIDE the uptime
+        # window, must stay the calm blue "Éteint" and must NOT tell the family
+        # to call the admin. That red was reached by the nominal evening
+        # shutdown every night, 45 s after it happened (the relay's last-gasp
+        # `declared` expires with HEARTBEAT_TTL_S, so "orderly" decays into
+        # "silence" on its own). Escalation is now keyed on a wake that actually
+        # FAILED — a wake path, so its positive control lives in wake-e2e.py
+        # (`failed-wake-says-contact-admin`), not here: this suite never fires
+        # one, which is exactly why the red must be unreachable from it.
+        # Fails on v8.54-v8.67, which painted the red here.
+        r18 = run_scenario(p, "unexplained-down-stays-calm-no-admin-shout",
                            relay_plan=lambda n: "down", home_plan=lambda n: "fail",
                            sample_delays_s=[3, 4],
                            url_extra="&window=" + _window_excluding_now(inside=True))
-        ok18 = (r18["final_red"] and not r18["final_sleep"]
-                and "administrateur" in r18["final_sub"])
-        results.append(("unexplained-down-says-contact-admin", ok18, r18,
-                        "unexplained silence → red card instructing to contact the admin"))
+        ok18 = (r18["final_sleep"] and not r18["final_red"]
+                and "administrateur" not in r18["final_sub"]
+                and "teint" in r18["final_label"])
+        results.append(("unexplained-down-stays-calm-no-admin-shout", ok18, r18,
+                        "unexplained down in-window → calm blue, no call-the-admin"))
 
         # v8.54 — the two blue states collapsed into one. A scheduled stop and a
         # declared stop asked for the SAME user action (press the button); only
@@ -1026,14 +1053,14 @@ def collect_results():
         # The other half. Also pins that the relay-down WARN never fires here:
         # there is no relay to be down, and telling a forker his relay is
         # unreachable when he never configured one is a lie the UI must not tell.
-        r21 = run_scenario(p, "no-relay-home-down-reds-without-relay-warn",
+        r21 = run_scenario(p, "no-relay-home-down-commits-without-relay-warn",
                            relay_plan=lambda n: "up", home_plan=lambda n: "fail",
                            sample_delays_s=[3, 5], no_relay=True,
                            url_extra="&window=" + _window_excluding_now(inside=True))
-        ok21 = (r21["final_red"] and not r21["final_green"] and not r21["final_warn"]
+        ok21 = (r21["final_down"] and not r21["final_green"] and not r21["final_warn"]
                 and r21["counters"]["relay"] == 0)
-        results.append(("no-relay-home-down-reds-without-relay-warn", ok21, r21,
-                        "no relay + home unreachable → red, never the relay-down warn"))
+        results.append(("no-relay-home-down-commits-without-relay-warn", ok21, r21,
+                        "no relay + home unreachable → committed down, never the relay-down warn"))
 
         # And the wake button must be HIDDEN, not offered-then-broken: wolReady()
         # requires a relay + token, so there is no way to wake anything. Pinning

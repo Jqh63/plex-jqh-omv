@@ -6,18 +6,22 @@ var relayReachable=true;
 // apps per OS with their parameters pre-filled), so a failed wake must lead
 // them there instead of leaving them on a dead power button. Cleared by a
 // successful wake / any green settle, and by a fresh tap.
-var wakeFailed=false;
-// v8.53 — true when the committed "down" came from the home's OWN last-gasp
-// (heartbeat up=false at clean shutdown, `source: "heartbeat"`), as opposed to
-// a probe that simply stopped getting answers. The distinction is free — a
-// crashed home cannot post "I'm dead", so a last-gasp means an ORDERLY stop and
-// silence means something went wrong — and it fixes an alarm that cried wolf
-// nightly: the home's shutdown is gated on the AM5 being on, not on the clock
-// alone, so it very often stops INSIDE its uptime window (8 of the last 14
-// shutdowns in the relay log, most of them around 22h30). The card keyed its
-// wording on the window alone, so every one of those normal stops was painted
-// the alarming red "Hors ligne" reserved for outages.
-var lastDownDeclared=false;
+// v8.68 — wakeFailed is now the SOLE input to the alarming red (see setOffline).
+//
+// It used to be `lastDownDeclared`: the relay's `source==='heartbeat'` told us a
+// down was the home's own last-gasp (orderly) rather than silence (anomaly), and
+// only silence earned the red. That split is unusable in practice — the relay's
+// HEARTBEAT_TTL_S is 45 s, so a stop is "declared" for forty-five seconds and
+// silent forever after. The nominal evening shutdown (gated on the AM5, so it
+// lands INSIDE the uptime window most nights, ~22h30) was therefore painted the
+// calm blue for 45 s and then the alarming "Hors ligne — contacte
+// l'administrateur" for the rest of the night, on every open. The mechanism
+// written to stop the nightly wolf-cry was 45 s wide.
+//
+// The replacement asks the only question the family can act on: did the WAKE
+// fail? A server that is off is just off — the button below the card is the
+// answer, whatever the reason. Escalating to "contacte l'administrateur" is
+// warranted exactly when that button has been pressed and did not work.
 // v8.2 — N-consecutive-miss debounce on the relay-DOWN cosmetic only. A relay
 // /status transport failure is most often a slow-but-alive e2-micro (cold
 // burstable CPU spanning more than one 15 s tick) or a last-mile blip, NOT a
@@ -714,7 +718,7 @@ function startApp(){
   buildLinks();
   clearWolPoll();
   releaseWakeLock();
-  isOnline=false;wolSent=false;remoteWaking=false;checking=false;checkStartedAt=0;relayReachable=true;relayMissStreak=0;hasConfirmedState=false;wakeFailed=false;lastDownDeclared=false;cardKind='none';
+  isOnline=false;wolSent=false;remoteWaking=false;checking=false;checkStartedAt=0;relayReachable=true;relayMissStreak=0;hasConfirmedState=false;wakeFailed=false;cardKind='none';
   // v8.28 — restore the persisted relay-served ETA so a wake fired right after an
   // offline open still seeds a shared-value countdown before the first poll lands.
   relayEtaMs=(config&&typeof config.eta==='number'&&config.eta*1000>=BOOT_MIN_MS&&config.eta*1000<=BOOT_MAX_MS)?config.eta*1000:0;
@@ -1020,8 +1024,9 @@ function checkStatus(){
       // shutdown last-gasp), not a flaky probe: commit red at once instead of
       // the orange re-confirmation detour. Covers "extinction avec app ouverte"
       // — the card flips to Éteint on the next poll, no Vérification… dance.
+      // v8.68 — `declared` keeps THIS job (skip the orange detour) and only this
+      // one: it no longer feeds the card's colour, which now keys on wakeFailed.
       downStreak=DOWN_CONFIRM;
-      lastDownDeclared=res.declared===true;
       writeLocalStatus(false,relayReachable);
       setOffline();
     }else{
@@ -1168,7 +1173,7 @@ function setOnline(degraded){
   isOnline=true;
   remoteWaking=false;
   // The home is up — however it got there. Any earlier wake failure is moot.
-  wakeFailed=false;lastDownDeclared=false;
+  wakeFailed=false;
   hasConfirmedState=true;
   lastVerdictAtMs=Date.now();
   // v8.7 — green cancels any in-progress down-confirmation (streak + pending
@@ -1360,7 +1365,7 @@ function postWol(){
     body:JSON.stringify({mac:macToColon(config.mac)})
   }).then(function(r){
     if(r.ok)return;
-    wolSent=false;wolStartTime=0;wakeFailed=true;lastDownDeclared=false;stopCountdown();clearWolPoll();releaseWakeLock();
+    wolSent=false;wolStartTime=0;wakeFailed=true;stopCountdown();clearWolPoll();releaseWakeLock();
     // v8.53 — name the case. These are genuinely different situations for the
     // reader: 401/403 and 502 are the admin's problem and retrying is pointless,
     // 429 clears on its own, and only "réessaie" is honest for the rest.
@@ -1373,7 +1378,7 @@ function postWol(){
     showToast('⚠ '+msg,true,TOAST_LONG_MS);
     setOffline();
   }).catch(function(){
-    wolSent=false;wolStartTime=0;wakeFailed=true;lastDownDeclared=false;stopCountdown();clearWolPoll();releaseWakeLock();
+    wolSent=false;wolStartTime=0;wakeFailed=true;stopCountdown();clearWolPoll();releaseWakeLock();
     // Flip relayReachable manually — a checkStatus() right now would race
     // the WoL POST, and we already know the relay just failed. This is a
     // CONFIRMED failure (the user actually tried to wake), so bypass the
@@ -1413,24 +1418,25 @@ function setOffline(){
   // v8.12 — the expected sleep also gets its own calm blue card/dot style
   // instead of the alarming outage red.
   var inWin=inUptimeWindow();
-  // v8.53 — calm blue for ANY orderly stop, not just one the clock predicted.
-  // A declared down (last-gasp) is orderly by construction; only silence is an
-  // anomaly worth the alarming red. See lastDownDeclared.
   // v8.54 — three painted states instead of four, on ONE rule: the colour now
   // answers "what do I do?", not "what is the internal state?".
   //   hollow  — the PHONE has no network. The app knows nothing and no tap can
   //             help, so the card is unlit and the button is hidden.
-  //   blue    — off as EXPECTED (outside the window, or a declared last-gasp
-  //             stop). One state now, not two: both meant the same user action
-  //             (press the button); only the auto-wake time differed, so that
-  //             moved into the sub, shown when known.
-  //   red     — UNEXPECTED. Reserved for silence we cannot explain, and it no
-  //             longer describes, it INSTRUCTS: "contacte l'administrateur".
-  //             A relay we cannot reach lands here by construction (probe() at
-  //             probe() resolves up:false when the relay misses), which is right:
-  //             a broken relay IS a real problem worth reporting, not a shrug.
+  //   blue    — off. The button below IS the answer.
+  //   red     — the button was pressed and the wake FAILED. Only then does the
+  //             app INSTRUCT: "contacte l'administrateur".
+  // v8.68 — the blue/red split no longer tries to guess whether a stop was
+  // "orderly". It couldn't: the only evidence for that (the relay's last-gasp,
+  // `declared`) lives 45 s (HEARTBEAT_TTL_S), so every nominal evening shutdown
+  // turned red a minute later and told the family to call the admin about a
+  // server that had simply gone to bed. And the guess was never actionable
+  // anyway — off is off, and pressing the button is the same gesture either way.
+  // What IS actionable is a wake that didn't work: that, and only that, is worth
+  // escalating. A relay we cannot reach no longer lands on the red by itself —
+  // it shows the honest "Statut inconnu" (setUnknown) until a tap actually
+  // fails, which is when it starts costing the family something.
   var noNet=!navigator.onLine;
-  var sleeping=!noNet&&(inWin===false||lastDownDeclared);
+  var sleeping=!noNet&&!wakeFailed;
   var paint=noNet?'nonet':(sleeping?'sleep':'offline');
   cardKind='verdict';
   document.getElementById('statusDot').className='status-dot '+paint;
@@ -1453,12 +1459,15 @@ function setOffline(){
     // v8.15 — "En veille" implied a suspend; the box actually powers OFF
     // (autoshutdown + RTC wake). "Éteint" matches reality while the blue card
     // keeps the calm "this is expected" framing.
-    // v8.54 — sub carries the auto-wake time when the schedule knows it, the
-    // plain fact otherwise. Keep it short: v8.13/v8.14 both had to cut copy
-    // that wrapped on narrow phones (S24) once Android font scaling kicked in.
-    paintTile('Éteint',(inWin===false)
-      ?'réveil auto à '+windowStartLabel()
-      :'arrêt normal du serveur');
+    // v8.54 — sub carries the auto-wake time when the schedule knows it.
+    // v8.68 — and NOTHING otherwise. It used to say "arrêt normal du serveur",
+    // which was only ever backed by the 45 s last-gasp; now that this blue also
+    // covers stops we cannot explain, asserting "normal" would be inventing.
+    // Silence costs nothing here — the button underneath already reads
+    // "Allumer le serveur", which is the whole of what the family has to do.
+    // Keep any copy short: v8.13/v8.14 both had to cut subs that wrapped on
+    // narrow phones (S24) once Android font scaling kicked in.
+    paintTile('Éteint',(inWin===false)?'réveil auto à '+windowStartLabel():'');
   }else{
     paintTile('Hors ligne','contacte l\'administrateur');
   }
@@ -1521,7 +1530,7 @@ function sendWol(){
   wolPollTimer=setInterval(function(){
     if(!wolSent||isOnline){clearWolPoll();return;}
     if(Date.now()-wolStartTime>WOL_TIMEOUT_MS){
-      wolSent=false;wolStartTime=0;wakeFailed=true;lastDownDeclared=false;clearWolPoll();stopCountdown();releaseWakeLock();checkStatus();
+      wolSent=false;wolStartTime=0;wakeFailed=true;clearWolPoll();stopCountdown();releaseWakeLock();checkStatus();
       if(navigator.vibrate)navigator.vibrate(300);
       // Surface the timeout — silent failure (vibration + flip to red) used to
       // leave family members wondering whether the app was broken. Toast tells

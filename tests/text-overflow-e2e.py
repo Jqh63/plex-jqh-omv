@@ -39,8 +39,8 @@ TILE_STATES = [
     ('Démarrage…', 'réveil en cours'),
     ('Pas de connexion', 'vérifie ta connexion'),
     ('Éteint', 'réveil auto à 13h50'),
-    ('Éteint', 'arrêt normal du serveur'),
-    ('Hors ligne', "contacte l'administrateur"),
+    ('Éteint', ''),                             # v8.68 — in-window off, no claim
+    ('Hors ligne', "contacte l'administrateur"),  # v8.68 — failed wake ONLY
     ('Statut inconnu', 'relais injoignable'),   # v8.65 — relay silent, no verdict
 ]
 

@@ -15,6 +15,9 @@ HB = {"X-Token": "hb-test-token"}
 @pytest.fixture(autouse=True)
 def clean_state(monkeypatch):
     relay._hb_last_at, relay._hb_up, relay._hb_degraded = 0.0, False, False
+    relay._hb_declared_down, relay._declared_revalidate_at = False, 0.0
+    relay._bg_refresh_task = None
+    relay._consecutive_poll_failures = 0
     relay._hb_times.clear()
     relay._campaign_task = None
     relay._wake_pending = False

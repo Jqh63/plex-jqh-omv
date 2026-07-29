@@ -1249,7 +1249,14 @@ function setUnknown(){
   document.getElementById('powerSection').style.display=wolReady()?'flex':'none';
   // Copy kept short — narrow phones (256-300 px CSS) truncated longer subs in
   // v8.13/v8.14/v8.54.
-  paintTile('Statut inconnu','relais injoignable');
+  // v8.68 — say WHAT happened, not WHO is at fault. "relais injoignable" named a
+  // culprit the app cannot actually identify: this state is reached whenever the
+  // /status fetch fails, and the most frequent cause is the PHONE's own last mile
+  // — a foreign wifi, a captive portal, a tunnel re-establishing — none of which
+  // flips navigator.onLine, all of which look identical from here. Blaming a
+  // component that is very often perfectly healthy is both wrong and useless to
+  // a family reader, who has no model of "the relay" anyway.
+  paintTile('Statut inconnu','impossible de vérifier');
   updateVerdictAge();
   if(wolReady()){
     var btn=document.getElementById('powerBtn'),lbl=document.getElementById('powerLabel');

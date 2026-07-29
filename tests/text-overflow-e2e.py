@@ -41,7 +41,7 @@ TILE_STATES = [
     ('Éteint', 'réveil auto à 13h50'),
     ('Éteint', ''),                             # v8.68 — in-window off, no claim
     ('Hors ligne', "contacte l'administrateur"),  # v8.68 — failed wake ONLY
-    ('Statut inconnu', 'relais injoignable'),   # v8.65 — relay silent, no verdict
+    ('Statut inconnu', 'impossible de vérifier'),  # v8.68 — no oracle answered
 ]
 
 TOASTS = [

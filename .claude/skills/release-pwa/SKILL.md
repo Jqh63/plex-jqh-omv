@@ -1,7 +1,7 @@
 ---
 name: release-pwa
-description: Release a PWA version — bump the visible version marker and the service-worker CACHE so installed users auto-update. Use on every release that changes the UX. Forgetting the CACHE bump silently strands installed clients on the old version.
-argument-hint: "[X.Y - what changed]"
+description: Release a PWA version — bump the service-worker CACHE name (generation + date) so installed users auto-update. Use on every PR that changes a served file. Forgetting the bump silently strands installed clients on the old version.
+argument-hint: "[what changed]"
 ---
 
 # Release a PWA version
@@ -15,18 +15,28 @@ version is bumped (triggers the layered auto-update). See CLAUDE.md
 
 ## Steps
 
-1. **Bump both version markers** (keep them in sync):
-   - `index.html` footer → `vX.Y` (visual marker)
-   - `sw.js` → `var CACHE = 'plex-jqh-omv-vX.Y'`
+1. **Bump the cache name — the ONE marker.** Format
+   `plex-jqh-omv-v<generation>-<YYYY-MM-DD><letter>`:
    ```bash
-   grep -n 'plex-jqh-omv-v' sw.js
-   grep -nE 'v[0-9]+\.[0-9]+' index.html | head
+   grep -n 'var CACHE' sw.js       # e.g. plex-jqh-omv-v8-2026-07-29a
+   date +%F                         # today → the new date
    ```
+   - **The date is what you bump**, every time: today's date, plus the next
+     letter (`b`, `c`…) if a deploy already shipped today. Nothing to guess.
+   - **The generation (`v8`) does NOT move** for a fix, a test or a UI tweak,
+     however important — only for a deep rewrite backed by an ADR.
+   - There is **no second marker**. The footer (`index.html`), the debug page
+     and `fallback.html` derive their label at runtime through `version.js`.
+     ⚠️ Never hardcode a version into a page: this skill used to say to edit the
+     `index.html` footer by hand, which stopped being true long before anyone
+     noticed (2026-07-29).
 
-2. **Bump on every UX-changing release.** A pure-doc or relay-only change
-   doesn't need a CACHE bump (no app asset changed). When unsure, bump — a
-   spurious bump only costs one extra update cycle; a missed bump strands
-   installed users silently (observed v2.25→v2.26).
+2. **Bump in the SAME PR as any change to a served file** (`app.js`,
+   `version.js`, `index.html`, `sw.js`, `fallback.*`, `debug.*`, icons). A
+   pure-doc, test-only or relay-only change needs no bump. When unsure, bump —
+   a spurious bump costs one extra update cycle; a missed bump strands
+   installed users silently (observed v2.25→v2.26, and again 2026-07-29 when
+   PR #165 touched `app.js` without one).
 
 3. **Don't undo the SW hardening** when editing `sw.js` (CLAUDE.md lists the
    layered detection + tolerant install learned the hard way):
@@ -38,9 +48,11 @@ version is bumped (triggers the layered auto-update). See CLAUDE.md
 4. **PR** (English commit, Conventional Commits, no scope), `gh pr create` →
    `gh pr merge --merge --delete-branch` (no squash).
 
-5. **Verify post-merge** on the live URL (no staging): hard-reload, confirm
-   the new footer version, and that an installed client updates within a
-   foreground return / 5-min window. If the UX touched timing logic, run
+5. **Verify post-merge** on the live URL (no staging): hard-reload, confirm the
+   footer reads `v<generation> · <today>` — a footer still showing an older date
+   is the signal that a client has not taken the new code — and that an
+   installed client updates within a foreground return / 5-min window. The
+   footer itself is pinned by `tests/version-footer-e2e.py`. If the UX touched timing logic, run
    `/test-pwa` layer 2 (E2E) against the deployed version.
 
 ## Guard

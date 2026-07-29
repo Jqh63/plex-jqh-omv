@@ -486,7 +486,13 @@ function showSettings(){
     document.getElementById('cfgWindow').disabled=winRelay;
     document.getElementById('cfgWindowHint').textContent=winRelay
       ?'Synchronisée automatiquement depuis le relais (plage d\'extinction du serveur) — non modifiable ici'
-      :'Si le serveur s\'éteint volontairement la nuit : hors plage, l\'arrêt s\'affiche « Éteint (prévu) » en bleu avec l\'heure de réveil auto';
+      // v8.67 — wording realigned on what the tile ACTUALLY paints. v8.53 merged
+      // the two blue labels into a bare « Éteint » (the scheduled/unscheduled
+      // nuance moved into the sub); this hint kept promising « Éteint (prévu) »,
+      // a string the app no longer renders anywhere. In-app help that describes a
+      // label the user will never see is worse than no help: it makes them doubt
+      // they are looking at the right screen.
+      :'Si le serveur s\'éteint volontairement la nuit : hors plage, l\'arrêt s\'affiche « Éteint » en bleu avec l\'heure de réveil auto';
   }
   if(checkInterval)clearInterval(checkInterval);
   // (focus is done by switchScreen's callback above, once the field is on screen)

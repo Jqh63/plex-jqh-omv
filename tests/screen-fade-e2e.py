@@ -105,6 +105,24 @@ def main():
                              not offenders and len(calls) >= 10,
                              f"{len(calls)} call sites, offenders={offenders}"))
 
+        # 2026-07-29 — in-app help must not describe a label the app never
+        # paints. v8.53 merged the two blue labels into a bare « Éteint », but
+        # the settings hint (in BOTH index.html and the JS that rewrites it)
+        # kept promising « Éteint (prévu) » for months. Help that names a string
+        # the user will never see is worse than no help — it makes them doubt
+        # they are on the right screen, and nothing in the suite could see it:
+        # every pin asserted on the TILE, and the tile was right.
+        # Same scoping discipline as the pin above: skip comment lines, or the
+        # comments explaining this very change would trip it.
+        ghost = "Éteint (prévu)"
+        html = (ROOT / "index.html").read_text(encoding="utf-8")
+        stale = [f"app.js:{i+1}" for i, l in enumerate(src.splitlines())
+                 if ghost in l and not l.lstrip().startswith("//")]
+        stale += [f"index.html:{i+1}" for i, l in enumerate(html.splitlines())
+                  if ghost in l and "<!--" not in l]
+        results.append(check("no user-visible string promises a label the app dropped",
+                             not stale, f"ghost={ghost!r} offenders={stale}"))
+
         b.close()
 
     print()

@@ -107,6 +107,35 @@ function updateVerdictAge(){
   var age=(hasConfirmedState&&lastVerdictAtMs)?Date.now()-lastVerdictAtMs:0;
   el.textContent=(age>=VERDICT_AGE_SHOW_MS)?'vérifié '+fmtAge(age):'';
 }
+// v8.67 — the single way to say "what is on screen is a PRIOR, not a verdict".
+//
+// FOUR paths pre-paint a state before any probe settles: the two SCHEDULE-based
+// presumptions in checkStatus (off-window scheduled shutdown, in-window up), and
+// the two CACHE pre-paints (startApp, resume). Only the first two are sealed
+// here, and the split is deliberate — they are not the same claim:
+//
+//   - a schedule presumption is a PRIOR: nothing was ever measured, so no age
+//     may be claimed and the next poll must be free to re-presume;
+//   - a cache pre-paint replays a verdict that WAS measured, up to
+//     STATUS_LOCAL_TTL_MS ago. setOnline() legitimately leaves
+//     hasConfirmedState=true and a real lastVerdictAtMs behind, which is what
+//     makes the "vérifié il y a…" line possible and what stops checkStatus from
+//     strobing orange over a state already on screen.
+//
+// So sealing the cache paths would NOT be the harmless unification it looks
+// like: it would suppress the age line and push both reopen paths back through
+// the presumption branch. Checked before touching them — the comment in
+// startApp claiming it "leaves hasConfirmedState=false" is simply wrong, since
+// setOnline() sets it to true two lines later (fixed there too).
+//
+// setOnline/setOffline stamp lastVerdictAtMs and set cardKind='verdict'; for a
+// prior this UNDOES that, which is the whole point — nothing here was verified.
+function sealAsPresumption(){
+  hasConfirmedState=false;
+  lastVerdictAtMs=0;
+  cardKind='presumed';
+  updateVerdictAge();
+}
 // True once setOnline / setOffline has fired this session (a cache pre-paint or
 // a live probe settle). Two jobs:
 //   1. Gate the orange "Vérification…" card so we don't strobe orange on every
@@ -687,8 +716,14 @@ function startApp(){
   // Reuse the localStorage cache (<60 s) for an instant paint so back-to-back
   // reopens don't strobe orange. v8.7: only an "up" cache is pre-painted (the
   // confident green) — a cached "down" is NOT pre-painted red (a stale cache must
-  // never show a confident red); we leave hasConfirmedState=false so checkStatus()
-  // shows the orange "Vérification…" until the live probe settles green or red.
+  // never show a confident red); THAT path leaves hasConfirmedState=false so
+  // checkStatus() shows the orange "Vérification…" until the probe settles.
+  // v8.67 — the pre-paint itself does NOT: setOnline() sets hasConfirmedState=true
+  // and stamps lastVerdictAtMs, on purpose (a cached verdict was measured, unlike
+  // the schedule presumptions — see sealAsPresumption). The old comment here
+  // claimed the opposite and had been wrong for a while; it is the reason this
+  // path was nearly "unified" with the presumptions, which would have silently
+  // dropped the "vérifié il y a…" line.
   var cached=readLocalStatus();
   if(cached&&cached.up){
     relayReachable=cached.relayOk!==false;
@@ -842,7 +877,7 @@ function checkStatus(){
   // orange re-check — it agrees with what is already on screen.
   if(!hasConfirmedState&&!wolSent&&!remoteWaking&&navigator.onLine&&inUptimeWindow()===false){
     setOffline();
-    hasConfirmedState=false;lastVerdictAtMs=0;cardKind='presumed';updateVerdictAge();
+    sealAsPresumption();
   }else if(!hasConfirmedState&&!wolSent&&!remoteWaking){
     // v8.49 — inside the window, presume the LAST PERSISTED verdict instead of
     // orange when one exists (bounded by PRESUME_STALE_MAX_MS). The relay knows
@@ -872,7 +907,7 @@ function checkStatus(){
                   ((prior&&prior.up)||(inUptimeWindow()===true&&!(prior&&!prior.up)));
     if(presumeUp){
       setOnline();
-      hasConfirmedState=false;lastVerdictAtMs=0;cardKind='presumed';updateVerdictAge();
+      sealAsPresumption();
     }else{
       cardKind='checking';
       document.getElementById('statusDot').className='status-dot checking';

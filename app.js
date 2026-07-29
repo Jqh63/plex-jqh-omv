@@ -217,6 +217,23 @@ var PRESUME_STALE_MAX_MS=30*60000;
 // relay's server-side cache (cheap). Relay-outage probes are bounded by
 // PROBE_TIMEOUT_MS (8 s), not this interval — their cadence is unchanged.
 var STATUS_POLL_INTERVAL_MS=8000;
+// v8.66 — test-only override of the poll cadence, read from `?poll=<ms>` at
+// startup. The E2E's cost is almost entirely DEAD WAIT on this interval: three
+// scenarios exist to prove the relay-down warn only hardens on the 3rd
+// consecutive miss (RELAY_DOWN_MISSES), which at 8 s meant sampling at T+18 and
+// T+26 — 82 s of the 158 s per engine. Shrinking the cadence keeps the property
+// (still 3 misses) and drops the wait by ~8×.
+//
+// Deliberately NOT persisted into config: it lives only as long as the tab, so
+// a provisioning URL can never bake a fast poll into a family device (the one
+// real risk of a knob like this — battery and relay load). Bounded at 200 ms
+// so even a hand-typed value cannot turn a phone into a pinger.
+(function(){
+  try{
+    var v=parseInt(new URLSearchParams(location.search).get('poll'),10);
+    if(v>=200&&v<=60000)STATUS_POLL_INTERVAL_MS=v;
+  }catch(e){}
+})();
 // v5.3: 15 s → 5 s. The "Démarrage…" state hung up to 15 s past the
 // actual server-up moment because the next poll hadn't fired yet —
 // a manual refresh would flip to green immediately. 5 s caps the

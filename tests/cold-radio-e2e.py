@@ -97,6 +97,16 @@ PWA_URL = (
     f"?host={CONFIG_HOST}&mac=AABBCCDDEEFF"
     f"&relay=https://{RELAY_HOST}&token=x&apps=seerr,plexweb"
 )
+# 2026-07-29 — the RELAY-LESS install, i.e. what a forker gets who deploys the
+# page without standing up a relay. It is a different oracle, not a degraded
+# one: `probe()` takes its own branch (`if(!config.relay)`) where the direct-home
+# fetch IS the verdict. That branch sits on the most critical path in the app and
+# had ZERO coverage until now — kept, and therefore tested, after Yann assumed
+# the "public forkable repo" perimeter on 2026-07-29.
+PWA_URL_NO_RELAY = (
+    f"{PWA_BASE}"
+    f"?host={CONFIG_HOST}&mac=AABBCCDDEEFF&apps=seerr,plexweb"
+)
 STATUS_LOCAL_KEY = "plex-jqh-omv-status"
 
 # Engines to validate, in order. Chromium = the Blink baseline (Chrome /
@@ -303,7 +313,8 @@ def _watch_interception(page, flag, deliberate=None):
 
 
 def run_scenario(p, name, relay_plan, home_plan, sample_delays_s, preseed_cache=None,
-                 url_extra="", offline=False, restore_online_at_s=None, phase=None):
+                 url_extra="", offline=False, restore_online_at_s=None, phase=None,
+                 no_relay=False):
     """relay_plan(n) → 'up'|'down'|'degraded'|'fail' for the n-th relay /status
     call (1-indexed). home_plan(n) → 'ok'|'fail' for the n-th direct-home call.
     preseed_cache: inject {up, relayOk} under STATUS_LOCAL_KEY before nav.
@@ -316,7 +327,11 @@ def run_scenario(p, name, relay_plan, home_plan, sample_delays_s, preseed_cache=
     key on the RADIO rather than on a call count. Necessary, not cosmetic: route
     interception answers even while the context is offline, so a plan that
     served "up" on its second call greened the tile with the radio still off —
-    a state that cannot happen on a real phone."""
+    a state that cannot happen on a real phone.
+    no_relay: drive the RELAY-LESS install (no `&relay=` in the URL). relay_plan
+    is then never consulted — there is no relay to call — and home_plan alone
+    decides. A scenario that passes `no_relay=True` and still expects relay calls
+    is asserting on a request that cannot exist."""
     print(f"\n## Scenario: {name}")
     counters = {"relay": 0, "home": 0}
     _aborted = set()
@@ -355,7 +370,8 @@ def run_scenario(p, name, relay_plan, home_plan, sample_delays_s, preseed_cache=
     _iflag = {"lost": False}
     _watch_interception(page, _iflag, _aborted)
     page.route("**/*", handle)
-    page.goto(PWA_URL + url_extra + "&poll=" + str(POLL_MS), wait_until="load")
+    base = PWA_URL_NO_RELAY if no_relay else PWA_URL
+    page.goto(base + url_extra + "&poll=" + str(POLL_MS), wait_until="load")
     # AFTER the navigation on purpose: WebKit refuses to load even a file:// URL
     # in an offline context (30 s goto timeout). The app's first probe is aborted
     # by the plans anyway, and the tile only reads navigator.onLine when that
@@ -984,6 +1000,49 @@ def collect_results():
                 and "réveil auto" in r19["final_sub"])
         results.append(("scheduled-off-single-blue-label", ok19, r19,
                         "scheduled off → bare 'Éteint' label, auto-wake time in the sub"))
+
+        # ------------------------------------------------------------------
+        # 2026-07-29 — THE RELAY-LESS INSTALL (a fork's default).
+        #
+        # `probe()` takes a separate branch when no relay is configured, where
+        # the direct-home fetch IS the verdict instead of being ignored (v8.65
+        # removed it from the relayed path precisely because an opaque response
+        # identifies nothing — here it is the only oracle there is, and a fork
+        # that ships without a relay accepts that weaker evidence knowingly).
+        # That branch had no test at all while sitting on the critical path.
+        #
+        # These pin what a forker actually gets. `no_relay=True` also means the
+        # relay counter MUST stay 0: if it moves, the app called a relay it was
+        # never given, and the scenario is not testing the branch it claims to.
+        r20 = run_scenario(p, "no-relay-home-up-greens",
+                           relay_plan=lambda n: "fail", home_plan=lambda n: "ok",
+                           sample_delays_s=[3], no_relay=True,
+                           url_extra="&window=" + _window_excluding_now(inside=True))
+        ok20 = (r20["final_green"] and not r20["final_red"] and not r20["final_warn"]
+                and r20["counters"]["relay"] == 0 and r20["counters"]["home"] > 0)
+        results.append(("no-relay-home-up-greens", ok20, r20,
+                        "no relay + home reachable → green off the direct probe, zero relay calls"))
+
+        # The other half. Also pins that the relay-down WARN never fires here:
+        # there is no relay to be down, and telling a forker his relay is
+        # unreachable when he never configured one is a lie the UI must not tell.
+        r21 = run_scenario(p, "no-relay-home-down-reds-without-relay-warn",
+                           relay_plan=lambda n: "up", home_plan=lambda n: "fail",
+                           sample_delays_s=[3, 5], no_relay=True,
+                           url_extra="&window=" + _window_excluding_now(inside=True))
+        ok21 = (r21["final_red"] and not r21["final_green"] and not r21["final_warn"]
+                and r21["counters"]["relay"] == 0)
+        results.append(("no-relay-home-down-reds-without-relay-warn", ok21, r21,
+                        "no relay + home unreachable → red, never the relay-down warn"))
+
+        # And the wake button must be HIDDEN, not offered-then-broken: wolReady()
+        # requires a relay + token, so there is no way to wake anything. Pinning
+        # this is what keeps a future "always arm the button" idea from silently
+        # shipping a button that cannot work in this mode. Home is up here, so a
+        # hidden button cannot be confused with the offline-phone masking.
+        ok22 = (r20["power_hidden_at"] == [3])
+        results.append(("no-relay-wake-button-hidden", ok22, r20,
+                        "no relay → no wake possible → button hidden, not broken"))
 
     return results
 

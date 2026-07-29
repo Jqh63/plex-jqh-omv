@@ -33,7 +33,7 @@ state machine, plus the render pins that guard what the eye actually sees.
 > handler, a later one escapes to the real network and dies on DNS. The app then
 > gets a genuine transport failure and correctly commits red — so the scenario
 > goes red while the code behaved perfectly. Three scenarios had been failing
-> for that reason alone (`relay-fail-fallback-home-up`,
+> for that reason alone (`opaque-fallback-shows-unknown-not-green`,
 > `relay-single-miss-debounced-no-warn`, `transient-relay-false-down-no-red`),
 > long enough that WebKit's whole verdict had become background noise. The
 > danger is not the noise but what it hides: on those runs WebKit is not testing

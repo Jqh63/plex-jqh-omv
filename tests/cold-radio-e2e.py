@@ -31,19 +31,24 @@ Against the live deploy (post-merge gate): PWA_BASE=deployed.
 Scenarios (mirror state-machine-sim.py):
   1. cold-launch-server-up-fast        — /status up → green ≤3 s
   2. cold-launch-server-off-fast       — /status down → red ≤3 s
-  3. relay-fail-fallback-home-up       — /status ✕ → home ok → green; relay warn
-                                         only after the 3rd-miss debounce (~16 s)
-  4. relay-and-home-down               — /status ✕ → home ✕ → orange then red
-                                         (after the v8.7 confirm re-probe);
-                                         relay warn only after the 3rd-miss debounce
+  3. opaque-fallback-shows-unknown-not-green — /status ✕ → home ok → "Statut
+                                         inconnu", NEVER green (v8.65: an opaque
+                                         no-cors fulfil identifies nothing);
+                                         relay warn only after the 3rd-miss
+                                         debounce (~16 s)
+  4. relay-and-home-unreachable-shows-unknown — /status ✕ → home ✕ → unknown, no
+                                         red (a blocked fallback is no more
+                                         evidence than a fulfilled one)
   5. cache-up-server-down-corrects-red — cache <60 s says up but the home was just
                                          stopped (relay down) → v8.6 reuses the
                                          cached green pre-paint (accepted trade-off)
                                          and the live probe corrects to red ≤3 s
  5b. cache-up-server-up-reused-green   — cache up + relay up → the reused green is
                                          confirmed by the live probe (no red/warn)
-  6. relay-degraded-server-up          — /status 503 → home ok → green, no warn, WoL on
-  7. relay-degraded-server-down        — /status 503 → home ✕ → red, no warn, WoL on
+  6. relay-degraded-shows-unknown      — /status 503 → home ok → unknown, no warn,
+                                         WoL on (the oracle is off, so we say so)
+  7. relay-degraded-home-down-still-unknown — /status 503 → home ✕ → unknown, no
+                                         red, no warn, WoL on
   8. resume-focus-only-converges-red   — bg → server dies → focus → red
   9. resume-no-event-self-heals-red    — bg → server dies → no event → red ≤3 s
  9b. clockjump-wake-stale-green-demoted — Date.now() jump alone (no event, no
@@ -133,6 +138,14 @@ def capture_state(page):
 # apart from every other state by FORM, not hue (v8.54).
 def is_nonet(s):
     return "nonet" in s["cardClass"] and "nonet" in s["dotClass"]
+
+
+# v8.65 — "Statut inconnu": the relay never answered, so there is NO oracle we
+# can authenticate and the card claims nothing. Same unlit form as is_nonet
+# (deliberate — it must not read as a verdict) but its own class, so a silent
+# relay is never confused with a phone that has no network.
+def is_unknown(s):
+    return "unknown" in s["cardClass"] and "unknown" in s["dotClass"]
 
 
 def is_red(s):
@@ -366,8 +379,10 @@ def run_scenario(p, name, relay_plan, home_plan, sample_delays_s, preseed_cache=
         "checking_at": [t for t, s in samples if is_checking(s)],
         "sleep_at": [t for t, s in samples if is_sleep(s)],
         "nonet_at": [t for t, s in samples if is_nonet(s)],
+        "unknown_at": [t for t, s in samples if is_unknown(s)],
         "power_hidden_at": [t for t, s in samples if s["powerHidden"]],
         "final_nonet": is_nonet(final),
+        "final_unknown": is_unknown(final),
         "final_sleep": is_sleep(final),
         "final_green": is_green(final),
         "final_red": is_red(final),
@@ -630,23 +645,35 @@ def collect_results():
         # / T=16 ticks (v8.5: 8 s tick), so the warn confirms ~T=16. Sample at 18 s
         # to catch it; every earlier sample must show NO warn (the false-alarm we
         # killed).
-        r3 = run_scenario(p, "relay-fail-fallback-home-up",
+        # v8.65 THE FIX — the IRL false green of 2026-07-29. The relay fetch
+        # fails and the direct-home `no-cors` fallback SUCCEEDS (here: the mock
+        # answers; IRL: a foreign wifi's captive portal, or the still-powered box
+        # answering :443 in front of a shut-down host). Up to v8.64 that opaque
+        # fulfil was promoted to {up:true} and painted a real green, refuted by
+        # the warmed relay seconds later. An opaque response identifies nothing,
+        # so the card must now say "Statut inconnu" — never green, never red.
+        r3 = run_scenario(p, "opaque-fallback-shows-unknown-not-green",
                           relay_plan=lambda n: "fail", home_plan=lambda n: "ok",
                           sample_delays_s=[1, 3, 18, 26])
-        ok3 = (r3["final_green"] and r3["final_warn"] and not r3["red_at"]
-               and all(t >= 16 for t in r3["warn_at"]))
-        results.append(("relay-fail-fallback-home-up", ok3, r3,
-                        "green throughout; relay warn only after 3rd miss (~16 s); no red"))
+        ok3 = (r3["final_unknown"] and r3["final_warn"] and not r3["red_at"]
+               and not r3["green_at"] and all(t >= 16 for t in r3["warn_at"]))
+        results.append(("opaque-fallback-shows-unknown-not-green", ok3, r3,
+                        "unknown card, NEVER green; relay warn only after 3rd miss (~16 s); no red"))
 
         # v8.2: red (server down) is immediate — the up/down verdict is NOT
         # debounced — but the relay warn still waits for the 3rd-miss confirm.
-        r4 = run_scenario(p, "relay-and-home-down",
+        # v8.65 — symmetric to scenario 3: a fallback that FAILS is no more
+        # evidence than one that succeeds (the wifi may be blocking us), so a
+        # silent relay lands on "unknown", not on the alarming red. A real red
+        # still comes from the only thing that can prove it: the relay answering
+        # up:false (scenario 2).
+        r4 = run_scenario(p, "relay-and-home-unreachable-shows-unknown",
                           relay_plan=lambda n: "fail", home_plan=lambda n: "fail",
                           sample_delays_s=[1, 3, 18, 26])
-        ok4 = (r4["final_red"] and r4["final_warn"] and not r4["final_green"]
-               and all(t >= 16 for t in r4["warn_at"]))
-        results.append(("relay-and-home-down", ok4, r4,
-                        "red immediate; relay warn only after 3rd miss (~16 s)"))
+        ok4 = (r4["final_unknown"] and r4["final_warn"] and not r4["final_green"]
+               and not r4["red_at"] and all(t >= 16 for t in r4["warn_at"]))
+        results.append(("relay-and-home-unreachable-shows-unknown", ok4, r4,
+                        "unknown card, no red; relay warn only after 3rd miss (~16 s)"))
 
         # v8.6 trade-off + fast correction. The cache (<60 s) still says up, but
         # the home was just stopped so the relay answers down. v8.6 REUSES the
@@ -679,20 +706,29 @@ def collect_results():
         results.append(("cache-up-server-up-reused-green", ok5b, r5b,
                         "reused green confirmed by live probe, no red/warn"))
 
-        r6 = run_scenario(p, "relay-degraded-server-up",
+        # v8.65 — a 503 relay is alive (WoL still works) but its ORACLE is off.
+        # The opaque home fallback would "confirm" up here; refused, same as
+        # scenario 3. An admin misconfiguration now reads as one instead of being
+        # papered over by a guess that is right on a home wifi and wrong abroad.
+        r6 = run_scenario(p, "relay-degraded-shows-unknown",
                           relay_plan=lambda n: "degraded", home_plan=lambda n: "ok",
                           sample_delays_s=[1, 3])
-        ok6 = r6["final_green"] and not r6["warn_at"] and not r6["red_at"] and not r6["final_wol_disabled"]
-        results.append(("relay-degraded-server-up", ok6, r6,
-                        "green, no warn, WoL enabled"))
+        ok6 = (r6["final_unknown"] and not r6["green_at"] and not r6["warn_at"]
+               and not r6["red_at"] and not r6["final_wol_disabled"])
+        results.append(("relay-degraded-shows-unknown", ok6, r6,
+                        "unknown, no green/red/warn, WoL enabled"))
 
-        r7 = run_scenario(p, "relay-degraded-server-down",
+        # Symmetry check for the degraded oracle: being right by luck is still a
+        # guess, so no red either. The wake button stays armed — the one thing
+        # the user actually needs when we don't know.
+        r7 = run_scenario(p, "relay-degraded-home-down-still-unknown",
                           relay_plan=lambda n: "degraded", home_plan=lambda n: "fail",
                           sample_delays_s=[1, 3])
-        ok7 = (r7["final_red"] and not r7["final_warn"] and not r7["warn_at"]
-               and not r7["final_green"] and not r7["final_wol_disabled"])
-        results.append(("relay-degraded-server-down", ok7, r7,
-                        "red, no warn, WoL enabled"))
+        ok7 = (r7["final_unknown"] and not r7["red_at"] and not r7["final_warn"]
+               and not r7["warn_at"] and not r7["final_green"]
+               and not r7["final_wol_disabled"])
+        results.append(("relay-degraded-home-down-still-unknown", ok7, r7,
+                        "unknown, no red/warn, WoL enabled"))
 
         r8 = run_resume_scenario(p, "resume-focus-only-converges-red",
                                  relay_plan=lambda n: "up" if n == 1 else "down",
@@ -836,7 +872,11 @@ def collect_results():
                             sample_delays_s=[3, 4, 14], offline=True,
                             restore_online_at_s=4, phase=_phase,
                             url_extra="&window=" + _window_excluding_now(inside=True))
-        ok16b = (r16b["nonet_at"] == [3, 4] and r16b["final_green"]
+        # v8.65 — the T+4 sample now races the `online` listener (the radio is
+        # restored microseconds before the sample, and recovery no longer waits
+        # for the poll), so only the T+3 hollow state is pinned; what matters is
+        # that it STARTS hollow and ENDS green with the button back.
+        ok16b = (r16b["nonet_at"][:1] == [3] and r16b["final_green"]
                  and not r16b["final_nonet"] and 14 not in r16b["power_hidden_at"])
         results.append(("offline-phone-recovers-when-network-returns", ok16b, r16b,
                         "network back → leaves the hollow card, button returns, greens"))

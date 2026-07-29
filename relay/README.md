@@ -33,9 +33,24 @@ POSTs, dedicated token, burst-tolerant rate limit). A fresh beat (age <
 the **primary** `/status` verdict (`source: "heartbeat"` in the response); the
 HEAD pull described above is only consulted when the beat is stale/absent, so
 a broken push channel degrades to exactly the pull-only behaviour. A last-gasp
-`{"up": false}` at clean shutdown flips the verdict red instantly, and the
+`{"up": false}` at clean shutdown flips the verdict down instantly, and the
 first post-WoL beat ends the wake campaign and records a to-the-second boot
 ETA sample. DOWN detection stays pull-based (a crashed home cannot post).
+
+**The last-gasp outlives the TTL** (2026-07-29): a declaration is not a
+measurement whose freshness decays — "I am shutting down" stays true until
+something contradicts it, and a powered-off home cannot un-say it. Previously
+the TTL erased it after 45 s and every later `/status` **blocked on a full
+relay→home pull** (up to `STATUS_POLL_FIRST + RETRY` = 7 s) of a machine known
+to be off: per family open, all night, on an e2-micro — and the body lost
+`source: "heartbeat"`, so the PWA added its own re-check detour on top of the
+wait. The declaration is now sticky, cleared by either channel that can
+actually contradict it: any beat (the home is back, and it beats ~4×/min once
+up), or a pull that answers. That pull is what covers "the home is up but its
+heartbeat sender is not" — kept on a slow clock (`DECLARED_REVALIDATE_S`, 60 s
+default) and fired in the background, never in a reader's critical path.
+Pinned by `tests/test_heartbeat.py::test_declared_down_survives_the_beat_ttl`
+(counts the polls) and `…_is_revalidated_on_the_slow_clock` (the escape hatch).
 
 **Server-side wake campaign** (since 2026-07-17): a `POST /wol` also arms a
 relay-side task that re-sends the magic packets at +15/30/60/90 s

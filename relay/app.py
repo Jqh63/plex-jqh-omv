@@ -250,6 +250,35 @@ _hb_up: bool = False            # last declared state (True beat / False last-ga
 _hb_degraded: bool = False      # home-measured (curl localhost), truer than our probe
 _hb_times: deque = deque(maxlen=HEARTBEAT_RATE_MAX_PER_MIN)
 
+# 2026-07-29 — the last-gasp SURVIVES the beat TTL. A declaration is not a
+# measurement whose freshness decays: "I am shutting down" stays true until
+# something contradicts it, and a powered-off home cannot un-say it.
+#
+# Before this, the TTL erased it after 45 s and the relay fell back to the pull
+# for the rest of the night — re-deriving by silence a fact the home had stated.
+# Measured (tests/test_heartbeat.py::test_declared_down_survives_the_beat_ttl):
+# EVERY /status past the TTL blocked on a full relay→home poll of a machine
+# known to be off — up to STATUS_POLL_FIRST + RETRY = 7 s, per family open, all
+# night, on an e2-micro. It also dropped `source: heartbeat` from the body, so
+# the PWA lost the instant-commit path and added its own orange re-check detour
+# on top of the wait.
+#
+# Contradicted by exactly two things, both of which the relay can see:
+#   - a fresh beat (the home is back, and it beats ~4×/min once up);
+#   - a successful pull (see the revalidation below).
+# The pull is kept precisely BECAUSE the heartbeat sender is a single point of
+# failure: if it dies while the home is up, the sticky verdict would otherwise
+# say "off" forever. But it is revalidated on a slow clock and NEVER blocks a
+# family request — the correction arrives within a minute instead of costing 7 s
+# to every reader.
+_hb_declared_down: bool = False
+_declared_revalidate_at: float = 0.0
+# How often the sticky declared-down is second-guessed by a real pull. One poll
+# a minute against a machine that is off (each costing a full 7 s timeout on a
+# dead leg) instead of one per /status — while still catching the "home is up
+# but its heartbeat sender is broken" case within one interval.
+DECLARED_REVALIDATE_S = int(os.environ.get("DECLARED_REVALIDATE_S", "60"))
+
 
 def _hb_fresh() -> bool:
     return _hb_last_at > 0 and (time.monotonic() - _hb_last_at) <= HEARTBEAT_TTL_S
@@ -593,7 +622,7 @@ async def _poll_home_and_update() -> None:
     # Run one poll and fold the verdict into the cache. Shared by the blocking
     # path (cold/expired cache) and the background SWR refresh. Caller holds
     # _status_poll_lock.
-    global _wake_pending, _consecutive_poll_failures
+    global _wake_pending, _consecutive_poll_failures, _hb_declared_down
     prev_poll_at = _status_cache.last_poll_at
     prev_state = _status_cache.last_state
     ok, degraded = await _poll_home()
@@ -604,6 +633,13 @@ async def _poll_home_and_update() -> None:
         _consecutive_poll_failures = 0
         _status_cache.last_state = True
         _status_cache.last_success_at = polled_at
+        # The home answers: whatever it declared on its way out is now false.
+        # This is the escape hatch that makes the sticky last-gasp safe — it is
+        # what corrects a declared-down home whose heartbeat sender never came
+        # back up with it.
+        if _hb_declared_down:
+            logger.info("declared-down cleared: the home answered a pull")
+            _hb_declared_down = False
         # Shared-ETA measurement: a wake was pending and the home just answered →
         # record the boot duration (bounded like the PWA's own history; a wake
         # fired against an already-up server measures <BOOT_MIN_MS and is dropped).
@@ -787,6 +823,11 @@ def heartbeat(req: HeartbeatReq, request: Request,
                 _boot_history.append(boot_ms)
             _wake_pending = False
     _hb_last_at, _hb_up, _hb_degraded = now, req.up, req.degraded
+    # The home's own last words outlive the beat TTL (see _hb_declared_down): a
+    # last-gasp arms them, any beat at all means it is back and clears them.
+    global _hb_declared_down, _declared_revalidate_at
+    _hb_declared_down = not req.up
+    _declared_revalidate_at = now + DECLARED_REVALIDATE_S
     return {"ok": True}
 
 
@@ -819,6 +860,21 @@ async def status(request: Request, x_token: str | None = Header(None)):
                 "age_s": int(now - _hb_last_at), "source": "heartbeat"}
         if _hb_up and _hb_degraded:
             body["degraded"] = True
+    elif _hb_declared_down:
+        # The home's own last words, still standing (see _hb_declared_down). No
+        # blocking poll: a machine that announced its shutdown is not going to
+        # answer one, and making every family reader wait 7 s to re-learn it was
+        # the whole defect. `source: heartbeat` is kept — this verdict IS the
+        # home's declaration, just no longer a fresh one, and the PWA reads it to
+        # commit the down without its own re-check detour.
+        body = {"up": False, "stale": False,
+                "age_s": int(now - _hb_last_at), "source": "heartbeat"}
+        # Second-guess it on a slow clock, in the background. This is the branch
+        # that catches "the home is actually up, its heartbeat sender is not".
+        global _declared_revalidate_at
+        if now >= _declared_revalidate_at:
+            _declared_revalidate_at = now + DECLARED_REVALIDATE_S
+            _maybe_background_refresh()
     else:
         have_value = _status_cache.last_state is not None
         success_age = (now - _status_cache.last_success_at) if have_value else None

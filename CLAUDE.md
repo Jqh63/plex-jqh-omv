@@ -104,14 +104,40 @@ unclear scope), stop and surface it before pushing.
 
 ## Versioning and propagation
 
-The service worker (`sw.js`) caches the app. **Bump the `CACHE`
-version on every release that changes the UX** to trigger the PWA
-auto-update for installed users:
+The service worker (`sw.js`) caches the app. **Bump the `CACHE` name in the same
+PR as any change to a served file** — without it the browser keeps serving the
+old assets to installed users.
 
-- `sw.js`: `var CACHE = 'plex-jqh-omv-vX.Y'` — the **only** marker to bump.
-  The visible footer (`index.html`), the debug page and `fallback.html` all
-  derive their `vX.Y` from this cache name at runtime, so there's no second
-  marker to keep in sync.
+```js
+var CACHE = 'plex-jqh-omv-v8-2026-07-29a';
+//                         ^^  ^^^^^^^^^^^
+//                         |   date of the deploy, + a letter for a second
+//                         |   deploy the same day (a, b, c…)
+//                         generation of the architecture
+```
+
+- **The date is what you bump**, every time. Nothing to guess: today's date,
+  plus the next letter if you already shipped today. A footer still showing
+  yesterday tells you at a glance that a device has not taken the new code —
+  which a minor number never could.
+- **The generation (`v8`) moves only on a deep rewrite backed by an ADR**
+  (v7 → v8 = the single-probe model). It is the "something major changed"
+  signal, and it is visible on every family phone. A fix, a test or a UI tweak
+  — however important — does not touch it.
+- `sw.js` stays the **only** marker to edit. The app footer, the debug page and
+  `fallback.html` all derive their label from the cache name at runtime through
+  the shared parser in `version.js`, so there is no second marker to sync.
+  Pinned by `tests/version-footer-e2e.py` (parser cases + the rendered footer
+  over http, since a service worker needs a real origin).
+
+> **Why not a rising minor** (the pre-2026-07-29 `vX.Y`). It did two
+> incompatible jobs: cache-buster, which must change on *every* deploy, and
+> milestone label. The first inflated the second into noise — `v8.53 … v8.66`,
+> three bumps in one day, none of them saying what changed. What a change means
+> lives in prose (`plex/pwa-wol.md` in knowledge-base, the BACKLOG, the commit
+> message), never in a number. Legacy `vX.Y` labels in code comments are
+> **frozen, not renamed**: several are cross-referenced by ADRs. New notes are
+> dated (`// 2026-07-29 — …`).
 
 No staging environment — `main` is production via GitHub Pages. Test
 on the public URL after merge.

@@ -115,6 +115,7 @@ Example: `host=myserver.example.com` + `apps=seerr,plexweb` → pings `seerr.mys
 | `app.js` | App logic (extracted from `index.html` so the CSP can drop `'unsafe-inline'` from `script-src`) |
 | `fallback.html` | French manual-WoL fallback page markup, opened from the PWA when the relay probe fails or as a permanent safety net |
 | `fallback.js` | Logic for `fallback.html` (same CSP rationale as `app.js`) |
+| `version.js` | Shared parser for the version label shown in the footer / debug / fallback pages — derived from the SW cache name, so there is no second marker to drift |
 | `debug.html` | Debug snapshot page (long-press the app title for 2s to open) |
 | `debug.js` | Logic for `debug.html` |
 | `manifest.json` | PWA manifest |

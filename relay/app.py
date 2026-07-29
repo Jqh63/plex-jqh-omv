@@ -130,6 +130,23 @@ _consecutive_poll_failures: int = 0
 # countdown. Cleared implicitly once the home answers (an `up` verdict wins).
 # Sized a bit above a typical J5005 cold boot (~80 s) plus slack.
 WAKE_SIGNAL_TTL_S = int(os.environ.get("WAKE_SIGNAL_TTL_S", "150"))
+# Wake-FAILED signal, the mirror of the one above (2026-07-29). Set when a
+# campaign runs its full course — bursts plus the grace period up to
+# WAKE_SIGNAL_TTL_S — without the home ever answering. Advertised on /status so
+# EVERY open PWA agrees that the last attempt failed, instead of each device
+# guessing from its own client-side timeout (which only the device that tapped
+# ever ran, 5 min after the fact). Cleared by a new /wol and by the home coming
+# up. The TTL bounds the claim: past it, "the last wake failed" is no longer
+# news about now, the home is simply off.
+WAKE_FAIL_SIGNAL_TTL_S = int(os.environ.get("WAKE_FAIL_SIGNAL_TTL_S", "600"))
+# How long after arming a campaign we wait before calling it failed. Defaults to
+# WAKE_SIGNAL_TTL_S so the two are coherent by construction: the instant the
+# relay stops advertising "it's coming up" is the instant it may say "it didn't".
+# Separate knob because the test suite runs campaigns on a ~0.2 s scale and
+# cannot wait out the production value — while WAKE_SIGNAL_TTL_S itself is
+# load-bearing elsewhere (the /wol anchor reset) and must keep its real value.
+WAKE_FAIL_GRACE_S = float(os.environ.get("WAKE_FAIL_GRACE_S", str(WAKE_SIGNAL_TTL_S)))
+_wake_failed_at: float = 0.0
 # Shared boot-ETA (multi-device timer sync). The relay measures the wall-clock
 # from a /wol to the next observed "up" flip and keeps a small ring of the last
 # few, serving their median as `eta_s` in every /status. Every open PWA seeds its
@@ -623,6 +640,7 @@ async def _poll_home_and_update() -> None:
     # path (cold/expired cache) and the background SWR refresh. Caller holds
     # _status_poll_lock.
     global _wake_pending, _consecutive_poll_failures, _hb_declared_down
+    global _wake_failed_at
     prev_poll_at = _status_cache.last_poll_at
     prev_state = _status_cache.last_state
     ok, degraded = await _poll_home()
@@ -640,6 +658,8 @@ async def _poll_home_and_update() -> None:
         if _hb_declared_down:
             logger.info("declared-down cleared: the home answered a pull")
             _hb_declared_down = False
+        # A home that answers settles the question of the last wake too.
+        _wake_failed_at = 0.0
         # Shared-ETA measurement: a wake was pending and the home just answered →
         # record the boot duration (bounded like the PWA's own history; a wake
         # fired against an already-up server measures <BOOT_MIN_MS and is dropped).
@@ -719,12 +739,20 @@ async def _poll_home_and_update() -> None:
 def _in_uptime_window() -> bool:
     """True when the home is INSIDE its uptime window (local time at the home).
 
-    Gates the wake campaign's stop condition ("window closed → no re-wake after a
-    scheduled shutdown"). It used to gate the (now removed) keepalive loop too — and
-    for any future periodic relay→home poller the same safety rule holds: the probe
-    rides port 443, which the home's autoshutdown plugin counts as activity
-    (`checksockets: true`, `nsocketnumbers: 2222,443,51820`), so an ungated 24/7
-    poller would keep the home awake forever (caught by Yann, 2026-07-14).
+    ONE caller today: the wake campaign's stop condition ("window closed → no
+    re-wake after a scheduled shutdown"). The docstring used to lead with the
+    keepalive loop, removed in July 2026 — worth correcting rather than leaving,
+    because it made the "no window configured → False" return below read as a
+    poller safety-gate when what it actually does now is let a campaign armed
+    outside any known window run to completion. That is the right behaviour (a
+    manual wake must never be cancelled by a window we cannot parse), but for a
+    different reason than the one that was written here.
+
+    The safety rule the old comment carried is still worth keeping in view for
+    any FUTURE periodic relay→home poller: the probe rides port 443, which the
+    home's autoshutdown plugin counts as activity (`checksockets: true`,
+    `nsocketnumbers: 2222,443,51820`), so an ungated 24/7 poller would keep the
+    home awake forever (caught by Yann, 2026-07-14).
 
     The VM runs UTC; the window is expressed in the home's local time.
     """
@@ -825,8 +853,11 @@ def heartbeat(req: HeartbeatReq, request: Request,
     _hb_last_at, _hb_up, _hb_degraded = now, req.up, req.degraded
     # The home's own last words outlive the beat TTL (see _hb_declared_down): a
     # last-gasp arms them, any beat at all means it is back and clears them.
-    global _hb_declared_down, _declared_revalidate_at
+    global _hb_declared_down, _declared_revalidate_at, _wake_failed_at
     _hb_declared_down = not req.up
+    if req.up:
+        # The home is here. Whatever the last campaign concluded is moot.
+        _wake_failed_at = 0.0
     _declared_revalidate_at = now + DECLARED_REVALIDATE_S
     return {"ok": True}
 
@@ -918,7 +949,18 @@ async def status(request: Request, x_token: str | None = Header(None)):
     # Wake-in-progress: advertise a recently-fired /wol so every open PWA can
     # show the boot countdown, not just the device that initiated it. Only while
     # still down — once up, the green verdict drives the UI and the signal is moot.
-    if not body["up"] and _last_wol_at:
+    # The FAILED signal is tested first, and that order is load-bearing. Both
+    # describe the same wake, so at most one may be served — and a recorded
+    # failure is always about the most recent attempt (any new /wol clears it,
+    # as does the home coming up). Testing `waking` first instead made the
+    # failure invisible whenever _last_wol_at was still inside WAKE_SIGNAL_TTL_S,
+    # i.e. it silently coupled the two to WAKE_FAIL_GRACE_S == WAKE_SIGNAL_TTL_S
+    # holding. Caught by test_status_advertises_the_failure_and_a_new_wol_
+    # retracts_it, which runs a compressed grace and so broke that coupling.
+    if (not body["up"] and _wake_failed_at
+            and (time.monotonic() - _wake_failed_at) < WAKE_FAIL_SIGNAL_TTL_S):
+        body["wake_failed"] = True
+    elif not body["up"] and _last_wol_at:
         wake_age = time.monotonic() - _last_wol_at
         if wake_age < WAKE_SIGNAL_TTL_S:
             body["waking"] = True
@@ -997,6 +1039,31 @@ async def _wake_campaign() -> None:
             logger.warning("wake campaign: dns resolution failed (t+%ds) — burst skipped", t)
     logger.info("wake campaign: exhausted after %d bursts, home still not seen up",
                 len(WOL_CAMPAIGN_DELAYS_S))
+    # Exhausting the bursts is NOT yet a failure: the last one fires at +90 s and
+    # a J5005 takes ~80 s to serve, so the home may well answer just after. Give
+    # it until the wake signal itself expires before saying the wake failed —
+    # (WAKE_FAIL_GRACE_S, = the wake-signal TTL) before saying the wake failed.
+    global _wake_failed_at
+    deadline = armed_at + WAKE_FAIL_GRACE_S
+    while True:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            break
+        await asyncio.sleep(min(5.0, left))
+        if _home_up_fresh():
+            logger.info("wake campaign: home answered during the grace period "
+                        "(t+%ds)", int(time.monotonic() - armed_at))
+            return
+    if _home_up_fresh():
+        return
+    # The one signal every open PWA needs and none of them could compute: the
+    # device that tapped only learns this from its own 5-min client timeout, and
+    # the others never learned it at all (two phones in the same room, one red
+    # one blue). Served by /status so they agree, and so the family is told at
+    # t+150 s instead of t+300 s.
+    _wake_failed_at = time.monotonic()
+    logger.warning("wake campaign: FAILED — home never came up (t+%ds)",
+                   int(_wake_failed_at - armed_at))
 
 
 def _arm_campaign() -> None:
@@ -1045,6 +1112,11 @@ def wol(req: WolReq, request: Request, x_token: str = Header(...)):
     if not _wake_pending or (now - _last_wol_at) > WAKE_SIGNAL_TTL_S:
         _last_wol_at = now
     _wake_pending = True
+    # A fresh attempt retracts the previous verdict: no PWA may paint this new
+    # wake red on the strength of the last one. Cleared here rather than in
+    # _arm_campaign, which returns early when a campaign is already running.
+    global _wake_failed_at
+    _wake_failed_at = 0.0
     logger.info("wol ip=%s device=%s cid=%s status=200", ip,
                 device_class(request.headers.get("user-agent")),
                 clean_cid(request.headers.get("x-client-id")))

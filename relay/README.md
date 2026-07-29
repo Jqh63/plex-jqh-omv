@@ -52,6 +52,19 @@ default) and fired in the background, never in a reader's critical path.
 Pinned by `tests/test_heartbeat.py::test_declared_down_survives_the_beat_ttl`
 (counts the polls) and `…_is_revalidated_on_the_slow_clock` (the escape hatch).
 
+**Shared wake-FAILED signal** (2026-07-29): when a campaign runs its full
+course — every burst, plus a grace period up to `WAKE_FAIL_GRACE_S` (default
+`WAKE_SIGNAL_TTL_S`, so the instant the relay stops advertising "it's coming
+up" is the instant it may say "it didn't") — without the home ever answering,
+`/status` serves `wake_failed: true`. Two things no client could compute: the
+device that tapped learns at ~150 s instead of its own 5-min timeout, and every
+OTHER open PWA learns at all (before this, two phones in the same room showed
+one red and one blue after the same failed wake). Retracted by a new `/wol` and
+by the home coming up; bounded by `WAKE_FAIL_SIGNAL_TTL_S` (600 s), past which
+"the last wake failed" is no longer news about now. Served in preference to
+`waking` — testing `waking` first silently coupled the signal's visibility to
+two constants agreeing, which the compressed-grace test broke.
+
 **Server-side wake campaign** (since 2026-07-17): a `POST /wol` also arms a
 relay-side task that re-sends the magic packets at +15/30/60/90 s
 (`WOL_CAMPAIGN_DELAYS_S`) until the home is seen up. The retry bursts used to

@@ -823,10 +823,22 @@ function fetchStatusFromRelay(){
   });
 }
 
+// ⚠️ ONE caller, and it is not the one this used to have: the RELAY-LESS branch
+// of probe(). With a relay configured this function is never called — v8.65
+// removed it from that path because an opaque response identifies nothing (a
+// captive portal, or the still-powered box in front of a shut-down host, both
+// fulfil it). The old comment here still promised the opposite ("enough to flip
+// the up/down state when the relay is dead"), which is precisely the reasoning
+// that produced a false green IRL. Left standing, that sentence is an invitation
+// to re-wire this into the relayed path.
+//
+// Where it IS the oracle — a fork with no relay — it is the only thing there is,
+// and the same weakness applies; the fork accepts it knowingly. Covered by the
+// three `no-relay-*` scenarios in cold-radio-e2e.py, which assert zero relay
+// calls precisely so "this branch was never entered" cannot pass silently.
 function fetchHomeDirectly(){
-  // no-cors: response is opaque but a fulfilled promise still tells us
-  // the home accepted the TCP/TLS handshake and returned *something*.
-  // That's enough to flip the up/down state when the relay is dead.
+  // no-cors: the response is opaque — a fulfilled promise says only that
+  // SOMETHING completed a handshake at that name, never that it was the home.
   return fetchOnce('https://'+statusHost(),{mode:'no-cors'},HOME_FALLBACK_TIMEOUT_MS);
 }
 
@@ -983,6 +995,36 @@ function checkStatus(){
       if(!(cardKind==='verdict'&&hasConfirmedState))setUnknown();
       return;
     }
+    // v8.69 — the relay says the last wake FAILED (its campaign ran bursts +
+    // grace without the home ever answering). Two things this buys, neither of
+    // which the client could compute on its own:
+    //   - SPEED for the device that tapped. Its own verdict was WOL_TIMEOUT_MS
+    //     (5 min) of countdown-then-nothing; the relay knows at ~150 s. So the
+    //     countdown is cut short here rather than run out.
+    //   - AGREEMENT for every other open device. They never learned a wake had
+    //     failed at all: two phones in the same room, one red one blue.
+    // Since v8.68 wakeFailed is the sole input to the alarming red, so setting
+    // it here is exactly what makes the card escalate on all of them.
+    //
+    // The freshness guard is the race this branch would otherwise lose: a probe
+    // launched BEFORE our own tap can resolve after it, still carrying the
+    // previous attempt's failure, and would kill a wake that just started. The
+    // relay retracts the flag on the /wol itself, so anything older than one
+    // poll cycle is stale by construction.
+    if(res.wakeFailedRemote&&!res.up&&
+       !(wolSent&&Date.now()-wolStartTime<WOL_POLL_MS)){
+      if(wolSent||remoteWaking){
+        wolSent=false;remoteWaking=false;wolStartTime=0;
+        clearWolPoll();stopCountdown();releaseWakeLock();
+        if(navigator.vibrate)navigator.vibrate(300);
+        showToast('⚠ Pas démarré — réessaie',true,TOAST_LONG_MS);
+      }
+      wakeFailed=true;
+      // No orange re-confirmation detour on the way to this red: the relay
+      // watched the home ignore a full campaign, which is a stronger statement
+      // than the two agreeing probes DOWN_CONFIRM asks for.
+      downStreak=DOWN_CONFIRM;
+    }
     // v8.7 asymmetric verdict commit. UP commits green instantly and resets the
     // down streak. DOWN is held: the first live "down" paints orange and fires
     // ONE fast re-probe; red is committed only once DOWN_CONFIRM consecutive
@@ -1098,7 +1140,9 @@ function probe(){
     // v8.25 — thread the relay's wake-in-progress signal through (see the
     // remoteWaking branch in checkStatus): `waking` true while a /wol fired
     // recently and the home is still down, `wake_age_s` its age for the ETA.
-    function(j){return {up:j.up,relayReachable:true,window:(typeof j.window==='string'?j.window:null),waking:j.waking===true,wakeAgeS:(typeof j.wake_age_s==='number'?j.wake_age_s+((j._rtMs||0)/2000):0),etaS:(typeof j.eta_s==='number'?j.eta_s:0),degraded:j.degraded===true,declared:j.source==='heartbeat'};},
+    // v8.69 — and `wake_failed`, its mirror: the relay's campaign ran its full
+    // course without the home ever answering. See the branch in checkStatus.
+    function(j){return {up:j.up,relayReachable:true,window:(typeof j.window==='string'?j.window:null),waking:j.waking===true,wakeAgeS:(typeof j.wake_age_s==='number'?j.wake_age_s+((j._rtMs||0)/2000):0),etaS:(typeof j.eta_s==='number'?j.eta_s:0),degraded:j.degraded===true,declared:j.source==='heartbeat',wakeFailedRemote:j.wake_failed===true};},
     function(err){
       var relayUp=!!(err&&err.answered);
       // v8.65 — the direct-home fallback no longer produces a VERDICT.

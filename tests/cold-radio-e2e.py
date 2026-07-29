@@ -250,6 +250,13 @@ def _relay_fulfill(route, verdict, aborted=None):
         # v8.48 — heartbeat-sourced down: the home's own clean-shutdown last-gasp.
         route.fulfill(status=200, headers=h,
                       body='{"up": false, "stale": false, "age_s": 2, "source": "heartbeat"}')
+    elif verdict == "down-wake-failed":
+        # v8.69 — the relay's campaign ran bursts + grace without the home ever
+        # answering. This device did NOT tap: it is the OTHER phone in the room,
+        # and until this signal existed it had no way to know a wake had failed.
+        route.fulfill(status=200, headers=h,
+                      body='{"up": false, "stale": false, "age_s": null, '
+                           '"source": "heartbeat", "wake_failed": true}')
     elif verdict == "up-degraded":
         # v8.48 — host up, probed app (Seerr) not ready yet.
         route.fulfill(status=200, headers=h,
@@ -1027,6 +1034,21 @@ def collect_results():
                 and "réveil auto" in r19["final_sub"])
         results.append(("scheduled-off-single-blue-label", ok19, r19,
                         "scheduled off → bare 'Éteint' label, auto-wake time in the sub"))
+
+        # v8.69 — the shared wake-FAILED signal, seen by a device that never
+        # tapped. It must reach the SAME alarming red as the phone that did:
+        # that is the whole point of moving the verdict to the relay. Before the
+        # signal existed this scenario was simply a plain down (calm blue since
+        # v8.68), so it fails on the previous version — and the "administrateur"
+        # sub is what proves the escalation, not just the colour.
+        r22 = run_scenario(p, "relay-says-wake-failed-reaches-red-without-tapping",
+                           relay_plan=lambda n: "down-wake-failed", home_plan=lambda n: "fail",
+                           sample_delays_s=[3, 4],
+                           url_extra="&window=" + _window_excluding_now(inside=True))
+        ok22 = (r22["final_red"] and not r22["final_sleep"]
+                and "administrateur" in r22["final_sub"])
+        results.append(("relay-says-wake-failed-reaches-red-without-tapping", ok22, r22,
+                        "relay-reported wake failure → red + admin sub on a device that never tapped"))
 
         # ------------------------------------------------------------------
         # 2026-07-29 — THE RELAY-LESS INSTALL (a fork's default).

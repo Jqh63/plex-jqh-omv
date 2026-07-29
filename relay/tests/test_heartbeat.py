@@ -112,9 +112,21 @@ def test_declared_down_is_revalidated_on_the_slow_clock(client, monkeypatch):
 
     relay._declared_revalidate_at = 0.0          # the interval has elapsed
     relay._status_cache.last_poll_at -= relay.STATUS_CACHE_FRESH_S + 1
-    client.get("/status", headers=ST)            # fires the background refresh
+    client.get("/status", headers=ST)            # SCHEDULES the background refresh
+
+    # …and scheduling is not running. The refresh is a fire-and-forget asyncio
+    # task, so asserting right here reads the state BEFORE the event loop ever
+    # got to it — which is exactly what made a first version of this test pass
+    # or fail depending on how busy the machine was. Each request drives the
+    # loop, so poll for the outcome instead of racing it.
+    for _ in range(50):
+        body = client.get("/status", headers=ST).json()
+        if body["up"]:
+            break
+        time.sleep(0.02)
+
     assert relay._hb_declared_down is False, "a home that answers un-says its last-gasp"
-    assert client.get("/status", headers=ST).json()["up"] is True
+    assert body["up"] is True
 
 
 def test_any_beat_clears_the_declaration(client):

@@ -108,6 +108,17 @@ STATUS_LOCAL_KEY = "plex-jqh-omv-status"
 # engine that can't launch is SKIPPED with a note, never a hard failure.
 ENGINES = [e.strip() for e in
            os.environ.get("PWA_ENGINES", "chromium,webkit").split(",") if e.strip()]
+
+# v8.66 — drive the app on a shortened status poll (`?poll=`, a test-only knob,
+# see app.js). Nearly all of this suite's runtime was DEAD WAIT on the 8 s
+# cadence: the relay-down warn only hardens on the 3rd consecutive miss
+# (RELAY_DOWN_MISSES=3), so proving it needed samples at T+18 and T+26 — 82 s of
+# the 158 s per engine. At 2 s the misses land at ~0/2/4 s and the SAME property
+# is asserted, with a sample before the warn as the positive control that it
+# still doesn't cry wolf. Kept at 2 s rather than the 200 ms floor so the margin
+# between "one miss" and "three misses" stays wider than webkit's jitter.
+POLL_MS = int(os.environ.get("PWA_POLL_MS", "2000"))
+P = POLL_MS / 1000.0        # poll cadence in seconds, for the delay arithmetic
 _CURRENT_ENGINE = "chromium"
 
 
@@ -344,7 +355,7 @@ def run_scenario(p, name, relay_plan, home_plan, sample_delays_s, preseed_cache=
     _iflag = {"lost": False}
     _watch_interception(page, _iflag, _aborted)
     page.route("**/*", handle)
-    page.goto(PWA_URL + url_extra, wait_until="load")
+    page.goto(PWA_URL + url_extra + "&poll=" + str(POLL_MS), wait_until="load")
     # AFTER the navigation on purpose: WebKit refuses to load even a file:// URL
     # in an offline context (30 s goto timeout). The app's first probe is aborted
     # by the plans anyway, and the tile only reads navigator.onLine when that
@@ -641,10 +652,10 @@ def collect_results():
                         "orange card+button (T+1) then red ≤T+3, no green, no warn"))
 
         # v8.2: a sustained relay failure stays optimistic until RELAY_DOWN_MISSES
-        # (3) consecutive misses. With instant-abort, misses land at the T=0 / T=8
-        # / T=16 ticks (v8.5: 8 s tick), so the warn confirms ~T=16. Sample at 18 s
-        # to catch it; every earlier sample must show NO warn (the false-alarm we
-        # killed).
+        # (3) consecutive misses. With instant-abort, misses land one poll apart,
+        # so the warn confirms at ~2·P. Sample at 3·P and 5·P to catch it; every
+        # earlier sample must show NO warn (the false-alarm we killed) — that
+        # earlier sample is the positive control, not decoration.
         # v8.65 THE FIX — the IRL false green of 2026-07-29. The relay fetch
         # fails and the direct-home `no-cors` fallback SUCCEEDS (here: the mock
         # answers; IRL: a foreign wifi's captive portal, or the still-powered box
@@ -654,9 +665,9 @@ def collect_results():
         # so the card must now say "Statut inconnu" — never green, never red.
         r3 = run_scenario(p, "opaque-fallback-shows-unknown-not-green",
                           relay_plan=lambda n: "fail", home_plan=lambda n: "ok",
-                          sample_delays_s=[1, 3, 18, 26])
+                          sample_delays_s=[1, 3, 3 * P, 5 * P])
         ok3 = (r3["final_unknown"] and r3["final_warn"] and not r3["red_at"]
-               and not r3["green_at"] and all(t >= 16 for t in r3["warn_at"]))
+               and not r3["green_at"] and all(t >= 2 * P for t in r3["warn_at"]))
         results.append(("opaque-fallback-shows-unknown-not-green", ok3, r3,
                         "unknown card, NEVER green; relay warn only after 3rd miss (~16 s); no red"))
 
@@ -669,9 +680,9 @@ def collect_results():
         # up:false (scenario 2).
         r4 = run_scenario(p, "relay-and-home-unreachable-shows-unknown",
                           relay_plan=lambda n: "fail", home_plan=lambda n: "fail",
-                          sample_delays_s=[1, 3, 18, 26])
+                          sample_delays_s=[1, 3, 3 * P, 5 * P])
         ok4 = (r4["final_unknown"] and r4["final_warn"] and not r4["final_green"]
-               and not r4["red_at"] and all(t >= 16 for t in r4["warn_at"]))
+               and not r4["red_at"] and all(t >= 2 * P for t in r4["warn_at"]))
         results.append(("relay-and-home-unreachable-shows-unknown", ok4, r4,
                         "unknown card, no red; relay warn only after 3rd miss (~16 s)"))
 
@@ -753,7 +764,7 @@ def collect_results():
         r10 = run_scenario(p, "relay-single-miss-debounced-no-warn",
                            relay_plan=lambda n: "fail" if n == 1 else "up",
                            home_plan=lambda n: "ok",
-                           sample_delays_s=[1, 3, 16])
+                           sample_delays_s=[1, 3, 4 * P])
         ok10 = (r10["final_green"] and not r10["warn_at"] and not r10["red_at"]
                 and not r10["final_wol_disabled"])
         results.append(("relay-single-miss-debounced-no-warn", ok10, r10,
@@ -869,7 +880,7 @@ def collect_results():
         r16b = run_scenario(p, "offline-phone-recovers-when-network-returns",
                             relay_plan=lambda n: "up" if _phase["online"] else "fail",
                             home_plan=lambda n: "ok" if _phase["online"] else "fail",
-                            sample_delays_s=[3, 4, 14], offline=True,
+                            sample_delays_s=[3, 4, 4 + 3 * P], offline=True,
                             restore_online_at_s=4, phase=_phase,
                             url_extra="&window=" + _window_excluding_now(inside=True))
         # v8.65 — the T+4 sample now races the `online` listener (the radio is
@@ -1052,6 +1063,13 @@ def main():
     if not ran:
         print("NO ENGINE COULD RUN — install a browser (see tests/README.md)")
         return 2
+    # 80 % of the family is on Android, so chromium is the engine that matters
+    # day to day and PWA_ENGINES=chromium is the right ITERATION mode. Say so
+    # loudly on a partial run: a green partial run reads exactly like a green
+    # full one, and the remaining 20 % are on iOS/WebKit.
+    if set(ran) != {"chromium", "webkit"}:
+        print("⚠ PARTIAL ENGINE RUN — iteration mode. Re-run both engines "
+              "(the default) before merging.")
     print("ALL ENGINES PASS" if overall_ok else "AT LEAST ONE ENGINE FAILED")
     return 0 if overall_ok else 1
 

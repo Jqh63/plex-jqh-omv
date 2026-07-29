@@ -67,21 +67,12 @@ function flagCopyFail(el) {
 
 // Derive footer version from the active SW cache name. Single source
 // of truth (sw.js) — mirrors the pattern in app.js and debug.js.
-if(window.caches){
-  caches.keys().then(function(names){
-    var ours=names.filter(function(n){return n.indexOf('plex-jqh-omv')===0;});
-    // During an SW update both caches coexist for a beat — pick the highest
-    // version, not ours[0] (same fix as app.js v8.12).
-    var best=null;
-    ours.forEach(function(n){
-      var m=n.match(/-v(\d+)\.(\d+)$/);
-      if(!m)return;
-      var v=[+m[1],+m[2]];
-      if(!best||v[0]>best.v[0]||(v[0]===best.v[0]&&v[1]>best.v[1]))best={v:v,label:'v'+m[1]+'.'+m[2]};
-    });
+// Version derived from the SW cache name via the shared parser (version.js).
+if(window.withCacheLabel){
+  withCacheLabel(function(label){
     var el=document.getElementById('footerVersion');
-    if(el&&best)el.textContent=best.label;
-  }).catch(function(){});
+    if(el)el.textContent=label;
+  });
 }
 
 document.querySelectorAll('.param code').forEach(function(el) {

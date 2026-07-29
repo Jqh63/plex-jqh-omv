@@ -1687,23 +1687,15 @@ document.getElementById('backBtn').addEventListener('click',cancelSettings);
 document.getElementById('saveBtn').addEventListener('click',saveConfig);
 document.getElementById('powerBtn').addEventListener('click',sendWol);
 
-// Derive footer version from the active SW cache name (mirrors debug.js
-// pattern — single source of truth in sw.js, no hardcoded version to drift).
-if(window.caches){
-  caches.keys().then(function(names){
-    var ours=names.filter(function(n){return n.indexOf('plex-jqh-omv')===0;});
-    // v8.12 — during an SW update both the old and new caches coexist for a
-    // beat; ours[0] could surface the stale one. Pick the highest version.
-    var best=null;
-    ours.forEach(function(n){
-      var m=n.match(/-v(\d+)\.(\d+)$/);
-      if(!m)return;
-      var v=[+m[1],+m[2]];
-      if(!best||v[0]>best.v[0]||(v[0]===best.v[0]&&v[1]>best.v[1]))best={v:v,label:'v'+m[1]+'.'+m[2]};
-    });
+// Footer version, derived from the active SW cache name (see version.js — the
+// same parser serves the debug and manual-wake pages; it used to be copied into
+// all three). Leaves the placeholder alone when no cache of ours exists, rather
+// than claiming a version we cannot read.
+if(window.withCacheLabel){
+  withCacheLabel(function(label){
     var el=document.getElementById('footerVersion');
-    if(el&&best)el.textContent=best.label;
-  }).catch(function(){});
+    if(el)el.textContent=label;
+  });
 }
 
 // Init: URL params > localStorage > settings screen

@@ -18,19 +18,9 @@ if('serviceWorker' in navigator){
     caches.keys().then(function(names){
       var ours=names.filter(function(n){return n.indexOf('plex-jqh-omv')===0;});
       setText('swCache',ours.join(', ')||'aucun');
-      // Derive app version from the active SW cache name (`plex-jqh-omv-vX.Y`)
-      // so debug stays in lockstep with sw.js — used to drift silently when
-      // the version was hardcoded here.
-      // Pick the highest version, not ours[0] — during an SW update both
-      // caches coexist for a beat (same fix as app.js v8.12).
-      var best=null;
-      ours.forEach(function(n){
-        var m=n.match(/-v(\d+)\.(\d+)$/);
-        if(!m)return;
-        var v=[+m[1],+m[2]];
-        if(!best||v[0]>best.v[0]||(v[0]===best.v[0]&&v[1]>best.v[1]))best={v:v,label:'v'+m[1]+'.'+m[2]};
-      });
-      setText('appVersion',best?best.label:'—');
+      // Version derived from the cache name via the shared parser (version.js).
+      setText('appVersion',(window.pickCacheLabel&&pickCacheLabel(names))||'—');
+      if(window.withCacheLabel)withCacheLabel(function(l){setText('appVersion',l);});
     });
   } else {
     setText('appVersion','—');

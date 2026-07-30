@@ -35,7 +35,28 @@ HEAD pull described above is only consulted when the beat is stale/absent, so
 a broken push channel degrades to exactly the pull-only behaviour. A last-gasp
 `{"up": false}` at clean shutdown flips the verdict down instantly, and the
 first post-WoL beat ends the wake campaign and records a to-the-second boot
-ETA sample. DOWN detection stays pull-based (a crashed home cannot post).
+ETA sample. DOWN detection stays pull-based (a crashed home cannot post) — see
+the stale-beat demotion below for how that pull is now *started* rather than
+waited for.
+
+**Closing the false-green window** (2026-07-30): a clean stop is covered by the
+last-gasp, but a stop that says nothing — hard power cut, kernel panic, sender
+killed — left the last `up` beat standing, and `/status` answered green for the
+rest of `HEARTBEAT_TTL_S` (up to 45 s of "allumé" on a machine that is off,
+which is the wrong way for this verdict to be wrong: the family taps Plex
+instead of the wake button). Silence still cannot be read as "down" — that is
+what the TTL is for — but it is now a reason to go and **measure**: past one
+missed beat (`HEARTBEAT_MISS_PROBE_S`, 20 s, nominal interval being 15 s) the
+relay starts a background pull, and a pull that comes back down **and**
+post-dates the beat replaces the verdict (`source: "pull"`, `confirmed: true`).
+That down has already survived `STATUS_DOWN_CONFIRM_POLLS`, so `confirmed` tells
+the PWA it may commit red without its own re-check detour — re-litigating it
+client-side would move the window rather than close it. A healthy home never
+pays a poll for this, and a dropped beat on a home that answers stays green.
+Pinned by `test_missed_beat_triggers_a_pull_that_can_demote_the_stale_green`
+plus its two controls (`test_a_fresh_beat_is_never_second_guessed`,
+`test_a_missed_beat_on_a_live_home_stays_green` — the one that forbids trading a
+false green for a false red).
 
 **The last-gasp outlives the TTL** (2026-07-29): a declaration is not a
 measurement whose freshness decays — "I am shutting down" stays true until

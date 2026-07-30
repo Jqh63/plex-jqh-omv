@@ -857,6 +857,7 @@ function relayEvidence(res){
   if(!res)return '';
   var p=[];
   p.push(res.declared?'src=hb':'src=poll');
+  if(res.confirmed)p.push('confirmed');
   if(typeof res.ageS==='number')p.push('age='+res.ageS+'s');
   if(res.degraded)p.push('degraded');
   if(res.waking)p.push('waking');
@@ -1177,7 +1178,12 @@ function checkStatus(){
       // "it's coming up" signal, so don't paint red underneath it.
       enterRemoteWaking(res.wakeAgeS);
       logPaint('waking','adopted-remote-wake',relayEvidence(res));
-    }else if(res.declared||++downStreak>=DOWN_CONFIRM){
+    // v8.71 — `confirmed` earns the same shortcut as `declared`, on the same
+    // grounds: the relay demoted a stale "up" beat only after a pull that had
+    // itself survived STATUS_DOWN_CONFIRM_POLLS. Re-confirming it here would add
+    // two 8 s cycles of orange to a verdict two independent legs already agree
+    // on — which would move the false-green window rather than close it.
+    }else if(res.declared||res.confirmed||++downStreak>=DOWN_CONFIRM){
       // v8.48 — a heartbeat-sourced "down" is the home's own last words (clean
       // shutdown last-gasp), not a flaky probe: commit red at once instead of
       // the orange re-confirmation detour. Covers "extinction avec app ouverte"
@@ -1263,7 +1269,7 @@ function probe(){
     // ageS is carried for the paint journal only (see relayEvidence): "green,
     // src=hb, age=549s" is a different story from "green, src=poll, age=2s", and
     // that distinction is precisely what the 2026-07-30 report was missing.
-    function(j){return {up:j.up,ageS:(typeof j.age_s==='number'?j.age_s:null),relayReachable:true,window:(typeof j.window==='string'?j.window:null),waking:j.waking===true,wakeAgeS:(typeof j.wake_age_s==='number'?j.wake_age_s+((j._rtMs||0)/2000):0),etaS:(typeof j.eta_s==='number'?j.eta_s:0),degraded:j.degraded===true,declared:j.source==='heartbeat',wakeFailedRemote:j.wake_failed===true};},
+    function(j){return {up:j.up,ageS:(typeof j.age_s==='number'?j.age_s:null),relayReachable:true,window:(typeof j.window==='string'?j.window:null),waking:j.waking===true,wakeAgeS:(typeof j.wake_age_s==='number'?j.wake_age_s+((j._rtMs||0)/2000):0),etaS:(typeof j.eta_s==='number'?j.eta_s:0),degraded:j.degraded===true,declared:j.source==='heartbeat',confirmed:j.confirmed===true,wakeFailedRemote:j.wake_failed===true};},
     function(err){
       var relayUp=!!(err&&err.answered);
       // v8.65 — the direct-home fallback no longer produces a VERDICT.

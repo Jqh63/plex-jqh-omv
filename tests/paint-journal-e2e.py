@@ -166,6 +166,41 @@ def run(p, name, verdict, window, expect_present, expect_absent, seed_prior=None
     return ok
 
 
+def run_dated_render(p):
+    """An entry from another day must be dated in the render.
+
+    Since the collapse fix the ring can span days, and the journal is read to
+    reconstruct a chronology — an entry from Tuesday that renders like this
+    morning's is worse than no timestamp at all. Control: today's entry must
+    NOT be dated, otherwise "always prefix the date" would pass too and every
+    normal read would carry noise.
+    """
+    print("\n## an entry from another day is dated (and today's is not)")
+    b = getattr(p, ENGINE).launch()
+    ctx = b.new_context(viewport={"width": 390, "height": 844})
+    page = ctx.new_page()
+    page.goto(_debug_url(), wait_until="load")
+    old_ms = int((datetime.now() - timedelta(days=2)).timestamp() * 1000)
+    day = (datetime.now() - timedelta(days=2))
+    page.evaluate(
+        "([k,old])=>localStorage.setItem(k,JSON.stringify(["
+        "{t:old,t0:old,c:'offline',w:'presume-off-window'},"
+        "{t:Date.now(),t0:Date.now(),c:'online',w:'verdict-up'}]))",
+        [PAINT_LOG_KEY, old_ms])
+    page.reload(wait_until="load")
+    page.wait_for_timeout(300)
+    rendered = (page.text_content("#paintLog") or "").strip()
+    expect_day = f"{day.day:02d}/{day.month:02d}"
+    lines = rendered.splitlines()
+    ok = check(f"the 2-day-old entry carries {expect_day}",
+               any(expect_day in l and "presume-off-window" in l for l in lines), rendered[:160])
+    ok &= check("today's entry is NOT dated (control)",
+                any("verdict-up" in l and expect_day not in l and "/" not in l.split("←")[0]
+                    for l in lines), rendered[:160])
+    b.close()
+    return ok
+
+
 def main():
     print(f"Paint journal E2E — engine={ENGINE} base={PWA_BASE}")
     with sync_playwright() as p:
@@ -213,6 +248,7 @@ def main():
             expect_present=["verdict-down"],
             expect_absent=["down-unconfirmed", "verdict-up"],
         )
+        ok &= run_dated_render(p)
     print("\n" + ("ALL PASS" if ok else "FAILURES ABOVE"))
     return 0 if ok else 1
 

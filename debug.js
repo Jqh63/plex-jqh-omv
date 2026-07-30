@@ -61,6 +61,18 @@ setText('ua',navigator.userAgent);
     var d=new Date(ms),p=function(n){return (n<10?'0':'')+n;};
     return p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds());
   };
+  // v8.72 — a bare hh:mm:ss was fine while the ring held ~1 h. Since the
+  // collapse fix it can span days, and an entry from Tuesday rendered
+  // identically to one from this morning — in a journal whose whole job is to
+  // reconstruct a chronology. Days are prefixed only when they are NOT today,
+  // so the common case (reading what just happened) stays uncluttered.
+  var stamp=function(ms){
+    var d=new Date(ms),p2=function(n){return (n<10?'0':'')+n;};
+    var when=hhmmss(ms);
+    if(d.toDateString()!==new Date().toDateString())
+      when=p2(d.getDate())+'/'+p2(d.getMonth()+1)+' '+when;
+    return when;
+  };
   var a;
   try{a=JSON.parse(localStorage.getItem('plex-jqh-omv-paints')||'[]');}catch(e){a=null;}
   if(!Array.isArray(a)||!a.length){
@@ -68,8 +80,8 @@ setText('ua',navigator.userAgent);
     return;
   }
   el.textContent=a.slice().reverse().map(function(e){
-    var when=hhmmss(e.t0||e.t);
-    if(e.n>1)when+='→'+hhmmss(e.t)+' ×'+e.n;
+    var when=stamp(e.t0||e.t);
+    if(e.n>1)when+='→'+stamp(e.t)+' ×'+e.n;
     // e.d2 = the last evidence of a collapsed run (see paintDetailShape). Both
     // ends are printed: the drift between them is the signal (a heartbeat age
     // that grows says "really down"; one that stands still says "frozen").
@@ -80,7 +92,7 @@ setText('ua',navigator.userAgent);
   // Span covered, so a reader knows whether "nothing since 3 h" means calm or
   // a ring that rolled over. Screenshotted with the journal, it dates it.
   var span=document.getElementById('paintSpan');
-  if(span)span.textContent='depuis '+hhmmss(a[0].t0||a[0].t)+' — '+a.length+
+  if(span)span.textContent='depuis '+stamp(a[0].t0||a[0].t)+' — '+a.length+
                            ' entrée'+(a.length>1?'s':'')+' (max 40)';
 
   // Purge before reproducing a bug: the family is asked to "open the app and

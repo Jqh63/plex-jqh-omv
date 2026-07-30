@@ -151,7 +151,7 @@ flip.
 
 ## Architecture traps to avoid
 
-Two constraints were learned the hard way and the fix lives in the
+Three constraints were learned the hard way and the fix lives in the
 code. Don't undo them without re-bisecting:
 
 - **Robust PWA auto-update needs a layered defence — no single trigger
@@ -186,6 +186,26 @@ code. Don't undo them without re-bisecting:
   Note: any client running a SW version that lacks the layered
   detection or the tolerant install will still need one manual
   refresh to cross over. The fixes are forward-acting only.
+
+- **A diagnostic instrument is judged on three axes, at design time —
+  not just on what it records.** The paint journal (`logPaint` /
+  `debug.html`) and the relay's served-verdict log exist to be read by
+  someone reconstructing a chronology, usually days later and often on a
+  phone. So each of them must be:
+  1. **bounded** — size (the journal is a hard 40-entry ring) *and*
+     retention (journald on the VM, watched by `log-footprint`);
+  2. **readable over time** — an entry from Tuesday must not render like
+     one from this morning. ⚠️ The relay logs in **UTC** while the PWA
+     renders local time; correlating the two ends without noticing that
+     has already inverted a diagnosis;
+  3. **provably alive** — a silent instrument and a dead one look alike.
+
+  ⚠️ **The trigger is a change to EFFECTIVE retention**, not to size:
+  widening a ring, collapsing entries, lengthening a cycle. Collapsing
+  the journal on the *shape* of a detail (2026-07-30) let 40 slots cover
+  days instead of an hour at identical cost — and instantly made the
+  date-less `hh:mm:ss` render wrong, a defect no size metric would ever
+  surface. Re-check axes 2 and 3 in the same PR.
 
 ## Intentionally limited scope
 

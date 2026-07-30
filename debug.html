@@ -25,6 +25,8 @@
   dd{font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text);word-break:break-all}
   dd.ok{color:var(--green)}
   dd.warn{color:var(--red)}
+  .hint{font-size:12px;color:var(--text-dim);margin:-4px 0 8px}
+  pre{font-family:'JetBrains Mono',monospace;font-size:11px;line-height:1.6;color:var(--text);white-space:pre-wrap;word-break:break-word}
   .back{display:inline-flex;align-items:center;gap:6px;color:var(--accent);text-decoration:none;font-size:13px;padding:8px 0;align-self:flex-start}
   .back:active{opacity:.7}
   footer{margin-top:8px;font-size:11px;color:var(--text-dim);font-family:'JetBrains Mono',monospace;opacity:.5;text-align:center}
@@ -65,6 +67,12 @@
       <dt>Lang</dt><dd id="lang">—</dd>
       <dt>UA</dt><dd id="ua">—</dd>
     </dl>
+  </section>
+
+  <section>
+    <h2>Journal d'affichage</h2>
+    <p class="hint">Ce que la carte a affiché, et pourquoi. Le plus récent en haut.</p>
+    <pre id="paintLog">—</pre>
   </section>
 
   <a class="back" href="./">← Retour à l'app</a>

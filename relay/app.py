@@ -862,6 +862,36 @@ def heartbeat(req: HeartbeatReq, request: Request,
     return {"ok": True}
 
 
+# What the relay actually ANSWERED, which until now it never logged: the only
+# lines it emitted were its own internal transitions (a heartbeat arriving, a
+# poll flipping). IRL 2026-07-30 — a PWA reported a green card while every logged
+# state said "declared down 9 minutes ago"; with no record of the served bodies,
+# the relay could neither confirm nor refute that it had served it, and the
+# investigation had to proceed by elimination on the source.
+#
+# Logged on TRANSITION of the served verdict, not per request: a single open PWA
+# polls every 8 s, so a line per request would bury the day in noise (and blow
+# the journal budget `log-footprint` watches). A transition is exactly the event
+# a flapping card is made of.
+_last_served: tuple[bool, str | None, bool, bool] | None = None
+
+
+def _log_served(body: dict, cid: str | None) -> None:
+    global _last_served
+    key = (bool(body.get("up")), body.get("source"),
+           bool(body.get("waking")), bool(body.get("wake_failed")))
+    if key == _last_served:
+        return
+    _last_served = key
+    logger.info(
+        "status served up=%s source=%s age=%s%s%s cid=%s",
+        body.get("up"), body.get("source") or "pull", body.get("age_s"),
+        " waking" if body.get("waking") else "",
+        " wake_failed" if body.get("wake_failed") else "",
+        cid or "-",
+    )
+
+
 @app.get("/status")
 async def status(request: Request, x_token: str | None = Header(None)):
     # Same shared token as /wol (the PWA already holds it). Closes the
@@ -976,6 +1006,7 @@ async def status(request: Request, x_token: str | None = Header(None)):
     body["eta_s"] = _current_eta_s()
     note_usage(clean_cid(request.headers.get("x-client-id")),
                request.headers.get("user-agent"), client_ip(request))
+    _log_served(body, clean_cid(request.headers.get("x-client-id")))
     return JSONResponse(
         content=body,
         # `private`: this response is gated on the shared X-Token and describes

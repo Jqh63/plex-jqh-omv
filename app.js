@@ -240,6 +240,25 @@ var STATUS_LOCAL_TTL_MS=60000,STATUS_LOCAL_KEY='plex-jqh-omv-status';
 // claimed) instead of the orange wait: within half an hour of last use the
 // state almost never flipped, and the probe corrects within one cycle anyway.
 var PRESUME_STALE_MAX_MS=30*60000;
+// v8.70 — paint journal. IRL 2026-07-30 (foreign wifi, vacation, home off): the
+// card went "Éteint (prévu)" → GREEN → éteint, and NOTHING could say where the
+// green came from. The relay logs only its own state TRANSITIONS, the client kept
+// no trace at all, so the report could not be replayed — every candidate had to
+// be excluded by reading code (relay staleness: last-gasp DOWN 9 min earlier;
+// the no-cors fallback: removed from the relayed path in v8.65; a cache
+// pre-paint: both bounded to 60 s). That is a diagnosis by elimination, which is
+// exactly what the "instrument first" rule exists to avoid.
+//
+// So every paint decision now records WHY it painted, in a localStorage ring
+// read by debug.html. Two properties make it worth its ~2 KB:
+//   - EXHAUSTIVE: a paint that reaches the screen without a logPaint call is a
+//     blind spot, so the calls sit at the decision points, not in the painters
+//     (the painters can't tell a presumption from a verdict — that's the whole
+//     distinction we need).
+//   - HONEST about repeats: the 8 s poll repaints the same verdict endlessly, so
+//     an identical consecutive entry is COLLAPSED into a count + a first/last
+//     timestamp. Without that, 40 slots hold ~5 min of ticks instead of history.
+var PAINT_LOG_KEY='plex-jqh-omv-paints',PAINT_LOG_MAX=40;
 // Self-healing status poll cadence. v8.5: 15 s → 8 s. When the home goes down,
 // the relay only learns it on a background SWR refresh (~4.5 s after the first
 // /status poll lands on a stale "up"); at the old 15 s cadence the corrected
@@ -738,6 +757,7 @@ function startApp(){
   if(cached&&cached.up){
     relayReachable=cached.relayOk!==false;
     setOnline();
+    logPaint('online','cache-prepaint-open','cache='+Math.round((Date.now()-cached.t)/1000)+'s');
   }
   checkStatus();
   if(checkInterval)clearInterval(checkInterval);
@@ -779,6 +799,42 @@ function readLocalStatus(maxAgeMs){
 }
 function writeLocalStatus(up,relayOk){
   try{localStorage.setItem(STATUS_LOCAL_KEY,JSON.stringify({up:!!up,relayOk:relayOk!==false,t:Date.now()}));}catch(e){}
+}
+
+// See PAINT_LOG_KEY. `card` = what the user sees (online/offline/checking/
+// unknown/waking/no-network), `why` = the branch that decided it, `detail` =
+// the evidence it decided on (relay source + age, prior age…). Never throws:
+// localStorage can be unavailable (private mode) and a diagnostic must not be
+// able to break the app it observes.
+function logPaint(card,why,detail){
+  try{
+    var raw=localStorage.getItem(PAINT_LOG_KEY),a=raw?JSON.parse(raw):[];
+    if(!Array.isArray(a))a=[];
+    var last=a.length?a[a.length-1]:null,now=Date.now();
+    if(last&&last.c===card&&last.w===why&&last.d===(detail||undefined)){
+      last.n=(last.n||1)+1;last.t=now;
+    }else{
+      var e={t:now,t0:now,c:card,w:why};
+      if(detail)e.d=detail;
+      a.push(e);
+    }
+    if(a.length>PAINT_LOG_MAX)a=a.slice(a.length-PAINT_LOG_MAX);
+    localStorage.setItem(PAINT_LOG_KEY,JSON.stringify(a));
+  }catch(e){}
+}
+// Relay evidence in one short string, so a journal line answers "who said this"
+// without a second lookup: source (home's own declaration vs relay pull), the
+// age it claimed, and the flags that steer the card.
+function relayEvidence(res){
+  if(!res)return '';
+  var p=[];
+  p.push(res.declared?'src=hb':'src=poll');
+  if(typeof res.ageS==='number')p.push('age='+res.ageS+'s');
+  if(res.degraded)p.push('degraded');
+  if(res.waking)p.push('waking');
+  if(res.wakeFailedRemote)p.push('wake_failed');
+  if(!res.relayReachable)p.push('relay-unreachable');
+  return p.join(' ');
 }
 
 // timeoutMs defaults to PROBE_TIMEOUT_MS (the relay /status budget). The
@@ -900,6 +956,7 @@ function checkStatus(){
   if(!hasConfirmedState&&!wolSent&&!remoteWaking&&navigator.onLine&&inUptimeWindow()===false){
     setOffline();
     sealAsPresumption();
+    logPaint('offline','presume-off-window','window='+((config&&config.window)||'none'));
   }else if(!hasConfirmedState&&!wolSent&&!remoteWaking){
     // v8.49 — inside the window, presume the LAST PERSISTED verdict instead of
     // orange when one exists (bounded by PRESUME_STALE_MAX_MS). The relay knows
@@ -930,12 +987,16 @@ function checkStatus(){
     if(presumeUp){
       setOnline();
       sealAsPresumption();
+      logPaint('online','presume-in-window',
+               prior&&prior.up?('prior-up '+Math.round((Date.now()-prior.t)/1000)+'s'):'schedule-only');
     }else{
       cardKind='checking';
       document.getElementById('statusDot').className='status-dot checking';
       document.getElementById('statusCard').className='status-card';
       paintTile('Vérification...','interrogation du relais…');
       setButtonChecking();
+      logPaint('checking','no-usable-prior',
+               prior?(prior.up?'prior-up':'prior-down'):'no-prior');
     }
   }
   probe().then(function(res){
@@ -991,8 +1052,13 @@ function checkStatus(){
     // Idempotent: a second unknown leaves the unknown card alone.
     if(res.unknown){
       if(wolSent||remoteWaking)return;
-      if(!navigator.onLine){setOffline();return;}
-      if(!(cardKind==='verdict'&&hasConfirmedState))setUnknown();
+      if(!navigator.onLine){setOffline();logPaint('no-network','probe-unknown-offline');return;}
+      if(!(cardKind==='verdict'&&hasConfirmedState)){
+        setUnknown();
+        logPaint('unknown','relay-silent',relayEvidence(res));
+      }else{
+        logPaint('kept-verdict','relay-silent',relayEvidence(res));
+      }
       return;
     }
     // v8.69 — the relay says the last wake FAILED (its campaign ran bursts +
@@ -1053,6 +1119,7 @@ function checkStatus(){
       }
       writeLocalStatus(true,relayReachable);
       setOnline(res.degraded);
+      logPaint('online','verdict-up',relayEvidence(res));
     }else if(res.waking&&!wolSent){
       // v8.25 — a wake fired elsewhere (another device, or an earlier session of
       // ours) is in progress per the relay. Show the boot countdown without
@@ -1061,6 +1128,7 @@ function checkStatus(){
       // Takes priority over the down-confirmation: waking is a confident
       // "it's coming up" signal, so don't paint red underneath it.
       enterRemoteWaking(res.wakeAgeS);
+      logPaint('waking','adopted-remote-wake',relayEvidence(res));
     }else if(res.declared||++downStreak>=DOWN_CONFIRM){
       // v8.48 — a heartbeat-sourced "down" is the home's own last words (clean
       // shutdown last-gasp), not a flaky probe: commit red at once instead of
@@ -1071,8 +1139,10 @@ function checkStatus(){
       downStreak=DOWN_CONFIRM;
       writeLocalStatus(false,relayReachable);
       setOffline();
+      logPaint('offline','verdict-down',relayEvidence(res));
     }else{
       setRechecking();
+      logPaint('checking','down-unconfirmed',relayEvidence(res)+' streak='+downStreak);
       if(downRecheckTimer)clearTimeout(downRecheckTimer);
       downRecheckTimer=setTimeout(function(){downRecheckTimer=null;checkStatus();},DOWN_RECHECK_MS);
     }
@@ -1142,7 +1212,10 @@ function probe(){
     // recently and the home is still down, `wake_age_s` its age for the ETA.
     // v8.69 — and `wake_failed`, its mirror: the relay's campaign ran its full
     // course without the home ever answering. See the branch in checkStatus.
-    function(j){return {up:j.up,relayReachable:true,window:(typeof j.window==='string'?j.window:null),waking:j.waking===true,wakeAgeS:(typeof j.wake_age_s==='number'?j.wake_age_s+((j._rtMs||0)/2000):0),etaS:(typeof j.eta_s==='number'?j.eta_s:0),degraded:j.degraded===true,declared:j.source==='heartbeat',wakeFailedRemote:j.wake_failed===true};},
+    // ageS is carried for the paint journal only (see relayEvidence): "green,
+    // src=hb, age=549s" is a different story from "green, src=poll, age=2s", and
+    // that distinction is precisely what the 2026-07-30 report was missing.
+    function(j){return {up:j.up,ageS:(typeof j.age_s==='number'?j.age_s:null),relayReachable:true,window:(typeof j.window==='string'?j.window:null),waking:j.waking===true,wakeAgeS:(typeof j.wake_age_s==='number'?j.wake_age_s+((j._rtMs||0)/2000):0),etaS:(typeof j.eta_s==='number'?j.eta_s:0),degraded:j.degraded===true,declared:j.source==='heartbeat',wakeFailedRemote:j.wake_failed===true};},
     function(err){
       var relayUp=!!(err&&err.answered);
       // v8.65 — the direct-home fallback no longer produces a VERDICT.
@@ -1558,6 +1631,7 @@ function sendWol(){
   // the cost of the old guard was a dead button.
   if(navigator.vibrate)navigator.vibrate(50);
   wolSent=true;
+  logPaint('waking','local-tap');
   // A fresh attempt clears the previous failure: the promoted fallback link
   // would otherwise stay shouting through a wake that is going fine.
   wakeFailed=false;
@@ -1703,6 +1777,7 @@ function onForeground(){
   if(cached&&cached.up){
     relayReachable=cached.relayOk!==false;
     setOnline();
+    logPaint('online','cache-prepaint-resume','cache='+Math.round((Date.now()-cached.t)/1000)+'s');
   } else {
     // No cache, stale cache (> STATUS_LOCAL_TTL_MS in background), OR a cached
     // "down" — the on-screen state may no longer reflect reality. Reset
@@ -1746,6 +1821,7 @@ function onForeground(){
 window.addEventListener('offline',function(){
   if(!config||wolSent||remoteWaking)return;
   hasConfirmedState=false;setOffline();
+  logPaint('no-network','radio-lost');
 });
 window.addEventListener('online',function(){if(config)checkStatus();});
 window.addEventListener('focus',onForeground);

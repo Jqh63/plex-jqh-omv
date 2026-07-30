@@ -384,6 +384,22 @@ function inUptimeWindow(){
   var d=new Date(),n=d.getHours()*60+d.getMinutes();
   return w.start<=w.end?(n>=w.start&&n<w.end):(n>=w.start||n<w.end);
 }
+// v8.71 — wall-clock instant at which the uptime window most recently CLOSED
+// (ms epoch), or null when no window is configured. It is what dates a
+// persisted verdict against the schedule: a verdict measured AFTER that
+// boundary proves the home was woken outside the plan (manual WoL, home-watch
+// auto-WoL, another family member) — something the schedule cannot know.
+// Measured before it, the same verdict proves nothing about now: the scheduled
+// shutdown has happened since.
+function windowEndedAtMs(){
+  var w=parseWindow(config&&config.window);
+  if(!w)return null;
+  var now=new Date();
+  var end=new Date(now.getFullYear(),now.getMonth(),now.getDate(),
+                   Math.floor(w.end/60),w.end%60,0,0);
+  if(end.getTime()>now.getTime())end.setDate(end.getDate()-1);
+  return end.getTime();
+}
 function windowStartLabel(){
   var w=parseWindow(config&&config.window);
   if(!w)return '';
@@ -806,13 +822,25 @@ function writeLocalStatus(up,relayOk){
 // the evidence it decided on (relay source + age, prior age…). Never throws:
 // localStorage can be unavailable (private mode) and a diagnostic must not be
 // able to break the app it observes.
+// v8.71 — the shape of a detail string, numbers blanked. Collapsing on the raw
+// string was defeated by the very field that changes every tick: the 07:53
+// wake-up of 2026-07-30 burned 14 of the 40 slots on ONE decision
+// ("verdict-down src=hb age=2329s… age=2374s waking"), so the ring held ~1 h of
+// history instead of a night. Blanking digits collapses those; it deliberately
+// does NOT collapse a change of KIND (src=hb vs src=pull, the appearance of
+// "waking"), which is evidence, not noise.
+function paintDetailShape(d){return (d||'').replace(/\d+/g,'#');}
 function logPaint(card,why,detail){
   try{
     var raw=localStorage.getItem(PAINT_LOG_KEY),a=raw?JSON.parse(raw):[];
     if(!Array.isArray(a))a=[];
     var last=a.length?a[a.length-1]:null,now=Date.now();
-    if(last&&last.c===card&&last.w===why&&last.d===(detail||undefined)){
+    if(last&&last.c===card&&last.w===why&&paintDetailShape(last.d)===paintDetailShape(detail)){
       last.n=(last.n||1)+1;last.t=now;
+      // Same decision on the same evidence, only the numbers moved. Keep the
+      // last values too: "age=2329s → age=2374s ×14" says the heartbeat kept
+      // ageing (a real outage), where a frozen age would say the opposite.
+      if(detail&&detail!==last.d)last.d2=detail;
     }else{
       var e={t:now,t0:now,c:card,w:why};
       if(detail)e.d=detail;
@@ -953,10 +981,29 @@ function checkStatus(){
   // rather than strobing back to orange). downStreak is left pinned by setOffline()
   // so the first agreeing live "down" commits red without a detour through the
   // orange re-check — it agrees with what is already on screen.
-  if(!hasConfirmedState&&!wolSent&&!remoteWaking&&navigator.onLine&&inUptimeWindow()===false){
+  // v8.71 — the schedule is a prior, and a MEASURED verdict outranks it. IRL
+  // 2026-07-30: home woken by hand at 07:56 (window 13h50-00h10), app reopened
+  // at 07:59 — the card flashed "Éteint (prévu)" before the probe corrected to
+  // green 1 s later. The persisted "up" was 3 min old and simply never
+  // consulted here, while the in-window branch below had been reading it since
+  // v8.49. Two conditions, both needed (see windowEndedAtMs): the prior must be
+  // younger than PRESUME_STALE_MAX_MS *and* stamped after the window closed —
+  // otherwise a 00h20 reopen would flash green off a 00h05 verdict, the exact
+  // mirror of the red flash banned in v8.7, on the most common nightly case.
+  var prior=readLocalStatus(PRESUME_STALE_MAX_MS);
+  var inWin=inUptimeWindow();
+  var windowEnd=windowEndedAtMs();
+  var priorOutranksSchedule=!!(prior&&prior.up&&downStreak===0&&
+                               windowEnd!==null&&prior.t>=windowEnd);
+  if(!hasConfirmedState&&!wolSent&&!remoteWaking&&navigator.onLine&&inWin===false&&
+     !priorOutranksSchedule){
     setOffline();
     sealAsPresumption();
-    logPaint('offline','presume-off-window','window='+((config&&config.window)||'none'));
+    // Why the schedule won, so the journal answers it without a second look:
+    // no prior at all, a persisted down, or an up that predates the close.
+    logPaint('offline','presume-off-window','window='+((config&&config.window)||'none')+
+             ' prior='+(!prior?'none':(!prior.up?'down':
+               (downStreak?'refuted':'pre-close'))));
   }else if(!hasConfirmedState&&!wolSent&&!remoteWaking){
     // v8.49 — inside the window, presume the LAST PERSISTED verdict instead of
     // orange when one exists (bounded by PRESUME_STALE_MAX_MS). The relay knows
@@ -981,13 +1028,14 @@ function checkStatus(){
     // The one prior we do NOT overrule is a fresh PERSISTED down: during a real
     // outage the family re-opens the app repeatedly, and flashing green on each
     // open would be the mirror of the red flash v8.7 banned.
-    var prior=readLocalStatus(PRESUME_STALE_MAX_MS);
-    var presumeUp=navigator.onLine&&downStreak===0&&inUptimeWindow()!==false&&
-                  ((prior&&prior.up)||(inUptimeWindow()===true&&!(prior&&!prior.up)));
+    var presumeUp=navigator.onLine&&downStreak===0&&
+                  ((prior&&prior.up&&(inWin!==false||priorOutranksSchedule))||
+                   (inWin===true&&!(prior&&!prior.up)));
     if(presumeUp){
       setOnline();
       sealAsPresumption();
-      logPaint('online','presume-in-window',
+      logPaint('online',
+               inWin===false?'presume-prior-outranks-window':'presume-in-window',
                prior&&prior.up?('prior-up '+Math.round((Date.now()-prior.t)/1000)+'s'):'schedule-only');
     }else{
       cardKind='checking';

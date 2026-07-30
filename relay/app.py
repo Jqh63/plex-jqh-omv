@@ -296,6 +296,25 @@ _declared_revalidate_at: float = 0.0
 # but its heartbeat sender is broken" case within one interval.
 DECLARED_REVALIDATE_S = int(os.environ.get("DECLARED_REVALIDATE_S", "60"))
 
+# 2026-07-30 — the residual false-green window. A CLEAN stop is covered by the
+# last-gasp above: red the instant the home says so. A stop that says nothing
+# (hard power cut, kernel panic, sender killed) leaves the last "up" beat
+# standing, and /status stayed green for the rest of HEARTBEAT_TTL_S — up to
+# 45 s of "allumé" on a machine that is off, which is exactly the wrong way for
+# this verdict to be wrong: the family taps Plex instead of the wake button.
+#
+# Silence cannot be read as "down" (that is what the TTL is for), but it CAN be
+# taken as a reason to go and MEASURE. Past one missed beat the relay starts a
+# background pull, and a pull that comes back down — already gated by
+# STATUS_DOWN_CONFIRM_POLLS, so never one flaky probe — is a live measurement
+# that post-dates the beat. Two independent legs agreeing, not an inference.
+# Nominal beat interval is 15 s (4/min), so this fires only on a real miss and a
+# healthy home never pays a poll (pinned: test_a_fresh_beat_is_never_second_
+# guessed). The mirror risk — trading a false green for a false red — is pinned
+# by test_a_missed_beat_on_a_live_home_stays_green: the pull answering "up"
+# keeps the card green.
+HEARTBEAT_MISS_PROBE_S = float(os.environ.get("HEARTBEAT_MISS_PROBE_S", "20"))
+
 
 def _hb_fresh() -> bool:
     return _hb_last_at > 0 and (time.monotonic() - _hb_last_at) <= HEARTBEAT_TTL_S
@@ -921,6 +940,28 @@ async def status(request: Request, x_token: str | None = Header(None)):
                 "age_s": int(now - _hb_last_at), "source": "heartbeat"}
         if _hb_up and _hb_degraded:
             body["degraded"] = True
+        # …with one exception, and only one: a beat that has been MISSED while
+        # claiming "up" (see HEARTBEAT_MISS_PROBE_S). Measure in the background,
+        # and hand over to the pull only if it has since come back DOWN — a
+        # verdict that is both confirm-gated and newer than the beat it
+        # contradicts. A pull saying "up", or no fresh pull at all, changes
+        # nothing: the beat keeps the floor.
+        if _hb_up and (now - _hb_last_at) > HEARTBEAT_MISS_PROBE_S:
+            _maybe_background_refresh()
+            if (_status_cache.last_state is False
+                    and _status_cache.last_poll_at > _hb_last_at
+                    and (now - _status_cache.last_poll_at) <= STATUS_CACHE_STALE_S):
+                logger.info(
+                    "stale-beat demotion: beat %.0fs old says UP, a confirmed pull "
+                    "%.0fs ago says DOWN — serving DOWN",
+                    now - _hb_last_at, now - _status_cache.last_poll_at)
+                # `confirmed` tells the PWA this down already survived
+                # STATUS_DOWN_CONFIRM_POLLS, so it may commit red without its own
+                # orange re-check detour — the same shortcut `source: heartbeat`
+                # earns, on the same grounds: this is not one flaky probe.
+                body = {"up": False, "stale": False, "confirmed": True,
+                        "age_s": int(now - _status_cache.last_poll_at),
+                        "source": "pull"}
     elif _hb_declared_down:
         # The home's own last words, still standing (see _hb_declared_down). No
         # blocking poll: a machine that announced its shutdown is not going to

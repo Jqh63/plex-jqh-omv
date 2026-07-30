@@ -85,6 +85,13 @@ def check(name, cond, detail=""):
 def _body(verdict):
     if verdict == "up":
         return '{"up": true, "stale": false, "age_s": 1, "source": "heartbeat"}'
+    if verdict == "down-pull-confirmed":
+        # The relay's stale-beat demotion (2026-07-30): a confirm-gated pull
+        # that contradicts a beat it post-dates. Commits red at once, like a
+        # last-gasp — re-confirming it client-side would move the false-green
+        # window instead of closing it.
+        return ('{"up": false, "stale": false, "confirmed": true, '
+                '"age_s": 8, "source": "pull"}')
     # The IRL shape: the home's own last words, still standing.
     return '{"up": false, "stale": false, "age_s": 549, "source": "heartbeat"}'
 
@@ -196,6 +203,15 @@ def main():
             verdict="down", window=_window_ended(10), seed_prior=(True, 25),
             expect_present=["presume-off-window", "verdict-down"],
             expect_absent=["presume-prior-outranks-window", "verdict-up"],
+        )
+        # The client half of the relay's stale-beat demotion. Negative control:
+        # 'down-unconfirmed' — its presence would mean the PWA re-litigated a
+        # verdict two legs already agreed on, adding ~16 s of orange.
+        ok &= run(
+            p, "a confirm-gated pull-down commits red without the orange detour",
+            verdict="down-pull-confirmed", window=_window(True),
+            expect_present=["verdict-down"],
+            expect_absent=["down-unconfirmed", "verdict-up"],
         )
     print("\n" + ("ALL PASS" if ok else "FAILURES ABOVE"))
     return 0 if ok else 1

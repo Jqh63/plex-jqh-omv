@@ -171,3 +171,80 @@ def test_rate_limit_burst_tolerant_and_never_expires_faster(client):
 def test_unconfigured_token_disables_endpoint(client, monkeypatch):
     monkeypatch.setattr(relay, "HEARTBEAT_TOKEN", "")
     assert client.post("/heartbeat", json={"up": True}, headers=HB).status_code == 503
+
+
+# --- The false-green window (2026-07-30) -----------------------------------
+# A CLEAN stop is covered by the last-gasp: the relay turns red the instant the
+# home says so. The residual hole is the stop that says nothing — hard power
+# cut, kernel panic, killed sender: nothing contradicts the last "up" beat, so
+# /status served green for the rest of HEARTBEAT_TTL_S (up to 45 s).
+#
+# The relay cannot infer that from silence (that is what the TTL is for), but it
+# CAN go and measure: once a beat has been missed, a pull is started in the
+# background, and a pull that comes back DOWN — already confirm-gated by
+# STATUS_DOWN_CONFIRM_POLLS — is a live measurement that post-dates the beat.
+# Two independent legs agreeing, not silence.
+
+def test_missed_beat_triggers_a_pull_that_can_demote_the_stale_green(client, monkeypatch):
+    """The IRL hole: home hard-cut, last beat still inside the TTL.
+
+    Against the pre-fix code this fails on the FIRST assertion — /status keeps
+    answering up=True for the whole TTL because nothing ever probes.
+    """
+    polls = {"n": 0}
+
+    async def pull_fail(background=False):
+        polls["n"] += 1
+        return False, False
+
+    client.post("/heartbeat", json={"up": True}, headers=HB)
+    monkeypatch.setattr(relay, "_poll_home", pull_fail)
+    # One missed beat (nominal is 4/min), still well inside the 45 s TTL.
+    relay._hb_last_at = time.monotonic() - relay.HEARTBEAT_MISS_PROBE_S - 1
+    assert relay._hb_fresh(), "the beat must still be fresh — that IS the window"
+
+    body = None
+    for _ in range(60):
+        relay._status_cache.last_poll_at -= relay.STATUS_CACHE_FRESH_S + 1
+        body = client.get("/status", headers=ST).json()
+        if body["up"] is False:
+            break
+        time.sleep(0.02)
+
+    assert polls["n"] >= 1, "a missed beat must be measured, not waited out"
+    assert body["up"] is False, "a confirmed pull outranks a beat it post-dates"
+    assert body["source"] == "pull"
+    assert body.get("confirmed") is True, "confirm-gated → the PWA may commit red at once"
+
+
+def test_a_fresh_beat_is_never_second_guessed(client, monkeypatch):
+    """Negative control — the beat is still the primary source.
+
+    Without this, "always pull" would also pass the test above, and every
+    healthy reader would pay a relay→home poll on a home that is beating fine.
+    _poll_home is the clean_state boom(), so any pull here is an AssertionError.
+    """
+    client.post("/heartbeat", json={"up": True}, headers=HB)
+    for _ in range(4):
+        relay._status_cache.last_poll_at -= relay.STATUS_CACHE_FRESH_S + 1
+        body = client.get("/status", headers=ST).json()
+        assert body["up"] is True and body["source"] == "heartbeat"
+        assert "confirmed" not in body
+
+
+def test_a_missed_beat_on_a_live_home_stays_green(client, monkeypatch):
+    """Negative control — the one that forbids trading a false green for a
+    false red. A dropped beat (wifi hiccup, GC pause) on a home that answers
+    must NOT flip the family to "éteint": the pull says up, and up wins."""
+    async def pull_up(background=False):
+        return True, False
+
+    client.post("/heartbeat", json={"up": True}, headers=HB)
+    monkeypatch.setattr(relay, "_poll_home", pull_up)
+    relay._hb_last_at = time.monotonic() - relay.HEARTBEAT_MISS_PROBE_S - 1
+
+    for _ in range(10):
+        relay._status_cache.last_poll_at -= relay.STATUS_CACHE_FRESH_S + 1
+        body = client.get("/status", headers=ST).json()
+        assert body["up"] is True, "a live home must never be painted off"
+        time.sleep(0.02)

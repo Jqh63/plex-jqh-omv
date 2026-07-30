@@ -65,6 +65,18 @@ def _window(inside):
     return f"{lo.strftime('%Hh%M')}-{hi.strftime('%Hh%M')}"
 
 
+def _window_ended(minutes_ago):
+    """A CLOSED window whose end boundary is `minutes_ago` in the past. Lets a
+    scenario place a persisted verdict on either side of that boundary — the
+    only thing that distinguishes "measured after the shutdown, so the home was
+    woken out of plan" from "measured before it, so the schedule has since had
+    its say"."""
+    now = datetime.now()
+    hi = now - timedelta(minutes=minutes_ago)
+    lo = hi - timedelta(hours=3)
+    return f"{lo.strftime('%Hh%M')}-{hi.strftime('%Hh%M')}"
+
+
 def check(name, cond, detail=""):
     print(f"  {'PASS' if cond else 'FAIL'}  {name}" + (f"  — {detail}" if detail else ""))
     return cond
@@ -77,7 +89,7 @@ def _body(verdict):
     return '{"up": false, "stale": false, "age_s": 549, "source": "heartbeat"}'
 
 
-def run(p, name, verdict, window_inside, expect_present, expect_absent):
+def run(p, name, verdict, window, expect_present, expect_absent, seed_prior=None):
     print(f"\n## {name}")
     b = getattr(p, ENGINE).launch()
     ctx = b.new_context(viewport={"width": 390, "height": 844})
@@ -100,7 +112,16 @@ def run(p, name, verdict, window_inside, expect_present, expect_absent):
 
     page = ctx.new_page()
     page.route("**/*", handle)
-    page.goto(_url(PWA_BASE, _window(window_inside)), wait_until="load")
+    if seed_prior is not None:
+        # Same origin, but NOT the app: debug.html never paints, so the ring the
+        # scenario then reads contains only what the app decided.
+        up, minutes_old = seed_prior
+        page.goto(_debug_url(), wait_until="load")
+        page.evaluate(
+            "([up,ms,k,pk])=>{localStorage.setItem(k,JSON.stringify("
+            "{up:up,relayOk:true,t:Date.now()-ms}));localStorage.removeItem(pk);}",
+            [up, int(minutes_old * 60000), "plex-jqh-omv-status", PAINT_LOG_KEY])
+    page.goto(_url(PWA_BASE, window), wait_until="load")
     # Long enough for the pre-paint AND the settling probe — the whole point is
     # that BOTH are recorded, in order.
     page.wait_for_timeout(4000)
@@ -143,7 +164,7 @@ def main():
     with sync_playwright() as p:
         ok = run(
             p, "off-window cold open on a home that declared DOWN (the IRL case)",
-            verdict="down", window_inside=False,
+            verdict="down", window=_window(False),
             # The blue schedule presumption, then the committed red. If a GREEN
             # ever appears in this sequence again, its reason will be right here.
             expect_present=["presume-off-window", "verdict-down"],
@@ -151,9 +172,30 @@ def main():
         )
         ok &= run(
             p, "in-window cold open on a home that is UP (positive control)",
-            verdict="up", window_inside=True,
+            verdict="up", window=_window(True),
             expect_present=["presume-in-window", "verdict-up"],
             expect_absent=["presume-off-window", "verdict-down"],
+        )
+        # IRL 2026-07-30, 07:59 — home woken by hand hours after the window
+        # closed, app reopened 3 min later: the card flashed "Éteint (prévu)"
+        # before the probe corrected it to green. A MEASURED verdict, taken
+        # after the window's end boundary, knows something the schedule cannot.
+        ok &= run(
+            p, "off-window reopen after a manual wake (measured prior outranks the schedule)",
+            verdict="up", window=_window_ended(90), seed_prior=(True, 3),
+            expect_present=["presume-prior-outranks-window", "verdict-up"],
+            expect_absent=["presume-off-window"],
+        )
+        # The control that keeps the rule honest: same shape, but the prior was
+        # measured BEFORE the window closed — the scheduled shutdown has
+        # happened since, so the schedule wins and the blue card is right.
+        # Without this, "always trust an up prior off-window" would also pass,
+        # and every nightly reopen would flash green.
+        ok &= run(
+            p, "off-window reopen with a prior measured BEFORE the close (control)",
+            verdict="down", window=_window_ended(10), seed_prior=(True, 25),
+            expect_present=["presume-off-window", "verdict-down"],
+            expect_absent=["presume-prior-outranks-window", "verdict-up"],
         )
     print("\n" + ("ALL PASS" if ok else "FAILURES ABOVE"))
     return 0 if ok else 1

@@ -27,6 +27,8 @@
   dd.warn{color:var(--red)}
   .hint{font-size:12px;color:var(--text-dim);margin:-4px 0 8px}
   pre{font-family:'JetBrains Mono',monospace;font-size:11px;line-height:1.6;color:var(--text);white-space:pre-wrap;word-break:break-word}
+  .ghost{margin-top:10px;font-family:inherit;font-size:12px;color:var(--text-dim);background:transparent;border:1px solid var(--border);border-radius:8px;padding:7px 12px;cursor:pointer}
+  .ghost:active{opacity:.7}
   .back{display:inline-flex;align-items:center;gap:6px;color:var(--accent);text-decoration:none;font-size:13px;padding:8px 0;align-self:flex-start}
   .back:active{opacity:.7}
   footer{margin-top:8px;font-size:11px;color:var(--text-dim);font-family:'JetBrains Mono',monospace;opacity:.5;text-align:center}
@@ -71,8 +73,9 @@
 
   <section>
     <h2>Journal d'affichage</h2>
-    <p class="hint">Ce que la carte a affiché, et pourquoi. Le plus récent en haut.</p>
+    <p class="hint">Ce que la carte a affiché, et pourquoi. Le plus récent en haut. <span id="paintSpan"></span></p>
     <pre id="paintLog">—</pre>
+    <button id="paintClear" class="ghost" type="button">Vider le journal</button>
   </section>
 
   <a class="back" href="./">← Retour à l'app</a>

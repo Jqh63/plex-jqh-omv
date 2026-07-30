@@ -70,6 +70,27 @@ setText('ua',navigator.userAgent);
   el.textContent=a.slice().reverse().map(function(e){
     var when=hhmmss(e.t0||e.t);
     if(e.n>1)when+='→'+hhmmss(e.t)+' ×'+e.n;
-    return when+'  '+e.c+'  ← '+e.w+(e.d?'  ['+e.d+']':'');
+    // e.d2 = the last evidence of a collapsed run (see paintDetailShape). Both
+    // ends are printed: the drift between them is the signal (a heartbeat age
+    // that grows says "really down"; one that stands still says "frozen").
+    var ev=e.d?(e.d2&&e.d2!==e.d?e.d+' → '+e.d2:e.d):'';
+    return when+'  '+e.c+'  ← '+e.w+(ev?'  ['+ev+']':'');
   }).join('\n');
+
+  // Span covered, so a reader knows whether "nothing since 3 h" means calm or
+  // a ring that rolled over. Screenshotted with the journal, it dates it.
+  var span=document.getElementById('paintSpan');
+  if(span)span.textContent='depuis '+hhmmss(a[0].t0||a[0].t)+' — '+a.length+
+                           ' entrée'+(a.length>1?'s':'')+' (max 40)';
+
+  // Purge before reproducing a bug: the family is asked to "open the app and
+  // send the journal", and a ring still holding yesterday buries the 3 lines
+  // that matter. Confirmed, because the journal is the only trace there is.
+  var btn=document.getElementById('paintClear');
+  if(btn)btn.addEventListener('click',function(){
+    if(!confirm('Vider le journal d’affichage ?'))return;
+    try{localStorage.removeItem('plex-jqh-omv-paints');}catch(e){}
+    el.textContent='(vidé — rouvre l\'app une fois, le journal se remplit au premier affichage)';
+    if(span)span.textContent='';
+  });
 })();

@@ -299,6 +299,67 @@ def run_relay_silent_stabilises(p):
     return ok
 
 
+def run_slow_relay_stabilises(p):
+    """Same defect, but with a relay that HANGS instead of refusing.
+
+    The v8.72 pin used route.abort() — an instant refusal. The IRL failure of a
+    GCP e2-micro is the other shape: the request hangs until PROBE_TIMEOUT_MS
+    (8 s) gives up. The oscillation mechanism does not depend on the delay, but
+    "does not depend on" was an argument, not a measurement — and the whole
+    reason this bug existed is that two individually-correct paths composed
+    badly. So the slow shape gets its own pin.
+
+    The relay request is left PENDING (no fulfill/abort): only the client's own
+    AbortController ends it. The home fallback still fails fast, so a cycle is
+    ~8 s rather than ~16 s.
+    """
+    print("\n## a SLOW (hanging) relay also settles on unknown")
+    b = getattr(p, ENGINE).launch()
+    ctx = b.new_context(viewport={"width": 390, "height": 844})
+    state = {"relay": 0}
+
+    def handle(route):
+        parsed = urlparse(route.request.url)
+        if parsed.netloc == RELAY_HOST and parsed.path == "/status":
+            state["relay"] += 1
+            return  # left pending on purpose — the client times out
+        if parsed.netloc == CONFIG_HOST or parsed.netloc.endswith("." + CONFIG_HOST):
+            route.abort()
+            return
+        route.continue_()
+
+    page = ctx.new_page()
+    page.route("**/*", handle)
+    page.goto(_debug_url(), wait_until="load")
+    page.evaluate(
+        "([k,pk])=>{localStorage.setItem(k,JSON.stringify("
+        "{up:true,relayOk:true,t:Date.now()-5*60000}));localStorage.removeItem(pk);}",
+        ["plex-jqh-omv-status", PAINT_LOG_KEY])
+
+    url = (f"{PWA_BASE}?host={CONFIG_HOST}&mac=AABBCCDDEEFF&relay=https://{RELAY_HOST}"
+           f"&token=x&apps=seerr,plexweb&window={_window(True)}&poll=400")
+    page.goto(url, wait_until="load")
+    page.wait_for_timeout(32000)   # ~3 probe timeouts at 8 s
+
+    ring = page.evaluate(f"JSON.parse(localStorage.getItem('{PAINT_LOG_KEY}')||'[]')")
+    reasons = [e["w"] for e in ring]
+    ok = check("the hanging relay was actually hit", state["relay"] >= 2,
+               f"{state['relay']} call(s)")
+    ok &= check("a slow outage still reaches the unknown card",
+                "relay-silent" in reasons, json.dumps(reasons))
+    first_unknown = next((i for i, e in enumerate(ring)
+                          if e["w"] == "relay-silent" and e["c"] == "unknown"), None)
+    replays = [e["w"] for e in ring[(first_unknown or 0) + 1:]
+               if e["w"].startswith("presume-")]
+    ok &= check("no presumption is replayed after a SLOW refutation",
+                first_unknown is not None and not replays,
+                f"{len(replays)} replay(s): {json.dumps(replays)}")
+    ok &= check("the card ends on unknown", bool(ring) and ring[-1]["c"] == "unknown",
+                json.dumps([(e["c"], e["w"]) for e in ring[-4:]]))
+    b.close()
+    return ok
+
+
 def main():
     print(f"Paint journal E2E — engine={ENGINE} base={PWA_BASE}")
     with sync_playwright() as p:
@@ -348,6 +409,7 @@ def main():
         )
         ok &= run_dated_render(p)
         ok &= run_relay_silent_stabilises(p)
+        ok &= run_slow_relay_stabilises(p)
     print("\n" + ("ALL PASS" if ok else "FAILURES ABOVE"))
     return 0 if ok else 1
 

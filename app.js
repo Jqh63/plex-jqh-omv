@@ -788,16 +788,10 @@ function startApp(){
   // standalone quirk) nothing ever re-probed. onForeground() below is the
   // fast path; this interval is the guaranteed-eventually safety net.
   checkInterval=setInterval(function(){if(!document.hidden)checkStatus();},STATUS_POLL_INTERVAL_MS);
-  // Install hint: Chrome on Android = "menu ⋮ → Ajouter à l'écran d'accueil";
-  // Safari on iOS/iPadOS uses the share sheet. iPad on iPadOS 13+ reports
-  // as "Macintosh" — detect it via touch points to avoid showing the wrong
-  // hint to family members on iPad.
-  if(!window.matchMedia('(display-mode:standalone)').matches)setTimeout(function(){
-    var ua=navigator.userAgent;
-    var isIOS=/iPad|iPhone|iPod/.test(ua)||(/Macintosh/.test(ua)&&navigator.maxTouchPoints>1);
-    if(isIOS)document.getElementById('installHintText').textContent='Partage → « Sur l\'écran d\'accueil »';
-    document.getElementById('installHint').style.display='block';
-  },3000);
+  // The install hint used to be revealed here, from a 3 s timeout — which is
+  // what made it re-centre the page under the user's eyes. It is now decided
+  // before the first paint by install-hint.js + CSS (v8.72); nothing to do
+  // at runtime.
 }
 
 // v7.0 — relay-as-oracle. One fetch to the relay's /status answers both

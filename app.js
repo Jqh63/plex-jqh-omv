@@ -51,6 +51,26 @@ var lastVerdictAtMs=0;
 // above startApp()'s cache pre-paint.
 var hasConfirmedState=false;
 
+// v8.72 — a presumption the relay has already refuted, in THIS session, must
+// not be replayed. setUnknown() deliberately leaves hasConfirmedState false (it
+// is not a verdict — nothing was measured), which used to send the very next
+// poll tick back through the pre-paint guard below: re-presume green, get
+// demoted to unknown ~1 s later, repeat. IRL 2026-07-31, once the cache aged
+// past STATUS_LOCAL_TTL_MS: SIX green→grey round trips in 50 s, at the 8 s poll
+// cadence. Each path was right on its own; only their composition oscillated.
+//
+// Same shape as the v8.52 guard that forbids re-presuming while a `down`
+// confirmation is in flight — the app does not get to re-assert a guess the
+// network has already contradicted.
+//
+// Scoped deliberately:
+//   - IN MEMORY ONLY, never persisted. Reopening the app is a NEW episode and
+//     must presume again — that is v8.71, confirmed on Yann's journal.
+//   - cleared the moment the relay answers ANYTHING (below), so one blip does
+//     not freeze the card grey for the rest of the session. The E2E's positive
+//     control pins exactly that.
+var presumptionRefuted=false;
+
 // v8.11 — surface that freshness to the user: a small "vérifié à l'instant /
 // il y a Xs" line under the status card, refreshed by the 1 s poll. Makes the
 // trust level of the on-screen verdict visible (the stale-green saga taught us
@@ -1002,8 +1022,13 @@ function checkStatus(){
   var windowEnd=windowEndedAtMs();
   var priorOutranksSchedule=!!(prior&&prior.up&&downStreak===0&&
                                windowEnd!==null&&prior.t>=windowEnd);
-  if(!hasConfirmedState&&!wolSent&&!remoteWaking&&navigator.onLine&&inWin===false&&
-     !priorOutranksSchedule){
+  // !presumptionRefuted on BOTH branches, and no else: when the relay has
+  // already refuted a presumption this session, the pre-paint paints NOTHING
+  // and leaves the unknown card standing. Gating only the presumption would
+  // have swapped one oscillation for another — the `checking` fallback below
+  // would then repaint "Vérification…" every tick instead.
+  if(!hasConfirmedState&&!presumptionRefuted&&!wolSent&&!remoteWaking&&
+     navigator.onLine&&inWin===false&&!priorOutranksSchedule){
     setOffline();
     sealAsPresumption();
     // Why the schedule won, so the journal answers it without a second look:
@@ -1011,7 +1036,7 @@ function checkStatus(){
     logPaint('offline','presume-off-window','window='+((config&&config.window)||'none')+
              ' prior='+(!prior?'none':(!prior.up?'down':
                (downStreak?'refuted':'pre-close'))));
-  }else if(!hasConfirmedState&&!wolSent&&!remoteWaking){
+  }else if(!hasConfirmedState&&!presumptionRefuted&&!wolSent&&!remoteWaking){
     // v8.49 — inside the window, presume the LAST PERSISTED verdict instead of
     // orange when one exists (bounded by PRESUME_STALE_MAX_MS). The relay knows
     // the answer instantly (heartbeat-primary), but the PWA→relay fetch still
@@ -1105,11 +1130,15 @@ function checkStatus(){
     // A verdict that is still fresh is kept (the poll runs silently under it);
     // once it ages past the staleness guard it is demoted here like the rest.
     // Idempotent: a second unknown leaves the unknown card alone.
+    // The relay answered something usable -> a new episode may presume again.
+    if(!res.unknown)presumptionRefuted=false;
     if(res.unknown){
       if(wolSent||remoteWaking)return;
       if(!navigator.onLine){setOffline();logPaint('no-network','probe-unknown-offline');return;}
       if(!(cardKind==='verdict'&&hasConfirmedState)){
         setUnknown();
+        // The relay has now contradicted whatever we presumed: stop replaying it.
+        presumptionRefuted=true;
         logPaint('unknown','relay-silent',relayEvidence(res));
       }else{
         logPaint('kept-verdict','relay-silent',relayEvidence(res));

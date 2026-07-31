@@ -201,6 +201,104 @@ def run_dated_render(p):
     return ok
 
 
+def run_relay_silent_stabilises(p):
+    """A LONG relay outage must settle on the unknown card, not oscillate.
+
+    IRL 2026-07-31, in Yann's journal during a "dead URL" test: while the cache
+    held, every cycle logged `cache-prepaint-open online` → `kept-verdict ←
+    relay-silent`, no flip. Once the cache aged past STATUS_LOCAL_TTL_MS, every
+    cycle repainted `presume-in-window online` and then `unknown ← relay-silent`
+    ~1 s later — SIX green→grey round trips in 50 s.
+
+    Both paths are individually right; their COMPOSITION is the defect.
+    setUnknown() leaves hasConfirmedState false, so the next tick re-enters the
+    pre-paint guard (`!hasConfirmedState`), re-presumes green, and gets demoted
+    again. The rule this pins: a presumption the relay has already refuted in
+    the same episode must not be replayed — the exact parallel of the v8.52
+    guard that forbids re-presuming during an in-flight down confirmation.
+
+    Positive control in the same run: when the relay comes back up, the card
+    must still repaint green. Without it, "never presume again, ever" would
+    also pass — and the app would stay grey forever after one blip.
+    """
+    print("\n## a long relay outage settles on unknown instead of oscillating")
+    b = getattr(p, ENGINE).launch()
+    ctx = b.new_context(viewport={"width": 390, "height": 844})
+    state = {"silent": True, "relay": 0}
+
+    def handle(route):
+        parsed = urlparse(route.request.url)
+        if parsed.netloc == RELAY_HOST and parsed.path == "/status":
+            state["relay"] += 1
+            if state["silent"]:
+                route.abort()
+                return
+            route.fulfill(status=200, body=_body("up"), headers={
+                "Content-Type": "application/json",
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Headers": "*",
+            })
+            return
+        if parsed.netloc == CONFIG_HOST or parsed.netloc.endswith("." + CONFIG_HOST):
+            # The direct-home fallback must fail too — a silent RELAY that the
+            # home answers behind is a different scenario (and not the one that
+            # oscillated). Everything else (the page's own assets) goes through.
+            route.abort()
+            return
+        route.continue_()
+
+    page = ctx.new_page()
+    page.route("**/*", handle)
+    # A prior that is UP but older than STATUS_LOCAL_TTL_MS (60 s) and younger
+    # than PRESUME_STALE_MAX_MS (30 min): exactly the regime where the cache no
+    # longer holds a verdict but the in-window presumption still fires. That is
+    # the window in which the oscillation was observed.
+    page.goto(_debug_url(), wait_until="load")
+    page.evaluate(
+        "([k,pk])=>{localStorage.setItem(k,JSON.stringify("
+        "{up:true,relayOk:true,t:Date.now()-5*60000}));localStorage.removeItem(pk);}",
+        ["plex-jqh-omv-status", PAINT_LOG_KEY])
+
+    base = f"{PWA_BASE}?host={CONFIG_HOST}&mac=AABBCCDDEEFF&relay=https://{RELAY_HOST}"
+    base += f"&token=x&apps=seerr,plexweb&window={_window(True)}&poll=400"
+    page.goto(base, wait_until="load")
+    page.wait_for_timeout(6000)          # ~15 poll cycles at 400 ms
+
+    ring = page.evaluate(f"JSON.parse(localStorage.getItem('{PAINT_LOG_KEY}')||'[]')")
+    reasons = [e["w"] for e in ring]
+    ok = check("the relay was actually consulted (mock alive)", state["relay"] >= 3,
+               f"{state['relay']} call(s)")
+    ok &= check("the outage reached the unknown card", "relay-silent" in reasons,
+                json.dumps(reasons))
+
+    # THE PIN. Not "how many unknowns" — how many times the card went BACK to a
+    # green presumption after the relay had already refuted it. Zero is the
+    # spec; the shipped code produces one per poll cycle.
+    first_unknown = next((i for i, e in enumerate(ring)
+                          if e["w"] == "relay-silent" and e["c"] == "unknown"), None)
+    replays = [e["w"] for e in ring[(first_unknown or 0) + 1:]
+               if e["w"].startswith("presume-")]
+    ok &= check("no presumption is replayed after the relay refuted it",
+                first_unknown is not None and not replays,
+                f"{len(replays)} replay(s): {json.dumps(replays)}")
+
+    # And the card the user is left looking at is the honest one.
+    ok &= check("the card ends on unknown, not green",
+                bool(ring) and ring[-1]["c"] == "unknown",
+                json.dumps([(e["c"], e["w"]) for e in ring[-4:]]))
+
+    # POSITIVE CONTROL — the relay comes back; green must return. Without this
+    # the fix could legally be "never presume again" and freeze the card grey.
+    state["silent"] = False
+    page.wait_for_timeout(3000)
+    ring2 = page.evaluate(f"JSON.parse(localStorage.getItem('{PAINT_LOG_KEY}')||'[]')")
+    ok &= check("positive control: the card repaints green when the relay returns",
+                bool(ring2) and ring2[-1]["c"] == "online",
+                json.dumps([(e["c"], e["w"]) for e in ring2[-4:]]))
+    b.close()
+    return ok
+
+
 def main():
     print(f"Paint journal E2E — engine={ENGINE} base={PWA_BASE}")
     with sync_playwright() as p:
@@ -249,6 +347,7 @@ def main():
             expect_absent=["down-unconfirmed", "verdict-up"],
         )
         ok &= run_dated_render(p)
+        ok &= run_relay_silent_stabilises(p)
     print("\n" + ("ALL PASS" if ok else "FAILURES ABOVE"))
     return 0 if ok else 1
 

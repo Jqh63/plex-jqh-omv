@@ -79,6 +79,25 @@ def main():
         base = pg.evaluate(PROBE)
         print(f"  baseline: {base}")
 
+        # --- pin 0: the install hint (v8.72) ------------------------------
+        # Reported by the user: the "Astuce" banner "décale le centrage
+        # vertical". It was revealed from a 3 s setTimeout, and `body` is a
+        # centred flex column, so everything above it moved UP 3 s after the
+        # page settled. Two halves, both verified FAILING against d607b44:
+        # at 400 ms the banner was still display:none (pin 0a), and the page
+        # then shifted 33,5 px when it appeared (pin 0b).
+        # file:// is not standalone, so the banner is in scope here.
+        hint_shown = pg.evaluate(
+            "() => getComputedStyle(document.getElementById('installHint'))"
+            ".display !== 'none'")
+        results.append(check("the install hint is in the layout at the first paint",
+                             hint_shown, f"shown={hint_shown}"))
+
+        pg.wait_for_timeout(3400)  # past the old 3 s reveal
+        d = moved(base, pg.evaluate(PROBE))
+        results.append(check("...and nothing moves in the seconds that follow",
+                             not d, f"moved={d}"))
+
         # --- pin 1: the wake progress bar ---------------------------------
         # Driven through the class the countdown actually sets, so the pin
         # tracks the real mechanism rather than a test-only shortcut.

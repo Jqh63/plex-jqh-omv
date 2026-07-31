@@ -2,8 +2,8 @@
 // jour>. La generation ne bouge que sur une refonte de fond adossee a un ADR ;
 // la date bouge a chaque deploiement. Parse par version.js, affiche en pied de
 // page. Convention detaillee : CLAUDE.md § Versioning and propagation.
-var CACHE = 'plex-jqh-omv-v8-2026-07-31';
-var FILES = ['./', './app.js', './version.js', './preconnect.js', './fallback.html', './fallback.js', './debug.html', './debug.js', './manifest.json', './icon-192-v4.png', './icon-512-v4.png', './icon-maskable-v3.png', './icon-monochrome-v3.png'];
+var CACHE = 'plex-jqh-omv-v8-2026-07-31a';
+var FILES = ['./', './app.js', './version.js', './preconnect.js', './install-hint.js', './fallback.html', './fallback.js', './debug.html', './debug.js', './manifest.json', './icon-192-v4.png', './icon-512-v4.png', './icon-maskable-v3.png', './icon-monochrome-v3.png'];
 
 // Two non-obvious requirements stacked here:
 // 1. addAll is all-or-nothing — a single 404/timeout/network blip kills

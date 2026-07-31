@@ -21,6 +21,9 @@
 <link rel="icon" href="icon-192-v4.png" type="image/png">
 <link rel="apple-touch-icon" href="icon-192-v4.png">
 <title>Plex jqh omv</title>
+<!-- MUST stay in <head>: it decides before the first paint whether the install
+     banner is part of the centred column (v8.72). -->
+<script src="install-hint.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
@@ -219,7 +222,14 @@
   .toast.warn{border-color:var(--orange);color:var(--orange)}
   .footer{font-size:10px;color:var(--text-dim);font-family:'JetBrains Mono',monospace;opacity:.3}
   .header h1{cursor:help;user-select:none;-webkit-touch-callout:none}
+  /* v8.72 — the banner is in the layout from the first paint or not at all.
+     install-hint.js (loaded in <head>) sets both classes before the body is
+     parsed; revealing the banner afterwards re-centred the whole column. */
   .install-hint{width:100%;background:var(--surface);border:1px solid var(--accent);border-radius:12px;padding:12px 16px;font-size:12px;color:var(--text-dim);text-align:center;display:none}
+  html.hint-visible .install-hint{display:block}
+  .install-hint .hint-ios{display:none}
+  html.hint-ios .install-hint .hint-ios{display:inline}
+  html.hint-ios .install-hint .hint-generic{display:none}
   .install-hint strong{color:var(--text)}
 
   .section{display:flex;flex-direction:column;gap:16px;width:100%}
@@ -363,7 +373,7 @@
 
   <div class="links" id="linksContainer"></div>
 
-  <div class="install-hint" id="installHint"><strong>Astuce :</strong> <span id="installHintText">menu ⋮ → « Ajouter à l'écran d'accueil »</span></div>
+  <div class="install-hint" id="installHint"><strong>Astuce :</strong> <span class="hint-generic">menu ⋮ → « Ajouter à l'écran d'accueil »</span><span class="hint-ios">Partage → « Sur l'écran d'accueil »</span></div>
   <div class="footer" id="footerVersion">—</div>
 </div>
 

@@ -859,6 +859,18 @@ function relayEvidence(res){
   p.push(res.declared?'src=hb':'src=poll');
   if(res.confirmed)p.push('confirmed');
   if(typeof res.ageS==='number')p.push('age='+res.ageS+'s');
+  // 2026-07-31 — the age alone cannot say WHEN the relay computed it. Observed
+  // on a cold open: age=578s at 11:30:04, then age=6s one second later, from a
+  // single-worker relay whose age is monotonic — impossible from two live
+  // answers. The documented suspect is right here in checkStatus: a probe
+  // FROZEN mid-fetch by Android that only resolves on resume carries an age
+  // computed minutes earlier. The round-trip separates the two stories at a
+  // glance (rt=350ms = the relay really said this; rt=570000ms = a thawed
+  // probe), and it is already measured — it was just never surfaced.
+  // Benign here (the home was genuinely off), but the symmetric case is a
+  // FALSE GREEN: a thawed probe carrying age=9s would paint online. Logged,
+  // not "fixed": the fix has to wait for the journal to name the culprit.
+  if(typeof res.rtMs==='number')p.push('rt='+res.rtMs+'ms');
   if(res.degraded)p.push('degraded');
   if(res.waking)p.push('waking');
   if(res.wakeFailedRemote)p.push('wake_failed');
@@ -1269,7 +1281,7 @@ function probe(){
     // ageS is carried for the paint journal only (see relayEvidence): "green,
     // src=hb, age=549s" is a different story from "green, src=poll, age=2s", and
     // that distinction is precisely what the 2026-07-30 report was missing.
-    function(j){return {up:j.up,ageS:(typeof j.age_s==='number'?j.age_s:null),relayReachable:true,window:(typeof j.window==='string'?j.window:null),waking:j.waking===true,wakeAgeS:(typeof j.wake_age_s==='number'?j.wake_age_s+((j._rtMs||0)/2000):0),etaS:(typeof j.eta_s==='number'?j.eta_s:0),degraded:j.degraded===true,declared:j.source==='heartbeat',confirmed:j.confirmed===true,wakeFailedRemote:j.wake_failed===true};},
+    function(j){return {up:j.up,ageS:(typeof j.age_s==='number'?j.age_s:null),rtMs:(typeof j._rtMs==='number'?j._rtMs:null),relayReachable:true,window:(typeof j.window==='string'?j.window:null),waking:j.waking===true,wakeAgeS:(typeof j.wake_age_s==='number'?j.wake_age_s+((j._rtMs||0)/2000):0),etaS:(typeof j.eta_s==='number'?j.eta_s:0),degraded:j.degraded===true,declared:j.source==='heartbeat',confirmed:j.confirmed===true,wakeFailedRemote:j.wake_failed===true};},
     function(err){
       var relayUp=!!(err&&err.answered);
       // v8.65 — the direct-home fallback no longer produces a VERDICT.

@@ -146,6 +146,7 @@ def main():
             # Enter the wake look without firing a real POST: the .sent class is
             # what drives both the halo (:has) and, via startCountdown, the bar.
             pg.evaluate("""() => {
+                wolSent = true; wolStartTime = Date.now();
                 document.getElementById('powerBtn').className = 'power-btn sent';
                 startCountdown(0);
             }""")
@@ -163,6 +164,20 @@ def main():
             # long fill, never the ~0 the blanket reduced-motion rule imposes.
             results.append(check(pg, "boot bar animates over the ETA (essential motion)",
                                  bar_secs > 1.0, f"transition-duration={bar}"))
+            # The suspend-resync in onForeground() re-arms the SAME bar transition
+            # on every focus/visibilitychange. It was missed by the first fix and
+            # re-armed the bar WITHOUT !important, so on a desktop PC the first
+            # focus after the wake snapped the bar to 100% mid-boot (the exact
+            # symptom Yann saw, 2026-08-01). Fire the resync and re-assert: this
+            # FAILS on the pre-fix app.js (duration collapses to ~1e-05s under
+            # reduce) and holds only once the resync sets it inline !important.
+            pg.evaluate("() => { if (typeof onForeground === 'function') { try { onForeground(); } catch (e) {} } }")
+            pg.wait_for_timeout(120)
+            bar2 = pg.evaluate("""() => getComputedStyle(
+                document.getElementById('powerProgressBar')).transitionDuration""")
+            bar2_secs = float(bar2.rstrip("s").replace("ms", "")) if bar2 else 0.0
+            results.append(check(pg, "boot bar survives the onForeground resync (essential motion)",
+                                 bar2_secs > 1.0, f"transition-duration={bar2}"))
             ctx.close()
 
         b.close()

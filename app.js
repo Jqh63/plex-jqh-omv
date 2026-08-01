@@ -1915,7 +1915,14 @@ function onForeground(){
       bar.style.width=(ratio*100)+'%';
       void bar.offsetWidth;
       if(remainingMs>0){
-        bar.style.transition='width '+(remainingMs/1000)+'s linear';
+        // Same reason as startCountdown(): inline !important so the blanket
+        // prefers-reduced-motion `*{transition-duration:.01ms!important}` rule
+        // can't beat this value and snap the bar to 100% mid-boot. This resync
+        // path was missed by the 2026-08-01b fix — on a Windows PC with
+        // animations off, the first focus/visibilitychange after the wake
+        // re-armed the bar here WITHOUT !important and it jumped straight to
+        // full, reading as "finished" while the server was still booting.
+        bar.style.setProperty('transition','width '+(remainingMs/1000)+'s linear','important');
         bar.style.width='100%';
       }
     }

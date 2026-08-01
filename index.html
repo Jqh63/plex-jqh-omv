@@ -109,7 +109,16 @@
   @media (prefers-reduced-motion: reduce){
     *,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important;scroll-behavior:auto!important}
     .status-dot.checking{opacity:.75}
-    .power-ring:has(.power-btn.sent)::after{opacity:1}
+    /* WCAG 2.3.3 EXEMPTS motion that is essential to the information/function.
+       The wake halo and the boot progress bar are exactly that: a FROZEN halo
+       reads as "broken" and a bar the blanket rule snaps to 100% reads as
+       "done" while the server is still booting — the app looked KO on a Windows
+       PC with "Show animations" off (2026-08-01). Re-assert both here so the
+       wake flow is identical with or without reduced motion; the decorative
+       transitions (card fades, dot pulse) stay damped. The bar's transition is
+       set inline with !important in startCountdown() — its duration is dynamic
+       (remaining ETA), so it cannot be pinned from CSS. */
+    .power-ring:has(.power-btn.sent)::after{opacity:1;animation:spin 1.2s linear infinite!important}
   }
 
   /* Keyboard / switch-control focus. Every control here gave feedback on

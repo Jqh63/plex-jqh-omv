@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Accessibility pins for index.html.
 
-Three things that were silently wrong and that no other suite looks at:
+Four things that were silently wrong and that no other suite looks at:
 
 1. The power button announced a STATIC "Allumer le serveur" through a
    hardcoded aria-label, while its visible label went on to say "Réveil… 45 s"
@@ -17,6 +17,11 @@ Three things that were silently wrong and that no other suite looks at:
 3. No :focus-visible anywhere: every control gave feedback on :active only, and
    -webkit-tap-highlight-color:transparent removes even the platform default.
    Keyboard and iOS Switch Control users had no visible selection.
+
+4. The blanket reduced-motion rule ALSO froze the wake halo and snapped the boot
+   progress bar to 100% — essential feedback (WCAG 2.3.3 exempts it), not the
+   decorative motion the setting targets. The whole wake looked broken on a
+   Windows PC with animations off (2026-08-01). §4 pins the exemption.
 
 Run: python3 tests/a11y-e2e.py   (exit 0 = all pins hold)
 """
@@ -121,6 +126,45 @@ def main():
         ok = (bool(outline) and outline["style"] == "solid"
               and outline["width"] == "2px")
         results.append(check(pg, "keyboard focus shows OUR focus ring", ok, str(outline)))
+        pg.close()
+
+        # --- 4. ESSENTIAL wake feedback survives reduced motion -------------
+        # Symmetric to §2: the checking-dot pulse is decorative and MUST stop,
+        # but the wake halo spin and the boot progress bar carry information —
+        # a frozen halo reads "broken", a bar the blanket rule snaps to 100%
+        # reads "done" mid-boot. WCAG 2.3.3 exempts essential motion. On a
+        # Windows PC with animations off the whole wake looked KO (2026-08-01).
+        # These pins FAIL on the unfixed CSS (halo duration ~0, bar transition
+        # collapsed to .01ms) and hold only with the exemption in place.
+        for reduce_motion in (False, True):
+            ctx = b.new_context(viewport={"width": 360, "height": 780},
+                                reduced_motion="reduce" if reduce_motion else "no-preference")
+            pg = ctx.new_page()
+            pg.goto(URL)
+            pg.wait_for_selector("#mainScreen", state="visible", timeout=10000)
+            pg.wait_for_timeout(300)
+            # Enter the wake look without firing a real POST: the .sent class is
+            # what drives both the halo (:has) and, via startCountdown, the bar.
+            pg.evaluate("""() => {
+                document.getElementById('powerBtn').className = 'power-btn sent';
+                startCountdown(0);
+            }""")
+            pg.wait_for_timeout(120)
+            halo = pg.evaluate("""() => getComputedStyle(
+                document.querySelector('.power-ring'), '::after').animationDuration""")
+            halo_secs = float(halo.rstrip("s").replace("ms", "")) if halo else 0.0
+            # Same parse caveat as §2: 0.01ms serialises as "1e-05s".
+            results.append(check(pg, "wake halo keeps spinning (essential motion)",
+                                 halo_secs > 0.5, f"animation-duration={halo}"))
+            bar = pg.evaluate("""() => getComputedStyle(
+                document.getElementById('powerProgressBar')).transitionDuration""")
+            bar_secs = float(bar.rstrip("s").replace("ms", "")) if bar else 0.0
+            # The bar transition is the remaining ETA (~80s fallback): a real,
+            # long fill, never the ~0 the blanket reduced-motion rule imposes.
+            results.append(check(pg, "boot bar animates over the ETA (essential motion)",
+                                 bar_secs > 1.0, f"transition-duration={bar}"))
+            ctx.close()
+
         b.close()
 
     print("ALL PASS" if all(results) else "FAILED")

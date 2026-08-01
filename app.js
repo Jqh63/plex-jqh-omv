@@ -1535,7 +1535,13 @@ function startCountdown(elapsedMs){
   bar.style.transition='none';
   bar.style.width=(etaMs?elapsedMs/etaMs*100:0)+'%';
   void bar.offsetWidth;
-  bar.style.transition='width '+((etaMs-elapsedMs)/1000)+'s linear';
+  // !important: under prefers-reduced-motion the blanket `*{transition-duration:
+  // .01ms!important}` rule (index.html) would otherwise beat this inline value
+  // and snap the bar straight to 100% — a full, static bar that reads as "done"
+  // mid-boot (Windows PC with animations off, 2026-08-01). An inline !important
+  // outranks a stylesheet !important, so the real ETA-length transition wins.
+  // The wake bar is essential feedback, exempt from motion reduction (WCAG 2.3.3).
+  bar.style.setProperty('transition','width '+((etaMs-elapsedMs)/1000)+'s linear','important');
   bar.style.width='100%';
   // Three labels by elapsed time. Past T=0 we used to leave "presque prêt"
   // displayed for up to 5 min (the WoL_TIMEOUT_MS) which made the family

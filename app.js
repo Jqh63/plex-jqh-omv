@@ -748,14 +748,26 @@ function wolReady(){return !!(config&&config.mac&&config.relay&&config.token);}
 // background, onForeground() re-acquires it if the wake is still running.
 // Graceful no-op where the API is missing (pre-18.4 Safari).
 var wakeLock=null;
+// v8.72 — `remoteWaking` counts as much as `wolSent`: a wake fired by the AM5's
+// logon task is adopted here, paints the same countdown, and the user watches it
+// for the same ~80 s. Keying only on wolSent let the screen lock mid-boot on
+// exactly the flavour of wake the family sees most (reported 2026-08-01).
+// Re-entrant by construction: enterRemoteWaking() runs on EVERY poll of an adopted
+// wake, so without the held/pending guard each poll would mint a new lock and
+// orphan the previous one (releaseWakeLock only ever knows the last).
+var wakeLockPending=false;
 function acquireWakeLock(){
-  if(!('wakeLock' in navigator)||!wolSent)return;
+  if(!('wakeLock' in navigator)||(!wolSent&&!remoteWaking))return;
+  if(wakeLock||wakeLockPending)return;
+  wakeLockPending=true;
   navigator.wakeLock.request('screen').then(function(l){
-    if(!wolSent){l.release().catch(function(){});return;}
+    wakeLockPending=false;
+    if(!wolSent&&!remoteWaking){l.release().catch(function(){});return;}
     wakeLock=l;
-  }).catch(function(){});
+  }).catch(function(){wakeLockPending=false;});
 }
 function releaseWakeLock(){
+  wakeLockPending=false;
   if(wakeLock){wakeLock.release().catch(function(){});wakeLock=null;}
 }
 
@@ -1489,6 +1501,7 @@ function enterRemoteWaking(wakeAgeS){
   hasConfirmedState=true;lastVerdictAtMs=Date.now();
   downStreak=0;if(downRecheckTimer){clearTimeout(downRecheckTimer);downRecheckTimer=null;}
   remoteWaking=true;
+  acquireWakeLock();
   setStarting();
   if(config.mac){
     var pBtn=document.getElementById('powerBtn'),pLbl=document.getElementById('powerLabel');
@@ -1878,7 +1891,7 @@ function onForeground(){
   checkStatus();
   // v8.18 — the OS released the wake lock on background; re-hold it if the
   // wake is still in progress.
-  if(wolSent)acquireWakeLock();
+  if(wolSent||remoteWaking)acquireWakeLock();
   // Countdown text self-corrects from Date.now() on the next tick, but the
   // CSS progress bar transition does NOT — it was started once with a
   // duration of etaMs and is frozen-then-resumed by the suspend, so on

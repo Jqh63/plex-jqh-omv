@@ -442,6 +442,81 @@ def scenario_failed_wake_says_contact_admin(p):
     return ok
 
 
+def scenario_adopted_wake_holds_the_screen(p):
+    """v8.72 — the screen must stay on for a wake the phone ADOPTED, not only for one
+    it tapped.
+
+    Reported 2026-08-01: the AM5's logon task fires the wake, the phone adopts it and
+    paints the countdown — and the screen locks ~30 s into an ~80 s boot, which is the
+    exact symptom v8.18 shipped the wake lock to kill. The hole: `acquireWakeLock()`
+    early-returned on `!wolSent`, a flag that is false by construction on an adopted
+    wake, and `enterRemoteWaking()` never asked for the lock at all.
+
+    `navigator.wakeLock` does not exist in headless Chromium (and never on file://), so
+    the API is stubbed BEFORE load and the requests are counted. The stub also records
+    releases, which is what makes the settle half of the assertion real rather than a
+    "it asked once" formality.
+    """
+    print("\n## adopted-wake-holds-the-screen (v8.72)")
+    counters = {"relay": 0, "home": 0, "wol": 0}
+    state = {"waking": True}
+
+    def relay_plan(n):
+        return "waking:18" if state["waking"] else "up"
+
+    b = getattr(p, ENGINE).launch()
+    ctx = b.new_context(viewport={"width": 390, "height": 844})
+    page = ctx.new_page()
+    page.route("**/*", _mk_handler(counters, relay_plan, lambda n: "ok"))
+    # `navigator.wakeLock = …` is silently DROPPED here: Chromium exposes wakeLock as
+    # a getter-only accessor on Navigator.prototype, so a plain assignment on the
+    # instance is a no-op in sloppy mode (it DOES work on about:blank, where the API
+    # is not exposed — which is how a first pass of this stub read as "0 requests,
+    # bug confirmed" against a FIXED app.js). Override the accessor itself.
+    page.add_init_script("""
+      window.__wl = {req: 0, rel: 0};
+      Object.defineProperty(Navigator.prototype, 'wakeLock', {configurable: true, get: function(){
+        return {request: function(){
+          window.__wl.req++;
+          return Promise.resolve({release: function(){
+            window.__wl.rel++; return Promise.resolve();
+          }, addEventListener: function(){}});
+        }};
+      }});
+    """)
+    page.goto(PWA_URL, wait_until="load")
+    page.wait_for_selector("#statusLabel", state="attached", timeout=10000)
+    page.wait_for_timeout(1200)
+
+    adopted = card(page)
+    wl = page.evaluate("() => window.__wl")
+    print(f"  AM5 wake adopted → countdown={adopted['power']!r} wakeLock={wl}")
+    ok = check("the adopted wake is actually running (fixture sanity)",
+               is_counting_down(adopted) and counters["wol"] == 0,
+               f"countdown={adopted['power']!r} wol POSTs={counters['wol']}")
+    ok &= check("the screen is held during an ADOPTED wake (the bug)",
+                wl["req"] >= 1 and wl["req"] > wl["rel"],
+                f"requests={wl['req']} releases={wl['rel']}")
+    # Every poll re-enters enterRemoteWaking(): exactly ONE lock must exist, or the
+    # orphans outlive the boot and the screen never sleeps again.
+    page.wait_for_timeout(9000)
+    wl_poll = page.evaluate("() => window.__wl")
+    ok &= check("and held ONCE, not re-minted on every poll",
+                wl_poll["req"] == 1, f"requests={wl_poll['req']}")
+
+    # The home comes up: the hold must end, otherwise the phone never sleeps again.
+    state["waking"] = False
+    page.wait_for_timeout(9000)
+    settled = card(page)
+    wl2 = page.evaluate("() => window.__wl")
+    print(f"  home up → card={settled['label']!r} wakeLock={wl2}")
+    ok &= check("and released once the home is up",
+                is_green(settled) and wl2["rel"] >= 1,
+                f"card={settled['card']!r} releases={wl2['rel']}")
+    b.close()
+    return ok
+
+
 def main():
     print("=" * 72)
     print(f"WAKE-path E2E (v8.31 + v8.32) — engine={ENGINE} base={PWA_BASE}")
@@ -458,6 +533,7 @@ def main():
         ok &= scenario_remote_wake_outlives_the_waking_signal(p)
         ok &= scenario_failed_wake_promotes_the_manual_page(p)
         ok &= scenario_failed_wake_says_contact_admin(p)
+        ok &= scenario_adopted_wake_holds_the_screen(p)
 
     print("\n" + "=" * 72)
     print("ALL PASS" if ok else "FAILURES — see above")

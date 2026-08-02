@@ -230,14 +230,23 @@ code. Don't undo them without re-bisecting:
 
 ## Claude Code tooling (.claude/)
 
-Repo-specific Claude Code skills live under `.claude/skills/`:
+No skills in this repo (removed 2026-08-02 — see the `knowledge-base` ADR
+`2026-08-02-suppression-skills-knowledge-base`: they restated doctrine already
+in context and had drifted; this section itself still claimed a "visible version
+marker" that § *Versioning and propagation* had ruled out). The three gestures
+they carried:
 
-- **deploy-relay** — deploy the WoL relay (`relay/`) to the always-free
-  VM via the GitOps channel; use after changing anything under `relay/`.
-- **release-pwa** — bump the visible version marker + service-worker
-  `CACHE` so installed users auto-update; use on every UX release.
-- **test-pwa** — run the two-layer test suite (Python state-machine sim
-  + Playwright E2E); use when changing status/probe timing in `app.js`.
+- **Release a PWA version** → § *Versioning and propagation* above. `sw.js` is
+  the only marker to edit.
+- **Run the tests** → `tests/README.md` is the authority (suites, engines,
+  traps). Layer 1 `python3 tests/state-machine-sim.py`, layer 2
+  `python3 tests/cold-radio-e2e.py` (both engines = the merge gate; a PARTIAL
+  banner prints when you forget one). ⚠️ `PWA_BASE` is not shared vocabulary:
+  `cold-radio-e2e.py` wants a **page** URL, `fallback-e2e.py` wants the
+  **directory**.
+- **Deploy the WoL relay** → `relay/README.md` § *GitOps deploy channel*:
+  merge first, then `bash relay/scripts/deploy.sh`, then
+  `ssh wol-relay-deploy status` / `health`.
 
 ## When in doubt
 

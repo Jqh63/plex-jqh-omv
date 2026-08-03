@@ -802,10 +802,16 @@ function startApp(){
   // path was nearly "unified" with the presumptions, which would have silently
   // dropped the "vérifié il y a…" line.
   var cached=readLocalStatus();
-  if(cached&&cached.up){
+  if(cached&&cached.up&&!cached.degraded){
     relayReachable=cached.relayOk!==false;
     setOnline();
     logPaint('online','cache-prepaint-open','cache='+Math.round((Date.now()-cached.t)/1000)+'s');
+  }else if(cached&&cached.up){
+    // v8.72 — a degraded "up" is not a confident green: the host answers but the
+    // app the user is about to tap does not. Fall through to the orange probe
+    // rather than pre-paint a green the live path would itself withhold.
+    hasConfirmedState=false;
+    logPaint('checking','cache-prepaint-declined-degraded','cache='+Math.round((Date.now()-cached.t)/1000)+'s');
   }
   checkStatus();
   if(checkInterval)clearInterval(checkInterval);
@@ -839,8 +845,14 @@ function readLocalStatus(maxAgeMs){
     return d;
   }catch(e){return null;}
 }
-function writeLocalStatus(up,relayOk){
-  try{localStorage.setItem(STATUS_LOCAL_KEY,JSON.stringify({up:!!up,relayOk:relayOk!==false,t:Date.now()}));}catch(e){}
+// v8.72 — `degraded` is part of the cached verdict, not a detail of the live
+// one. Without it the cache said "up, confident" at the exact moment the code
+// was refusing to show green (the wake hold below), and any pre-paint promoted
+// that to the confident green it had just withheld. Cached shape is versioned
+// only by its keys: an old entry simply has no `degraded` and reads falsy,
+// which is the pre-v8.72 behaviour for the one TTL it survives.
+function writeLocalStatus(up,relayOk,degraded){
+  try{localStorage.setItem(STATUS_LOCAL_KEY,JSON.stringify({up:!!up,relayOk:relayOk!==false,degraded:!!degraded,t:Date.now()}));}catch(e){}
 }
 
 // See PAINT_LOG_KEY. `card` = what the user sees (online/offline/checking/
@@ -1210,10 +1222,10 @@ function checkStatus(){
       if(res.degraded&&(wolSent||remoteWaking)&&wolStartTime&&
          Date.now()-wolStartTime<getEta()+APP_WARMUP_MS){
         downStreak=0;if(downRecheckTimer){clearTimeout(downRecheckTimer);downRecheckTimer=null;}
-        writeLocalStatus(true,relayReachable);
+        writeLocalStatus(true,relayReachable,true);
         return;
       }
-      writeLocalStatus(true,relayReachable);
+      writeLocalStatus(true,relayReachable,res.degraded);
       setOnline(res.degraded);
       logPaint('online','verdict-up',relayEvidence(res));
     }else if(res.waking&&!wolSent){
@@ -1882,10 +1894,25 @@ function onForeground(){
   // through to the orange "Vérification…" like a stale/empty cache. The
   // background checkStatus() below confirms or corrects within ~1 probe.
   var cached=readLocalStatus();
-  if(cached&&cached.up){
+  // v8.72 — the IRL bug of 2026-08-03, and the reason this guard is TWO guards.
+  // The AM5 woke the home; this page adopted the wake and the v8.49 hold was
+  // correctly withholding green on `degraded` polls — while caching a bare
+  // "up". A resume (trivial to trigger on desktop Chrome: any click back into
+  // the window) then pre-painted that cache, and setOnline() does more than
+  // paint: it clears `remoteWaking` and stops the countdown, so every later
+  // degraded poll fell out of the hold too. Green landed 29 s before Seerr
+  // actually answered, and stayed. So: a degraded cache is never a confident
+  // green (guard 1), and a pre-paint never ends a wake that is still in flight
+  // (guard 2) — the live probe below is what gets to settle it.
+  if(cached&&cached.up&&!cached.degraded&&!((wolSent||remoteWaking)&&countdownTimer)){
     relayReachable=cached.relayOk!==false;
     setOnline();
     logPaint('online','cache-prepaint-resume','cache='+Math.round((Date.now()-cached.t)/1000)+'s');
+  } else if((wolSent||remoteWaking)&&countdownTimer){
+    // Wake in flight: the countdown on screen is the honest state. Leave the
+    // card alone (hasConfirmedState untouched, so no orange flash over it).
+    logPaint('waking','prepaint-held-wake-in-flight',
+             'cache='+(cached?Math.round((Date.now()-cached.t)/1000)+'s':'none')+(cached&&cached.degraded?' degraded':''));
   } else {
     // No cache, stale cache (> STATUS_LOCAL_TTL_MS in background), OR a cached
     // "down" — the on-screen state may no longer reflect reality. Reset

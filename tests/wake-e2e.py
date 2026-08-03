@@ -76,6 +76,12 @@ def _status_body(verdict):
     ever served alongside up=false — a booting home is a down home."""
     if verdict == "up":
         return '{"up": true, "stale": false, "age_s": 0, "eta_s": 80}'
+    # `up-degraded` = the home answers HTTP but the probed app (Seerr) is still
+    # 5xx-ing. The relay serves this for the ~20-30 s between the host booting
+    # and the apps being ready; it is up=true, so every "is it up" branch says
+    # yes while the thing the user is about to tap is not there yet.
+    if verdict == "up-degraded":
+        return '{"up": true, "stale": false, "age_s": 0, "eta_s": 80, "degraded": true}'
     if verdict.startswith("waking:"):
         age = int(verdict.split(":", 1)[1])
         return ('{"up": false, "stale": false, "age_s": null, '
@@ -517,6 +523,89 @@ def scenario_adopted_wake_holds_the_screen(p):
     return ok
 
 
+def scenario_degraded_resume_does_not_go_green_early(p):
+    """v8.72 — the 2026-08-03 IRL bug: green 29 s before Seerr was reachable.
+
+    Exact replay of what the relay and the app's own paint journal recorded.
+    07:44:20 the AM5 fires /wol; 07:44:58 Yann opens the PWA on desktop Chrome;
+    07:45:02 the page ADOPTS the wake; 07:45:08 the home starts answering
+    `up degraded` (host awake, Seerr still 5xx) and the v8.49 hold correctly
+    withholds green — for 16 s. Then a resume fires (a click back into the
+    window is enough on desktop) and the card goes green, 29 s before the first
+    non-degraded poll at 07:45:54.
+
+    Two defects, both needed to produce it, so BOTH are asserted:
+      1. the hold cached a bare `up`, so the pre-paint had a confident green to
+         replay — written by the very branch that was withholding it;
+      2. that pre-paint calls setOnline(), which clears `remoteWaking` and stops
+         the countdown, so the later degraded polls no longer matched the hold
+         either. The green did not just come early, it came to STAY.
+
+    The positive control is the last leg: once the home is genuinely ready, the
+    green must land. Without it, "never go green" would pass this test.
+    """
+    print("\n## degraded-resume-does-not-paint-green-early (v8.72 — IRL 2026-08-03)")
+    counters = {"relay": 0, "home": 0, "wol": 0}
+    state = {"phase": "waking"}
+
+    def relay_plan(n):
+        return {"waking": "waking:40", "degraded": "up-degraded", "ready": "up"}[state["phase"]]
+
+    b = getattr(p, ENGINE).launch()
+    ctx = b.new_context(viewport={"width": 390, "height": 844})
+    page = ctx.new_page()
+    page.route("**/*", _mk_handler(counters, relay_plan, lambda n: "fail"))
+    page.goto(PWA_URL, wait_until="load")
+    page.wait_for_selector("#statusLabel", state="attached", timeout=10000)
+    page.wait_for_timeout(800)
+
+    adopted = card(page)
+    ok = check("the PWA adopts the AM5 wake (countdown running, no tap of ours)",
+               is_counting_down(adopted) and counters["wol"] == 0,
+               f"countdown={adopted['power']!r} wol POSTs={counters['wol']}")
+
+    # The host comes up but Seerr is not ready: relay serves up+degraded.
+    state["phase"] = "degraded"
+    page.wait_for_timeout(9000)          # let at least one degraded poll land
+    held = card(page)
+    print(f"  degraded poll landed → card={held['label']!r} countdown={held['power']!r}")
+    ok &= check("the v8.49 hold still withholds green on a degraded up",
+                not is_green(held), f"card={held['label']!r} dot={held['dot']!r}")
+
+    # THE BUG: a resume. On desktop Chrome any click back into the window fires
+    # this; on Android it is the app switcher. No time travel — the wake is live
+    # and legitimately in progress, which is exactly why nothing may reap it.
+    page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
+    page.wait_for_timeout(1500)
+
+    resumed = card(page)
+    print(f"  resumed mid-boot → card={resumed['label']!r} countdown={resumed['power']!r} "
+          f"bar={resumed['progress']!r}")
+    ok &= check("NO green pre-painted from the degraded cache on resume",
+                not is_green(resumed), f"card={resumed['label']!r} dot={resumed['dot']!r}")
+    ok &= check("the wake survives the resume (countdown still running)",
+                is_counting_down(resumed), f"progress bar={resumed['progress']!r}")
+
+    # A degraded poll AFTER the resume: the hold must still apply, i.e. the
+    # pre-paint must not have cleared remoteWaking underneath it. This is the
+    # half that made the early green permanent rather than momentary.
+    page.wait_for_timeout(9000)
+    still = card(page)
+    ok &= check("a degraded poll after the resume is still held (wake not cleared)",
+                not is_green(still), f"card={still['label']!r} dot={still['dot']!r}")
+
+    # POSITIVE CONTROL — services ready: the green must land, or this scenario
+    # would be satisfied by an app that never goes green at all.
+    state["phase"] = "ready"
+    page.wait_for_timeout(9000)
+    ready = card(page)
+    print(f"  services ready → card={ready['label']!r}")
+    ok &= check("green lands once the home answers non-degraded (positive control)",
+                is_green(ready), f"card={ready['label']!r} dot={ready['dot']!r}")
+    b.close()
+    return ok
+
+
 def main():
     print("=" * 72)
     print(f"WAKE-path E2E (v8.31 + v8.32) — engine={ENGINE} base={PWA_BASE}")
@@ -534,6 +623,7 @@ def main():
         ok &= scenario_failed_wake_promotes_the_manual_page(p)
         ok &= scenario_failed_wake_says_contact_admin(p)
         ok &= scenario_adopted_wake_holds_the_screen(p)
+        ok &= scenario_degraded_resume_does_not_go_green_early(p)
 
     print("\n" + "=" * 72)
     print("ALL PASS" if ok else "FAILURES — see above")

@@ -1062,6 +1062,29 @@ async def status(request: Request, x_token: str | None = Header(None)):
             # to ~1 s of the observed ~3 s cross-device countdown offset (the
             # adopting device back-dates its anchor by this value).
             body["wake_age_s"] = round(wake_age, 3)
+    # WHEN this body was built, on the wall clock (epoch seconds, UTC). The one
+    # question neither `age_s` nor the client-side `rt` can answer, and the one
+    # that closes a three-occurrence blind spot:
+    #
+    #   2026-07-31  age=578s then age=6s one second apart — impossible from two
+    #               live answers of a single-worker relay. `rt` was added to tell
+    #               a thawed probe from a real answer.
+    #   2026-08-03  a phone painted a false red carrying age=21447s, an integer
+    #               built at 07:01 and delivered at 20:23 — with rt=805ms, i.e.
+    #               a FAST transport. So: old body, live round-trip. `rt` had
+    #               already cleared the documented suspect (a frozen promise
+    #               would have shown rt in the hours), and every other layer is
+    #               excluded by construction — HTTP cache (`no-store`), the
+    #               service worker (cross-origin passthrough), the localStorage
+    #               pre-paint cache (it stores no age at all).
+    #
+    # `age_s` is a DURATION, so a replayed body carries a plausible-looking one
+    # forever. A timestamp is an ABSOLUTE, so the same replay is self-evident:
+    # served_at far in the past next to a small rt names the defect without
+    # having to guess which layer held the body. Sent in the JSON rather than
+    # read from the `Date` header because `Date` is not CORS-safelisted — using
+    # it would mean widening Access-Control-Expose-Headers in the Caddyfile.
+    body["served_at"] = int(time.time())
     window = current_window()
     if window:
         body["window"] = window

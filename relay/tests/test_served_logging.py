@@ -69,6 +69,45 @@ def test_an_unchanged_verdict_stays_silent_then_a_flip_speaks(client, caplog):
     assert "up=False" in lines[1] and "source=heartbeat" in lines[1]
 
 
+def test_an_unchanged_verdict_still_speaks_once_per_floor_with_a_climbing_age(
+        client, caplog, monkeypatch):
+    # THE REPLAY DETECTOR (IRL 2026-08-03). Transition-only logging left the
+    # relay mute for 13 h on an unchanged (down, heartbeat) verdict, exactly the
+    # window in which a phone painted a false red carrying a STALE age. With a
+    # floor, the same state re-logs periodically, and `age` becomes a series:
+    # a live age CLIMBS. If a future line ever repeats an age, that is the replay,
+    # visible without any further instrumentation.
+    caplog.set_level(logging.INFO, logger="wol-relay")
+
+    clock = [relay.time.monotonic()]
+    monkeypatch.setattr(relay.time, "monotonic", lambda: clock[0])
+    # Read via getattr so this pins the BEHAVIOUR, not the symbol: against a
+    # transition-only relay the test must fail on "the second line never came",
+    # not on an AttributeError that proves nothing about what was served.
+    floor = getattr(relay, "SERVED_RELOG_S", 300.0)
+
+    client.post("/heartbeat", headers=HB, json={"up": False})
+    client.get("/status", headers=ST)
+    assert len(_served(caplog)) == 1
+
+    # Still inside the floor: silence must hold, or we are back to per-request noise.
+    clock[0] += floor - 1
+    client.get("/status", headers=ST)
+    assert len(_served(caplog)) == 1, "the floor must not re-log early"
+
+    # Past the floor: the SAME verdict must speak again, marked as unchanged.
+    clock[0] += 2
+    client.get("/status", headers=ST)
+    lines = _served(caplog)
+    assert len(lines) == 2, lines
+    assert "(unchanged)" in lines[1], lines[1]
+
+    # The point of the whole thing: the age moved. A repeat would be the bug.
+    def _age(line):
+        return int(line.split("age=")[1].split()[0])
+    assert _age(lines[1]) > _age(lines[0]), lines
+
+
 def test_the_waking_flag_counts_as_its_own_verdict(client, caplog):
     # up=False + waking is a different card (countdown, not "Éteint"), so it is a
     # distinct served state — otherwise a wake would be invisible in the journal

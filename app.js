@@ -909,6 +909,17 @@ function relayEvidence(res){
   // FALSE GREEN: a thawed probe carrying age=9s would paint online. Logged,
   // not "fixed": the fix has to wait for the journal to name the culprit.
   if(typeof res.rtMs==='number')p.push('rt='+res.rtMs+'ms');
+  // 2026-08-03 — `rt` above separates a thawed probe from a live answer, and on
+  // the false red of that day it CLEARED that suspect: rt=805ms, a fast
+  // transport carrying a body the relay had built 13 h earlier. What no field
+  // could say was WHEN the relay built it, so the investigation had to exclude
+  // every caching layer by code reading (HTTP `no-store`, cross-origin SW
+  // passthrough, a pre-paint cache that stores no age) and still ended without
+  // a culprit. `sa` is that missing coordinate: the gap between the relay's own
+  // build stamp and our clock. Live answer → a second or two (RTT + clock
+  // skew). Replayed body → the gap IS the replay, stated outright.
+  if(typeof res.servedAtS==='number')
+    p.push('sa='+Math.round(Date.now()/1000-res.servedAtS)+'s');
   if(res.degraded)p.push('degraded');
   if(res.waking)p.push('waking');
   if(res.wakeFailedRemote)p.push('wake_failed');
@@ -1328,7 +1339,9 @@ function probe(){
     // ageS is carried for the paint journal only (see relayEvidence): "green,
     // src=hb, age=549s" is a different story from "green, src=poll, age=2s", and
     // that distinction is precisely what the 2026-07-30 report was missing.
-    function(j){return {up:j.up,ageS:(typeof j.age_s==='number'?j.age_s:null),rtMs:(typeof j._rtMs==='number'?j._rtMs:null),relayReachable:true,window:(typeof j.window==='string'?j.window:null),waking:j.waking===true,wakeAgeS:(typeof j.wake_age_s==='number'?j.wake_age_s+((j._rtMs||0)/2000):0),etaS:(typeof j.eta_s==='number'?j.eta_s:0),degraded:j.degraded===true,declared:j.source==='heartbeat',confirmed:j.confirmed===true,wakeFailedRemote:j.wake_failed===true};},
+    // v8.72 — servedAtS is the relay's own build stamp (see relayEvidence): the
+    // coordinate that tells an old body over a fast link from a live answer.
+    function(j){return {up:j.up,ageS:(typeof j.age_s==='number'?j.age_s:null),servedAtS:(typeof j.served_at==='number'?j.served_at:null),rtMs:(typeof j._rtMs==='number'?j._rtMs:null),relayReachable:true,window:(typeof j.window==='string'?j.window:null),waking:j.waking===true,wakeAgeS:(typeof j.wake_age_s==='number'?j.wake_age_s+((j._rtMs||0)/2000):0),etaS:(typeof j.eta_s==='number'?j.eta_s:0),degraded:j.degraded===true,declared:j.source==='heartbeat',confirmed:j.confirmed===true,wakeFailedRemote:j.wake_failed===true};},
     function(err){
       var relayUp=!!(err&&err.answered);
       // v8.65 — the direct-home fallback no longer produces a VERDICT.

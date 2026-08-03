@@ -892,22 +892,45 @@ def heartbeat(req: HeartbeatReq, request: Request,
 # polls every 8 s, so a line per request would bury the day in noise (and blow
 # the journal budget `log-footprint` watches). A transition is exactly the event
 # a flapping card is made of.
+#
+# …but a transition-only log has a blind spot that cost a second investigation
+# (IRL 2026-08-03): the key below deliberately omits `age_s`, so two `(down,
+# heartbeat)` answers 13 h apart are "the same verdict" and the later one is
+# never written. A phone reported a false red carrying `age=21447s` — an integer
+# that ALSO appeared, identical to the second, in two earlier paints, on a home
+# that had been up for hours. `age_s` is recomputed per request, so the same
+# value twice cannot come from two live calls; something replayed a stale body.
+# The journal could not say what the relay answered at that moment, because it
+# had answered "the same thing" and stayed silent.
+#
+# Hence a floor: an unchanged verdict still speaks once per SERVED_RELOG_S. That
+# is the positive signal ("I am serving X, and here is its age NOW") which turns
+# `age_s` into a SERIES — and a series is what makes a replay self-evident: a
+# live age climbs, a replayed one repeats. Bounded by construction: at most one
+# line per 5 min per unchanged state, ~288/day worst case, against the 182 MB /
+# 25 GB free that `log-footprint` reports.
+SERVED_RELOG_S = 300.0
+
 _last_served: tuple[bool, str | None, bool, bool] | None = None
+_last_served_at: float = 0.0
 
 
 def _log_served(body: dict, cid: str | None) -> None:
-    global _last_served
+    global _last_served, _last_served_at
     key = (bool(body.get("up")), body.get("source"),
            bool(body.get("waking")), bool(body.get("wake_failed")))
-    if key == _last_served:
+    now = time.monotonic()
+    unchanged = key == _last_served
+    if unchanged and (now - _last_served_at) < SERVED_RELOG_S:
         return
-    _last_served = key
+    _last_served, _last_served_at = key, now
     logger.info(
-        "status served up=%s source=%s age=%s%s%s cid=%s",
+        "status served up=%s source=%s age=%s%s%s cid=%s%s",
         body.get("up"), body.get("source") or "pull", body.get("age_s"),
         " waking" if body.get("waking") else "",
         " wake_failed" if body.get("wake_failed") else "",
         cid or "-",
+        " (unchanged)" if unchanged else "",
     )
 
 

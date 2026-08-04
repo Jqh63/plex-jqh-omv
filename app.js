@@ -1175,7 +1175,24 @@ function checkStatus(){
     // The one prior we do NOT overrule is a fresh PERSISTED down: during a real
     // outage the family re-opens the app repeatedly, and flashing green on each
     // open would be the mirror of the red flash v8.7 banned.
-    var presumeUp=navigator.onLine&&downStreak===0&&
+    // v8.74 — the junction v8.72 left open. `degraded` became part of the cached
+    // verdict so the two PRE-PAINT consumers would stop promoting "host up, app
+    // not answering" to the confident green. This branch is the cache's THIRD
+    // consumer — it reads the same entry as a PRIOR — and it was never taught,
+    // so startApp() declined the green (cache-prepaint-declined-degraded) and
+    // checkStatus(), called one line later, presumed it back. The guard was
+    // correct on its own path and worth nothing end to end.
+    // It gates the WHOLE presumption, not just the `prior.up` clause: a degraded
+    // prior is not an absent one, so the v8.60 schedule-only clause below would
+    // otherwise green it a second time on its own. A fresh measurement that the
+    // app does not answer REFUTES the schedule; it does not merely fail to
+    // confirm it.
+    // Deliberately NOT folded into priorOutranksSchedule above: off-window, a
+    // degraded prior must still outrank the schedule, or we would paint the blue
+    // "Éteint (prévu)" over a host we measured awake 30 s ago. Both branches
+    // then fall through to the orange probe, which is the honest state.
+    var priorDegraded=!!(prior&&prior.up&&prior.degraded);
+    var presumeUp=navigator.onLine&&downStreak===0&&!priorDegraded&&
                   ((prior&&prior.up&&(inWin!==false||priorOutranksSchedule))||
                    (inWin===true&&!(prior&&!prior.up)));
     if(presumeUp){
@@ -1191,7 +1208,7 @@ function checkStatus(){
       paintTile('Vérification...','interrogation du relais…');
       setButtonChecking();
       logPaint('checking','no-usable-prior',
-               prior?(prior.up?'prior-up':'prior-down'):'no-prior');
+               prior?(prior.up?(priorDegraded?'prior-up-degraded':'prior-up'):'prior-down'):'no-prior');
     }
   }
   probe().then(function(res){

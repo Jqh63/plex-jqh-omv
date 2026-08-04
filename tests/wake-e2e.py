@@ -46,6 +46,7 @@ Runs against the LIVE deploy by default (post-merge gate), like cold-radio-e2e:
 
 import os
 import sys
+import time
 from urllib.parse import urlparse
 
 from playwright.sync_api import Route, sync_playwright
@@ -71,22 +72,47 @@ ENGINE = os.environ.get("PWA_ENGINES", "chromium").split(",")[0].strip()
 JSON_H = {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"}
 
 
+# v8.73 — the PWA now refuses any /status body it cannot prove the relay built
+# JUST NOW (`served_at`, see isLiveBody in app.js). These scenarios time-travel
+# the PAGE clock while the fixtures stamp from the HOST clock, so a +24 h jump
+# would make every subsequent body look replayed and this suite would test the
+# rejection path by accident. The skew is threaded explicitly instead: when the
+# page's wall clock moves, the relay's does too — that is what "wall clock"
+# means, and the fixture has to model it rather than sit still.
+_clock_skew_s = [0]
+
+
+def _reset_clock_skew():
+    """Per-scenario, NOT cumulative. Found by the bench: two scenarios each add
+    +24 h and the global carried the total into every scenario that ran after
+    them, so their fixtures were stamped a day or two in the future and the
+    liveness gate refused every body — a whole suite failing for a defect that
+    lived in the harness. Each scenario starts on a fresh page, so it must start
+    on a fresh clock too."""
+    _clock_skew_s[0] = 0
+
+
+def _served_at():
+    return int(time.time()) + _clock_skew_s[0]
+
+
 def _status_body(verdict):
     """`waking:N` = the relay reports a wake in progress, N seconds old. It is only
     ever served alongside up=false — a booting home is a down home."""
     if verdict == "up":
-        return '{"up": true, "stale": false, "age_s": 0, "eta_s": 80}'
+        return f'{{"up": true, "stale": false, "age_s": 0, "eta_s": 80, "served_at": {_served_at()}}}'
     # `up-degraded` = the home answers HTTP but the probed app (Seerr) is still
     # 5xx-ing. The relay serves this for the ~20-30 s between the host booting
     # and the apps being ready; it is up=true, so every "is it up" branch says
     # yes while the thing the user is about to tap is not there yet.
     if verdict == "up-degraded":
-        return '{"up": true, "stale": false, "age_s": 0, "eta_s": 80, "degraded": true}'
+        return f'{{"up": true, "stale": false, "age_s": 0, "eta_s": 80, "degraded": true, "served_at": {_served_at()}}}'
     if verdict.startswith("waking:"):
         age = int(verdict.split(":", 1)[1])
         return ('{"up": false, "stale": false, "age_s": null, '
-                f'"waking": true, "wake_age_s": {age}, "eta_s": 80}}')
-    return '{"up": false, "stale": false, "age_s": null, "eta_s": 80}'
+                f'"waking": true, "wake_age_s": {age}, "eta_s": 80, '
+                f'"served_at": {_served_at()}}}')
+    return f'{{"up": false, "stale": false, "age_s": null, "eta_s": 80, "served_at": {_served_at()}}}'
 
 
 def _mk_handler(counters, relay_plan, home_plan, wol_status=200):
@@ -178,6 +204,7 @@ def scenario_stale_wake_on_resume(p):
     Note what this scenario proves is NOT a relay artefact: the relay serves plain
     `down` throughout (no `waking`), and zero /wol is POSTed. The phantom countdown
     is pure client-side state outliving a freeze."""
+    _reset_clock_skew()
     print("\n## stale-wake-does-not-survive-a-freeze (v8.33)")
     counters = {"relay": 0, "home": 0, "wol": 0}
     b = getattr(p, ENGINE).launch()
@@ -210,6 +237,7 @@ def scenario_stale_wake_on_resume(p):
     # 1970+1d, i.e. 54 years BACKWARDS, making the wake's age negative and silently
     # disarming the very guard under test.
     page.clock.set_system_time(page.evaluate("() => Date.now() + 24*3600*1000"))
+    _clock_skew_s[0] += 24 * 3600
     page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
     page.wait_for_timeout(1500)
     resumed = card(page)
@@ -240,6 +268,7 @@ def scenario_stale_remote_wake_on_resume(p):
     `wolSent` is FALSE throughout — the phone never tapped anything — so the v8.33
     reap (which keys on wolSent) does NOT catch this one. That is the hole.
     """
+    _reset_clock_skew()
     print("\n## stale-REMOTE-wake-does-not-survive-a-freeze (v8.34 — the AM5 variant)")
     counters = {"relay": 0, "home": 0, "wol": 0}
     state = {"waking": True}   # yesterday: the AM5's wake is in progress
@@ -266,6 +295,7 @@ def scenario_stale_remote_wake_on_resume(p):
     # has since shut down. The page was frozen the whole time and is now reopened.
     state["waking"] = False
     page.clock.set_system_time(page.evaluate("() => Date.now() + 24*3600*1000"))
+    _clock_skew_s[0] += 24 * 3600
     page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
     page.wait_for_timeout(1500)
 
@@ -303,6 +333,7 @@ def scenario_remote_wake_outlives_the_waking_signal(p):
     Distinct from the stale-wake reap above: nothing is frozen and nothing is
     stale here — the wake is live, in-window, and legitimately still running.
     """
+    _reset_clock_skew()
     print("\n## remote-wake-outlives-the-relay-waking-signal (v8.53)")
     counters = {"relay": 0, "home": 0, "wol": 0}
     state = {"waking": True}
@@ -367,6 +398,7 @@ def scenario_failed_wake_promotes_the_manual_page(p):
     Uses 401 because it settles in one round-trip; the timeout path (5 min) and
     the transport path set the same flag.
     """
+    _reset_clock_skew()
     print("\n## failed-wake-promotes-the-manual-wake-page (v8.53)")
     counters = {"relay": 0, "home": 0, "wol": 0}
 
@@ -418,6 +450,7 @@ def scenario_failed_wake_says_contact_admin(p):
     Same 401 as the scenario above (settles in one round-trip); the transport
     failure and the 5-min timeout set the same `wakeFailed`.
     """
+    _reset_clock_skew()
     print("\n## failed-wake-says-contact-admin (v8.68)")
     counters = {"relay": 0, "home": 0, "wol": 0}
 
@@ -463,6 +496,7 @@ def scenario_adopted_wake_holds_the_screen(p):
     releases, which is what makes the settle half of the assertion real rather than a
     "it asked once" formality.
     """
+    _reset_clock_skew()
     print("\n## adopted-wake-holds-the-screen (v8.72)")
     counters = {"relay": 0, "home": 0, "wol": 0}
     state = {"waking": True}
@@ -544,6 +578,7 @@ def scenario_degraded_resume_does_not_go_green_early(p):
     The positive control is the last leg: once the home is genuinely ready, the
     green must land. Without it, "never go green" would pass this test.
     """
+    _reset_clock_skew()
     print("\n## degraded-resume-does-not-paint-green-early (v8.72 — IRL 2026-08-03)")
     counters = {"relay": 0, "home": 0, "wol": 0}
     state = {"phase": "waking"}

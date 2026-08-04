@@ -435,6 +435,11 @@ def run_scenario(p, name, relay_plan, home_plan, sample_delays_s, preseed_cache=
         payload = json.dumps({
             "up": bool(preseed_cache.get("up")),
             "relayOk": bool(preseed_cache.get("relayOk", True)),
+            # v8.72 made `degraded` part of the cached verdict; the harness could
+            # not express it, so no scenario could reach the consumers that read
+            # the cache as a PRIOR. That gap is why the presumption branch kept
+            # promoting a degraded prior to green (2026-08-04).
+            "degraded": bool(preseed_cache.get("degraded", False)),
             "t": None,
         })
         ctx.add_init_script(
@@ -962,6 +967,40 @@ def collect_results():
         ok15b = r15b["green_at"] == [1, 3] and not r15b["sleep_at"]
         results.append(("cold-open-inside-window-presumes-up", ok15b, r15b,
                         "inside window + slow relay → green at once, never a presumed sleep"))
+
+        # 2026-08-04 — the JUNCTION the v8.72 fix left open. v8.72 taught the two
+        # PRE-PAINT consumers of the cache that a degraded "up" is not a confident
+        # green (open, l.872; resume, l.2031). It did not teach the third consumer,
+        # which reads the same entry as a PRIOR for the presumption branch — so the
+        # open path declined the green and `checkStatus()`, called one line later,
+        # painted it anyway. The guard was live and provably correct on its own
+        # path, and worth nothing end to end.
+        # What the user sees: the home answers but Seerr does not (the minutes
+        # after a wake, or an app that died on a running host). The card says
+        # "allumé", the family taps, and lands on nothing.
+        # Same fixture as r15b — only the cache carries `degraded`, so a pass here
+        # cannot come from the relay plan.
+        r15e = run_scenario(p, "degraded-prior-must-not-presume-green",
+                            relay_plan=lambda n: "stall", home_plan=lambda n: "fail",
+                            sample_delays_s=[1, 3],
+                            preseed_cache={"up": True, "relayOk": True, "degraded": True},
+                            url_extra="&window=" + _window_excluding_now(inside=True))
+        ok15e = not r15e["green_at"] and r15e["checking_at"] == [1, 3]
+        results.append(("degraded-prior-must-not-presume-green", ok15e, r15e,
+                        "fresh degraded prior → orange, never a presumed green"))
+
+        # Positive control for r15e. Without it, "never green" would also pass on a
+        # build that never presumes anything at all — which is r15b's regression,
+        # and exactly the over-correction this fix must not make. Identical to
+        # r15e but for the one flag under test.
+        r15f = run_scenario(p, "non-degraded-prior-still-presumes-green",
+                            relay_plan=lambda n: "stall", home_plan=lambda n: "fail",
+                            sample_delays_s=[1, 3],
+                            preseed_cache={"up": True, "relayOk": True, "degraded": False},
+                            url_extra="&window=" + _window_excluding_now(inside=True))
+        ok15f = r15f["green_at"] == [1, 3]
+        results.append(("non-degraded-prior-still-presumes-green", ok15f, r15f,
+                        "positive control: a clean prior must still green at once"))
 
         # 2026-07-28 — THE PHONE has no network (airplane mode, no signal). Until now
         # this state was only covered by reading the code and by a render

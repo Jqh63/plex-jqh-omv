@@ -128,6 +128,16 @@ var VERDICT_AGE_SHOW_MS=120000;
 function updateVerdictAge(){
   var el=document.getElementById('statusAge');
   if(!el)return;
+  // v8.73 — a PRESUMPTION says so, in the very line that otherwise reports the
+  // measurement ("vérifié il y a…"). Chosen over a colour change or a new line
+  // for three reasons: this element already exists and is already reserved, so
+  // nothing below the tile can move (layout-stability-e2e); it is the exact
+  // counterpart of what it replaces (what we know about the MEASUREMENT); and
+  // it leaves the ~1 s nominal green untouched, which the orange variant would
+  // not have. IRL 2026-08-04: the card showed "Éteint", flashed green, went
+  // back to "Éteint" — and nothing on screen ever said the first two were
+  // guesses. Now the first one does.
+  if(cardKind==='presumed'){el.textContent='non vérifié';return;}
   var age=(hasConfirmedState&&lastVerdictAtMs)?Date.now()-lastVerdictAtMs:0;
   el.textContent=(age>=VERDICT_AGE_SHOW_MS)?'vérifié '+fmtAge(age):'';
 }
@@ -254,6 +264,63 @@ var checkStartedAt=0;
 // that a longer cache lies confidently when the server has flipped
 // state in the meantime.
 var STATUS_LOCAL_TTL_MS=60000,STATUS_LOCAL_KEY='plex-jqh-omv-status';
+// v8.73 — LIVENESS GATE. Three IRL false verdicts (2026-07-31 age jump,
+// 2026-08-03 false red, 2026-08-04 false green) share one shape: a body the
+// relay did NOT build at that moment, arriving over a FAST link (rt ~0.8-1.1 s)
+// and painted as a verdict. Proven on the 2026-08-04 occurrence — the relay
+// served nothing for the 44 min around it (its SERVED_RELOG_S floor rejournals
+// an unchanged verdict every 5 min, and there is no line), and the body carried
+// no `served_at` although the running relay stamps every 200 unconditionally.
+//
+// The layer that replays is still UNIDENTIFIED (browser HTTP cache is bypassed
+// with `no-store`, the SW passes cross-origin through, Caddy caches nothing,
+// the relay's SWR caches the polled state and not the response). This gate does
+// not need to know: it accepts a verdict only from a body proven to be a LIVE
+// answer, whoever held the old one.
+//
+// Clock skew is the trap. A phone whose clock is minutes off would fail a naive
+// `now - served_at <= budget` on EVERY body and go permanently unknown, which
+// is how a freshness gate turns into an outage. So the budget is measured
+// against a learned FLOOR — the smallest offset ever observed, persisted across
+// sessions (~1 s here: RTT + truncation). A constant skew lands in the floor; a
+// replay shows up as hours ABOVE it. Whatever the phone's clock says.
+var SA_FRESH_MAX_S=60,SA_FLOOR_KEY='plex-jqh-omv-sa-floor';
+// A rejected body paints NOTHING (see the staleBody branch in checkStatus): the
+// card keeps what it had — usually a correct presumption — and we re-probe at
+// once. Bounded, because "ignore and retry" with no ceiling is a spinner that
+// never settles: past this many consecutive rejections we say "Statut inconnu"
+// (honest) and drop the floor so the next answer can re-learn it — the escape
+// hatch for the one case a floor can get wrong, a clock that moved BACKWARD.
+var STALE_BODY_MAX=3,STALE_BODY_RETRY_MS=1200;
+var staleBodyStreak=0;
+function saFloorS(){
+  try{var v=parseInt(localStorage.getItem(SA_FLOOR_KEY),10);
+      return isNaN(v)?null:v;}catch(e){return null;}
+}
+function setSaFloorS(v){
+  try{if(v===null)localStorage.removeItem(SA_FLOOR_KEY);
+      else localStorage.setItem(SA_FLOOR_KEY,String(v));}catch(e){}
+}
+// true = this body was built by the relay just now. Absence of the stamp is a
+// rejection too: the relay always sends it, so a body without one is either a
+// replay from before it existed or something else entirely — neither is live.
+function isLiveBody(j){
+  if(!j||typeof j.served_at!=='number')return false;
+  var off=Math.round(Date.now()/1000)-j.served_at,floor=saFloorS();
+  j._saOff=off;
+  // BOOTSTRAP — the case this gate exists for. Caught by the bench, not by
+  // reasoning: the first version accepted whatever the first body claimed and
+  // made it the floor, which is precisely the shape of the IRL bug (the replay
+  // IS the first answer of the session, on a profile with no floor yet). So an
+  // unanchored offset is trusted only if it is plausible WITHOUT any skew;
+  // anything else has to earn the floor through the retry path below.
+  if(floor===null){
+    if(Math.abs(off)<=SA_FRESH_MAX_S){setSaFloorS(off);return true;}
+    return false;
+  }
+  if(off<floor){setSaFloorS(off);return true;}
+  return (off-floor)<=SA_FRESH_MAX_S;
+}
 // v8.49 — presumption ceiling for the cold-open pre-paint (see the prior-verdict
 // branch in checkStatus). Beyond the 60 s confident reuse, a persisted "up" up
 // to this old is still painted as a PRESUMPTION (spinner running, no age
@@ -918,8 +985,17 @@ function relayEvidence(res){
   // a culprit. `sa` is that missing coordinate: the gap between the relay's own
   // build stamp and our clock. Live answer → a second or two (RTT + clock
   // skew). Replayed body → the gap IS the replay, stated outright.
+  // v8.73 — the ABSENCE is printed too (`sa=none`). It was silent before, and
+  // that silence is exactly what made the 2026-08-03/04 bodies hard to read:
+  // a missing field looks like a field that was never added. It is now the
+  // loudest thing on the line, because the running relay stamps every answer.
   if(typeof res.servedAtS==='number')
     p.push('sa='+Math.round(Date.now()/1000-res.servedAtS)+'s');
+  else p.push('sa=none');
+  // The learned skew floor, so a rejection can be read without guessing what it
+  // was compared against (a floor of 1 s and a floor of 400 s tell very
+  // different stories about the same `sa`).
+  if(res.staleBody){var f=saFloorS();p.push('floor='+(f===null?'-':f+'s'));}
   if(res.degraded)p.push('degraded');
   if(res.waking)p.push('waking');
   if(res.wakeFailedRemote)p.push('wake_failed');
@@ -965,6 +1041,10 @@ function fetchStatusFromRelay(){
   }).then(function(j){
     if(!j||typeof j.up!=='boolean')return answered('bad shape');
     j._rtMs=Date.now()-t0;
+    // v8.73 — flagged, not rejected: probe() maps it to a NON-verdict, and the
+    // journal needs the evidence (sa/age/rt) of the body we refused far more
+    // than it needs the ones we accepted.
+    j._notLive=!isLiveBody(j);
     return j;
   });
 }
@@ -1119,6 +1199,37 @@ function checkStatus(){
     // stale verdict without touching `checking`, which the newer probe owns.
     if(gen!==probeGen)return;
     checking=false;
+    // v8.73 — a body that is not a live answer (see isLiveBody) is not evidence
+    // of anything, so it paints NOTHING and settles NOTHING: no verdict, no
+    // window adoption, no ETA, not even a refutation of the presumption that is
+    // already on screen and is usually right. The card keeps what it had, the
+    // spinner keeps running, and we re-probe at once — which is precisely what
+    // "affiche le réel" means for a non-answer. Past STALE_BODY_MAX in a row we
+    // stop pretending and say so.
+    if(res.staleBody){
+      if(++staleBodyStreak<=STALE_BODY_MAX){
+        logPaint('stale-body','replayed-not-live',relayEvidence(res)+
+                 ' streak='+staleBodyStreak);
+        setTimeout(function(){checkStatus();},STALE_BODY_RETRY_MS);
+        return;
+      }
+      // Every retry burned. Either something replays relentlessly, or OUR clock
+      // moved backward and the learned floor is now unreachable — indistinguishable
+      // from here, so: drop the floor (the next body re-learns it and the next
+      // cycle self-heals if it was the clock) and say the honest thing meanwhile.
+      // Adopt the offset we keep seeing as the floor rather than clearing it:
+      // a clock that is simply WRONG produces the same large offset every time,
+      // and clearing would just replay this dance on the next cycle forever.
+      // Deliberately the availability-favouring direction — it would re-open the
+      // hole against a relentless replayer, which no occurrence has ever shown,
+      // and the journal names it either way.
+      if(typeof res.saOffS==='number')setSaFloorS(res.saOffS);else setSaFloorS(null);
+      staleBodyStreak=0;
+      if(!(wolSent||remoteWaking)){setUnknown();presumptionRefuted=true;}
+      logPaint('unknown','stale-body-exhausted',relayEvidence(res));
+      return;
+    }
+    staleBodyStreak=0;
     // v8.12 — adopt the relay-served uptime window (UPTIME_WINDOW env on the
     // relay). The relay value wins over a locally-set one: it's the
     // admin-controlled source of truth, so changing it on the relay updates
@@ -1341,7 +1452,7 @@ function probe(){
     // that distinction is precisely what the 2026-07-30 report was missing.
     // v8.72 — servedAtS is the relay's own build stamp (see relayEvidence): the
     // coordinate that tells an old body over a fast link from a live answer.
-    function(j){return {up:j.up,ageS:(typeof j.age_s==='number'?j.age_s:null),servedAtS:(typeof j.served_at==='number'?j.served_at:null),rtMs:(typeof j._rtMs==='number'?j._rtMs:null),relayReachable:true,window:(typeof j.window==='string'?j.window:null),waking:j.waking===true,wakeAgeS:(typeof j.wake_age_s==='number'?j.wake_age_s+((j._rtMs||0)/2000):0),etaS:(typeof j.eta_s==='number'?j.eta_s:0),degraded:j.degraded===true,declared:j.source==='heartbeat',confirmed:j.confirmed===true,wakeFailedRemote:j.wake_failed===true};},
+    function(j){return {staleBody:j._notLive===true,saOffS:(typeof j._saOff==='number'?j._saOff:null),up:j.up,ageS:(typeof j.age_s==='number'?j.age_s:null),servedAtS:(typeof j.served_at==='number'?j.served_at:null),rtMs:(typeof j._rtMs==='number'?j._rtMs:null),relayReachable:true,window:(typeof j.window==='string'?j.window:null),waking:j.waking===true,wakeAgeS:(typeof j.wake_age_s==='number'?j.wake_age_s+((j._rtMs||0)/2000):0),etaS:(typeof j.eta_s==='number'?j.eta_s:0),degraded:j.degraded===true,declared:j.source==='heartbeat',confirmed:j.confirmed===true,wakeFailedRemote:j.wake_failed===true};},
     function(err){
       var relayUp=!!(err&&err.answered);
       // v8.65 — the direct-home fallback no longer produces a VERDICT.

@@ -242,32 +242,78 @@ def is_button_checking(s):
     return "checking" in s["powerClass"]
 
 
+# The PAGE clock is moved by two runners (clockjump +120 s, and Date.now
+# monkeypatching). The relay's clock moves with it in reality, so the fixture
+# has to move too — otherwise every body served after a jump looks replayed and
+# the liveness gate would be exercised by accident instead of by scenario.
+_CLOCK_SKEW_S = [0]
+
+
+def _served(body, at=None):
+    """Stamp a fixture body the way the running relay stamps every 200: with the
+    wall clock that BUILT it (`served_at`, relay/app.py). Not cosmetic since
+    v8.73 — the PWA's liveness gate accepts a verdict only from a body it can
+    prove is a live answer, so a fixture without this stamp models a relay that
+    no longer exists and would test the gate's rejection path by accident.
+    `at` back-dates it: that is the REPLAY, and it gets its own verdicts below."""
+    import json
+    b = dict(body)
+    b["served_at"] = int(time.time()) + _CLOCK_SKEW_S[0] - (at or 0)
+    return json.dumps(b)
+
+
 def _relay_fulfill(route, verdict, aborted=None):
     h = {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"}
     if verdict == "up":
-        route.fulfill(status=200, headers=h, body='{"up": true, "stale": false, "age_s": 0}')
+        route.fulfill(status=200, headers=h,
+                      body=_served({"up": True, "stale": False, "age_s": 0}))
+    elif verdict == "up-replayed":
+        # v8.73 — the 2026-08-04 false green, reproduced: a body the relay built
+        # HOURS ago, delivered over a fast link, claiming a fresh heartbeat.
+        # `age_s` is a duration so it still looks plausible; `served_at` is an
+        # absolute, so the replay is self-evident. The card must not go green.
+        route.fulfill(status=200, headers=h,
+                      body=_served({"up": True, "stale": False, "age_s": 3,
+                                    "source": "heartbeat"}, at=13000))
+    elif verdict == "up-no-stamp":
+        # A body with NO build stamp at all — the literal shape received on
+        # 2026-08-04 (and the shape a rolled-back relay would serve). Unprovable,
+        # therefore not a verdict.
+        route.fulfill(status=200, headers=h,
+                      body='{"up": true, "stale": false, "age_s": 3, "source": "heartbeat"}')
+    elif verdict == "down-replayed":
+        # The mirror, and the 2026-08-03 occurrence: a stale body producing a
+        # false RED. Same gate, both directions — a freshness rule that only
+        # caught the green would just move the defect.
+        route.fulfill(status=200, headers=h,
+                      body=_served({"up": False, "stale": False, "age_s": 21447,
+                                    "source": "heartbeat"}, at=48000))
     elif verdict == "up-extra-fields":
         # Relay serving an up verdict with extra JSON fields the PWA ignores
         # (stale/age_s from the relay's server-side SWR cache). The parser keys
         # only on the `up` boolean, so this must behave exactly like "up".
-        route.fulfill(status=200, headers=h, body='{"up": true, "stale": true, "age_s": 30}')
+        route.fulfill(status=200, headers=h,
+                      body=_served({"up": True, "stale": True, "age_s": 30}))
     elif verdict == "down":
-        route.fulfill(status=200, headers=h, body='{"up": false, "stale": false, "age_s": null}')
+        route.fulfill(status=200, headers=h,
+                      body=_served({"up": False, "stale": False, "age_s": None}))
     elif verdict == "down-declared":
         # v8.48 — heartbeat-sourced down: the home's own clean-shutdown last-gasp.
         route.fulfill(status=200, headers=h,
-                      body='{"up": false, "stale": false, "age_s": 2, "source": "heartbeat"}')
+                      body=_served({"up": False, "stale": False, "age_s": 2,
+                                    "source": "heartbeat"}))
     elif verdict == "down-wake-failed":
         # v8.69 — the relay's campaign ran bursts + grace without the home ever
         # answering. This device did NOT tap: it is the OTHER phone in the room,
         # and until this signal existed it had no way to know a wake had failed.
         route.fulfill(status=200, headers=h,
-                      body='{"up": false, "stale": false, "age_s": null, '
-                           '"source": "heartbeat", "wake_failed": true}')
+                      body=_served({"up": False, "stale": False, "age_s": None,
+                                    "source": "heartbeat", "wake_failed": True}))
     elif verdict == "up-degraded":
         # v8.48 — host up, probed app (Seerr) not ready yet.
         route.fulfill(status=200, headers=h,
-                      body='{"up": true, "stale": false, "age_s": 2, "degraded": true, "source": "heartbeat"}')
+                      body=_served({"up": True, "stale": False, "age_s": 2,
+                                    "degraded": True, "source": "heartbeat"}))
     elif verdict == "degraded":
         # Relay ANSWERS with a degraded oracle (STATUS_TARGET_URL unset → 503).
         # Relay alive, /wol works — the PWA must keep it reachable + fall back.
@@ -593,6 +639,7 @@ def run_clockjump_scenario(p):
     page.evaluate(
         "() => { const real = Date.now.bind(Date); Date.now = () => real() + 120000; }"
     )
+    _CLOCK_SKEW_S[0] = 120
 
     samples = []
     last_t = 0
@@ -608,6 +655,7 @@ def run_clockjump_scenario(p):
     b.close()
     if TIMING:
         print(f'  [timing:run_clockjump_scenario] {time.monotonic()-_t0:.1f}s')
+    _CLOCK_SKEW_S[0] = 0
     return {
         "name": name,
         "interception_lost": _iflag["lost"],
@@ -1113,6 +1161,58 @@ def collect_results():
         ok22 = (r20["power_hidden_at"] == [3])
         results.append(("no-relay-wake-button-hidden", ok22, r20,
                         "no relay → no wake possible → button hidden, not broken"))
+
+        # v8.73 — THE 2026-08-04 FALSE GREEN, replayed. Yann opens the app at
+        # 00:59, well after the nightly shutdown: blue "Éteint", then GREEN for
+        # 8 s, then blue again. The green came from a body the relay had built
+        # hours earlier (proven: its log shows nothing served in the 44 min
+        # around it, and the body carried no build stamp). Nothing in the app
+        # refused it, because `age_s` is a duration and a replayed duration
+        # looks plausible forever.
+        #
+        # First call replays, the rest tell the truth: the card must never go
+        # green — the blue presumption stands until the live down confirms it.
+        r23 = run_scenario(p, "replayed-up-never-paints-green",
+                           relay_plan=lambda n: "up-replayed" if n == 1 else "down-declared",
+                           home_plan=lambda n: "fail", sample_delays_s=[1, 3, 5],
+                           url_extra="&window=" + _window_excluding_now(inside=False))
+        ok23 = (not r23["green_at"] and r23["sleep_at"] and not r23["final_green"])
+        results.append(("replayed-up-never-paints-green", ok23, r23,
+                        "stale body claiming up → no green, the sleep card holds"))
+
+        # Same body, no stamp at all — the literal shape received that night, and
+        # what a rolled-back relay would serve. Separate scenario on purpose: the
+        # gate has two rejection reasons and a fixture that only exercised the
+        # back-dated one would leave the more likely shape untested.
+        r24 = run_scenario(p, "unstamped-up-never-paints-green",
+                           relay_plan=lambda n: "up-no-stamp" if n == 1 else "down-declared",
+                           home_plan=lambda n: "fail", sample_delays_s=[1, 3, 5],
+                           url_extra="&window=" + _window_excluding_now(inside=False))
+        ok24 = (not r24["green_at"] and not r24["final_green"])
+        results.append(("unstamped-up-never-paints-green", ok24, r24,
+                        "body with no served_at → not a verdict, no green"))
+
+        # The mirror, and the 2026-08-03 occurrence: a replayed DOWN must not
+        # paint a false red either. Inside the window, home genuinely up.
+        r25 = run_scenario(p, "replayed-down-never-paints-red",
+                           relay_plan=lambda n: "down-replayed" if n == 1 else "up",
+                           home_plan=lambda n: "ok", sample_delays_s=[1, 3, 5],
+                           url_extra="&window=" + _window_excluding_now(inside=True))
+        ok25 = (not r25["red_at"] and not r25["down_at"] and r25["final_green"])
+        results.append(("replayed-down-never-paints-red", ok25, r25,
+                        "stale body claiming down → no red, settles green"))
+
+        # POSITIVE CONTROL, and the one that stops this whole set from passing
+        # for the wrong reason: a gate that rejected EVERYTHING would satisfy
+        # r23/r24/r25 ("never green") perfectly. A LIVE up must still paint green
+        # as fast as it ever did.
+        r26 = run_scenario(p, "live-stamped-up-still-greens",
+                           relay_plan=lambda n: "up", home_plan=lambda n: "ok",
+                           sample_delays_s=[1, 3],
+                           url_extra="&window=" + _window_excluding_now(inside=False))
+        ok26 = (bool(r26["green_at"]) and r26["green_at"][0] <= 3 and r26["final_green"])
+        results.append(("live-stamped-up-still-greens", ok26, r26,
+                        "positive control — a live body still greens ≤T+3"))
 
     return results
 

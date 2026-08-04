@@ -83,17 +83,22 @@ def check(name, cond, detail=""):
 
 
 def _body(verdict):
+    # v8.73 — every body carries the relay's build stamp, because the running
+    # relay does (relay/app.py) and the PWA now refuses verdicts from bodies it
+    # cannot prove are live. A fixture without it models a relay that no longer
+    # exists — and it showed: this whole suite went to `stale-body-exhausted`.
+    sa = f', "served_at": {int(time.time())}'
     if verdict == "up":
-        return '{"up": true, "stale": false, "age_s": 1, "source": "heartbeat"}'
+        return '{"up": true, "stale": false, "age_s": 1, "source": "heartbeat"' + sa + '}'
     if verdict == "down-pull-confirmed":
         # The relay's stale-beat demotion (2026-07-30): a confirm-gated pull
         # that contradicts a beat it post-dates. Commits red at once, like a
         # last-gasp — re-confirming it client-side would move the false-green
         # window instead of closing it.
         return ('{"up": false, "stale": false, "confirmed": true, '
-                '"age_s": 8, "source": "pull"}')
+                '"age_s": 8, "source": "pull"' + sa + '}')
     # The IRL shape: the home's own last words, still standing.
-    return '{"up": false, "stale": false, "age_s": 549, "source": "heartbeat"}'
+    return '{"up": false, "stale": false, "age_s": 549, "source": "heartbeat"' + sa + '}'
 
 
 def run(p, name, verdict, window, expect_present, expect_absent, seed_prior=None):
@@ -360,6 +365,78 @@ def run_slow_relay_stabilises(p):
     return ok
 
 
+def run_presumption_is_labelled(p):
+    """v8.73 — RENDER pin for the family-visible half of the fix.
+
+    IRL 2026-08-04: the card said "Éteint", flashed "En ligne", then "Éteint"
+    again — and NOTHING on screen ever said the first two were guesses. A
+    presumption and a measured verdict were pixel-identical, so a family reader
+    could only conclude the app was unreliable.
+
+    The claim is carried by `#statusAge` — the line that otherwise reports the
+    MEASUREMENT ("vérifié il y a…"), which makes "non vérifié" its exact
+    counterpart and costs no layout (the element is already reserved).
+
+    Asserted on the RENDERED text, not on cardKind: a state variable that no
+    one can see would pass a pin that measures nothing."""
+    print("\n## presumption is labelled 'non vérifié' on screen")
+    b = getattr(p, ENGINE).launch()
+    ctx = b.new_context(viewport={"width": 390, "height": 844})
+    page = ctx.new_page()
+    served = {"n": 0}
+
+    def handle(route):
+        parsed = urlparse(route.request.url)
+        if parsed.netloc == RELAY_HOST and parsed.path == "/status":
+            served["n"] += 1
+            # Never answer: the presumption is what stays on screen, which is
+            # exactly the window the family reads on a cold open.
+            return
+        if parsed.netloc == CONFIG_HOST or parsed.netloc.endswith("." + CONFIG_HOST):
+            route.fulfill(status=200, body="")
+            return
+        route.continue_()
+
+    page.route("**/*", handle)
+    page.goto(_url(PWA_BASE, _window(False)), wait_until="load")
+    page.wait_for_timeout(1200)
+    label = (page.text_content("#statusLabel") or "").strip()
+    age = (page.text_content("#statusAge") or "").strip()
+    ok = check("the sleep presumption is on screen", label == "Éteint", label)
+    ok &= check("it says it was NOT verified", age == "non vérifié", repr(age))
+    b.close()
+
+    # POSITIVE CONTROL — without it, "always print non vérifié" would pass the
+    # pin above while lying on every measured verdict, which is the whole thing
+    # the label exists to distinguish.
+    b = getattr(p, ENGINE).launch()
+    ctx = b.new_context(viewport={"width": 390, "height": 844})
+    page = ctx.new_page()
+
+    def handle_live(route):
+        parsed = urlparse(route.request.url)
+        if parsed.netloc == RELAY_HOST and parsed.path == "/status":
+            route.fulfill(status=200, body=_body("up"), headers={
+                "Content-Type": "application/json",
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Headers": "*",
+            })
+            return
+        if parsed.netloc == CONFIG_HOST or parsed.netloc.endswith("." + CONFIG_HOST):
+            route.fulfill(status=200, body="")
+            return
+        route.continue_()
+
+    page.route("**/*", handle_live)
+    page.goto(_url(PWA_BASE, _window(True)), wait_until="load")
+    page.wait_for_timeout(2000)
+    age2 = (page.text_content("#statusAge") or "").strip()
+    ok &= check("a MEASURED verdict carries no such label (control)",
+                age2 == "", repr(age2))
+    b.close()
+    return ok
+
+
 def main():
     print(f"Paint journal E2E — engine={ENGINE} base={PWA_BASE}")
     with sync_playwright() as p:
@@ -408,6 +485,7 @@ def main():
             expect_absent=["down-unconfirmed", "verdict-up"],
         )
         ok &= run_dated_render(p)
+        ok &= run_presumption_is_labelled(p)
         ok &= run_relay_silent_stabilises(p)
         ok &= run_slow_relay_stabilises(p)
     print("\n" + ("ALL PASS" if ok else "FAILURES ABOVE"))

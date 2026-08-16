@@ -17,7 +17,7 @@
 #   ssh wol-relay-deploy health            # curl http://127.0.0.1:8000/health
 #   ssh wol-relay-deploy logs-wol-relay [500|3000]  # journalctl tail, read-only
 #                                          #   (defaut 100 lignes ~= 5 jours)
-#   ssh wol-relay-deploy logs-caddy [500|3000]  # journalctl -u caddy (read-only)
+#   ssh wol-relay-deploy logs-caddy        # journalctl -u caddy -n 100 (read-only)
 #   ssh wol-relay-deploy log-footprint     # journald size + log dirs + df (read-only)
 #
 # home-watch (external homelab monitor, content pushed in from the private
@@ -158,26 +158,15 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
     # including the `home declares UP/DOWN` heartbeats and the wake campaigns,
     # i.e. exactly the lines needed to reconstruct an auto-shutdown timeline
     # (2026-07-26). THIS unit's journal carries no access-log noise to filter
-    # out — the access log added in 2026-08 lives on the `caddy` unit, not here,
-    # which is what keeps this route's signal-to-noise intact.
+    # out — the access log added in 2026-08 lives on the `caddy` unit and skips
+    # /heartbeat, which is what keeps both journals' retention intact.
     n="${SSH_ORIGINAL_COMMAND#logs-wol-relay}"; n="${n# }"; n="${n:-100}"
     journal_banner wol-relay "$n"
     sudo /usr/bin/journalctl -u wol-relay -n "$n" --no-pager
     ;;
-  logs-caddy|"logs-caddy 500"|"logs-caddy 3000")
-    # Depths, same literal-enum shape as logs-wol-relay above (no free arg
-    # reaches sudo; every argv is pinned verbatim in sudoers).
-    #
-    # Added with the access log: before it, caddy's journal carried only ACME
-    # and TLS-maintenance events — a handful a day, so a fixed -n 100 spanned
-    # weeks. It now carries one line per request, so 100 lines can be a few
-    # minutes of a single phone polling every 8 s, and the TLS events one would
-    # actually go looking for here fall out of the window. Adding the log
-    # without this would have DEGRADED the existing route while claiming to
-    # improve observability.
-    n="${SSH_ORIGINAL_COMMAND#logs-caddy}"; n="${n# }"; n="${n:-100}"
-    journal_banner caddy "$n"
-    sudo /usr/bin/journalctl -u caddy -n "$n" --no-pager
+  logs-caddy)
+    journal_banner caddy
+    sudo /usr/bin/journalctl -u caddy -n 100 --no-pager
     ;;
   log-footprint)
     # Janitorial measurement (read-only): journald size + pinned log dirs +
@@ -286,7 +275,7 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
     ;;
   *)
     echo "dispatch.sh: unknown command '${SSH_ORIGINAL_COMMAND:-}'" >&2
-    echo "Expected: push-app, push-caddyfile, push-service, apply, push-window, apply-window, status, health, logs-wol-relay [500|3000], logs-caddy [500|3000], log-footprint," >&2
+    echo "Expected: push-app, push-caddyfile, push-service, apply, push-window, apply-window, status, health, logs-wol-relay [500|3000], logs-caddy, log-footprint," >&2
     echo "          push-home-watch{,-service,-timer}, apply-home-watch, home-watch-status, logs-home-watch," >&2
     echo "          push-pock-sync-{app,service}, apply-pock-sync, pock-sync-status, logs-pock-sync, pock-dump," >&2
     echo "          pat-receive {daily,weekly}, pat-list, pat-dump-latest." >&2

@@ -240,6 +240,7 @@ ssh wol-relay-deploy logs-wol-relay        # journalctl tail, last 100 lines (~5
 ssh wol-relay-deploy logs-wol-relay 500    # wider window
 ssh wol-relay-deploy logs-wol-relay 3000   # months of history (journald holds ~174 MB)
 ssh wol-relay-deploy logs-caddy     # journalctl -u caddy -n 100 --no-pager
+ssh wol-relay-deploy logs-caddy 3000  # wider window — the access log is verbose
 ssh wol-relay-deploy log-footprint  # journald size + log dirs + df (read-only)
 ssh wol-relay-deploy push-app < relay/app.py             # stage only
 ssh wol-relay-deploy push-caddyfile < relay/Caddyfile    # stage only

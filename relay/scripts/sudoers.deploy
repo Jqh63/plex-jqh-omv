@@ -38,7 +38,9 @@ Cmnd_Alias WOL_RELAY_LOGS = \
   /usr/bin/journalctl -u wol-relay -n 100 --no-pager, \
   /usr/bin/journalctl -u wol-relay -n 500 --no-pager, \
   /usr/bin/journalctl -u wol-relay -n 3000 --no-pager, \
-  /usr/bin/journalctl -u caddy -n 100 --no-pager
+  /usr/bin/journalctl -u caddy -n 100 --no-pager, \
+  /usr/bin/journalctl -u caddy -n 500 --no-pager, \
+  /usr/bin/journalctl -u caddy -n 3000 --no-pager
 
 # log-footprint — janitorial measurement (knowledge-base ADR
 # 2026-07-07-housekeeping-janitorial §6): journal size + pinned log dirs,

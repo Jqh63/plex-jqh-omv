@@ -71,6 +71,22 @@ var hasConfirmedState=false;
 //     control pins exactly that.
 var presumptionRefuted=false;
 
+// v8.76 — ONE grace re-probe before a presumption is demoted to unknown.
+// Measured 2026-08-16 with tests/flaky-net-sim.py, home UP the whole run: a
+// single missed probe on a cold open flashed "Statut inconnu" for 0,3 s — the
+// answer landed immediately after. Nobody READS "impossible de vérifier" in
+// 300 ms; it only registers as a flicker, i.e. as instability, and it is the
+// one case where the demotion buys nothing since the truth arrives next.
+// So: the FIRST unknown over a presumption re-probes at once and keeps the
+// card; the second demotes. Deliberately narrow — it costs one probe delay,
+// applies only to `presumed` (a confirmed verdict already has its own keep
+// path, an unknown card stays put), and fires once per episode, cleared the
+// moment the relay answers anything. The genuine outage case is untouched in
+// SHAPE: three dead probes still land on "Statut inconnu" rather than a green
+// nobody verified — that faux vert is what #192/#193 closed.
+var unknownGraceUsed=false;
+var UNKNOWN_GRACE_RETRY_MS=1200;
+
 // v8.11 — surface that freshness to the user: a small "vérifié à l'instant /
 // il y a Xs" line under the status card, refreshed by the 1 s poll. Makes the
 // trust level of the on-screen verdict visible (the stale-green saga taught us
@@ -852,7 +868,7 @@ function startApp(){
   buildLinks();
   clearWolPoll();
   releaseWakeLock();
-  isOnline=false;wolSent=false;remoteWaking=false;checking=false;checkStartedAt=0;relayReachable=true;relayMissStreak=0;hasConfirmedState=false;wakeFailed=false;cardKind='none';
+  isOnline=false;wolSent=false;remoteWaking=false;checking=false;checkStartedAt=0;relayReachable=true;relayMissStreak=0;hasConfirmedState=false;wakeFailed=false;cardKind='none';unknownGraceUsed=false;
   // v8.28 — restore the persisted relay-served ETA so a wake fired right after an
   // offline open still seeds a shared-value countdown before the first poll lands.
   relayEtaMs=(config&&typeof config.eta==='number'&&config.eta*1000>=BOOT_MIN_MS&&config.eta*1000<=BOOT_MAX_MS)?config.eta*1000:0;
@@ -1316,11 +1332,20 @@ function checkStatus(){
     // once it ages past the staleness guard it is demoted here like the rest.
     // Idempotent: a second unknown leaves the unknown card alone.
     // The relay answered something usable -> a new episode may presume again.
-    if(!res.unknown)presumptionRefuted=false;
+    if(!res.unknown){presumptionRefuted=false;unknownGraceUsed=false;}
     if(res.unknown){
       if(wolSent||remoteWaking)return;
       if(!navigator.onLine){setOffline();logPaint('no-network','probe-unknown-offline');return;}
       if(!(cardKind==='verdict'&&hasConfirmedState)){
+        // v8.76 grace (see unknownGraceUsed): re-probe once before demoting a
+        // presumption. Same shape as the staleBody retry above — keep the card,
+        // ask again now, and only say "inconnu" if that one fails too.
+        if(cardKind==='presumed'&&!unknownGraceUsed){
+          unknownGraceUsed=true;
+          logPaint('kept-presumption','unknown-grace-reprobe',relayEvidence(res));
+          setTimeout(function(){checkStatus();},UNKNOWN_GRACE_RETRY_MS);
+          return;
+        }
         setUnknown();
         // The relay has now contradicted whatever we presumed: stop replaying it.
         presumptionRefuted=true;

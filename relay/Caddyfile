@@ -15,12 +15,23 @@
 	# and "the relay didn't answer" are indistinguishable, and every fix to
 	# the PWA's degraded-network behaviour would be tuned on a guess.
 	#
-	# ⚠️ SECURITY — the delete filters are load-bearing, not hygiene. Caddy
-	# logs request headers and auto-redacts only the ones it knows
-	# (Authorization, Cookie). /status and /wol authenticate with the shared
-	# X-Token header, which Caddy has no reason to know about: without the
-	# filter below, every request would write the token in clear into
-	# journald. That would be a worse leak than the blindness being fixed.
+	# ⚠️ SECURITY — headers are dropped WHOLESALE, not enumerated. /status and
+	# /wol authenticate with a shared X-Token header, so a log that keeps
+	# headers writes the token in clear into journald — a worse leak than the
+	# blindness being fixed, and journal excerpts are routinely pasted into
+	# chats and issues.
+	#
+	# Deleting `request>headers` entirely rather than naming X-Token, Cookie
+	# and Authorization one by one is deliberate, on two counts. It does not
+	# depend on knowing which headers Caddy redacts by default (a third-party
+	# behaviour that can change under us), and it cannot fail open the day a
+	# fifth header carries a secret — a new auth header would silently land in
+	# the log under an enumerated filter. Isolation by construction beats
+	# isolation by enumeration.
+	#
+	# Cost: no User-Agent in the log. Acceptable — this log exists to answer
+	# "did the request ARRIVE, and what did we answer", which needs timestamp,
+	# path, status and duration, none of which live in headers.
 	#
 	# Output is the default (stderr → journald), deliberately: journald is
 	# already bounded on this VM and reachable through the existing
@@ -31,9 +42,7 @@
 		format filter {
 			wrap console
 			fields {
-				request>headers>X-Token delete
-				request>headers>Cookie delete
-				request>headers>Authorization delete
+				request>headers delete
 			}
 		}
 	}

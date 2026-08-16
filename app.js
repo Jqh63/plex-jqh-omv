@@ -935,6 +935,20 @@ function writeLocalStatus(up,relayOk,degraded){
 // does NOT collapse a change of KIND (src=hb vs src=pull, the appearance of
 // "waking"), which is evidence, not noise.
 function paintDetailShape(d){return (d||'').replace(/\d+/g,'#');}
+// v8.75 — the card a branch ASKS for is not always the one that lands. Two paint
+// functions hand over while a wake is in flight: setOffline() and setRechecking()
+// both `if(wolSent||remoteWaking){setStarting();return;}`, deliberately — a red
+// or orange card next to a spinning power button would contradict it.
+// The journal's contract (see logPaint) is "what the user SEES", so it has to
+// follow that hand-over instead of recording the intent. It did not, and the
+// wake of 2026-08-16 07:00 is what that costs: 15 lines of `offline
+// verdict-down` over 43 s during which the card read "Démarrage…" the whole
+// time. The reader (a phone, 800 km from a terminal) concludes the wake was
+// painting red at the user. The v8.71 comment above cites that very burst and
+// treated it as a COLLAPSING problem — the label was wrong and nobody saw it,
+// because nothing compares the two.
+// Read the state the paint functions just set, rather than trust the caller.
+function paintedCard(intended){return cardKind==='wake'?'waking':intended;}
 function logPaint(card,why,detail){
   try{
     var raw=localStorage.getItem(PAINT_LOG_KEY),a=raw?JSON.parse(raw):[];
@@ -1000,6 +1014,14 @@ function relayEvidence(res){
   if(res.waking)p.push('waking');
   if(res.wakeFailedRemote)p.push('wake_failed');
   if(!res.relayReachable)p.push('relay-unreachable');
+  // v8.75 — HOW the probe failed, and how long it took to fail. See the
+  // classifier in probe(). Printed last because it is the field a degraded-
+  // network report is read for: "fail=timeout 8001ms" and "fail=net 40ms" both
+  // rendered as the single word `relay-unreachable` before, and they are not
+  // the same defect. failWhy carries the HTTP status on the `http` kind, which
+  // is the only kind where the relay itself has something to answer for.
+  if(res.failKind)p.push('fail='+res.failKind+' '+res.failMs+'ms'+
+    (res.failWhy?' ('+res.failWhy+')':''));
   return p.join(' ');
 }
 
@@ -1391,10 +1413,10 @@ function checkStatus(){
       downStreak=DOWN_CONFIRM;
       writeLocalStatus(false,relayReachable);
       setOffline();
-      logPaint('offline','verdict-down',relayEvidence(res));
+      logPaint(paintedCard('offline'),'verdict-down',relayEvidence(res));
     }else{
       setRechecking();
-      logPaint('checking','down-unconfirmed',relayEvidence(res)+' streak='+downStreak);
+      logPaint(paintedCard('checking'),'down-unconfirmed',relayEvidence(res)+' streak='+downStreak);
       if(downRecheckTimer)clearTimeout(downRecheckTimer);
       downRecheckTimer=setTimeout(function(){downRecheckTimer=null;checkStatus();},DOWN_RECHECK_MS);
     }
@@ -1456,6 +1478,7 @@ function probe(){
       function(){return {up:false,relayReachable:true};}
     );
   }
+  var probeT0=Date.now();
   return fetchStatusFromRelay().then(
     // v8.12 — pass the relay-served uptime window through (see the adoption
     // logic in checkStatus): the relay is the admin-controlled config channel.
@@ -1493,7 +1516,35 @@ function probe(){
       // made at all on this path: it only bought a HOME_FALLBACK_TIMEOUT_MS wait
       // before we could admit we don't know. (fetchHomeDirectly survives for the
       // relay-less mode below, where it is the only oracle there is.)
-      return Promise.resolve({unknown:true,up:false,relayReachable:relayUp});
+      // v8.75 — classify HOW it failed. Behaviour is unchanged (this is the
+      // same non-verdict as before); only the journal gets richer, and it is
+      // the one thing missing to reason about degraded networks at all.
+      //
+      // `relay-unreachable` lumped five very different stories into one word:
+      // our own 8 s budget expiring, the phone's radio being gone, DNS/TLS
+      // dying, CORS, and the relay answering an error. On 2026-08-13 16:30 and
+      // 2026-08-14 18:45 the relay's own log proves it was serving to the
+      // second, yet the client saw nothing — and neither end can say whether
+      // the request left the phone. The relay's serve-log is throttled to one
+      // line per 5 min per unchanged verdict (SERVED_RELOG_S), so its silence
+      // proves nothing either, and Caddy kept no per-request trace at all
+      // (fixed in the same change, relay/Caddyfile).
+      //
+      //   timeout   — OUR AbortController fired: something was listening long
+      //               enough to keep the socket, it just never finished. Read
+      //               with failMs≈PROBE_TIMEOUT_MS.
+      //   no-net    — the phone itself says it has no network. First-hand fact.
+      //   net       — TypeError: DNS, TLS, connection refused/reset, CORS. A
+      //               fast failMs here means the radio rejected it outright,
+      //               which is a different fix from a slow one.
+      //   http      — the relay ANSWERED (see err.answered): its process is
+      //               alive, only the status oracle is degraded.
+      var failKind=relayUp?'http':
+        (err&&err.name==='AbortError')?'timeout':
+        (!navigator.onLine)?'no-net':'net';
+      return Promise.resolve({unknown:true,up:false,relayReachable:relayUp,
+        failKind:failKind,failMs:Date.now()-probeT0,
+        failWhy:(err&&err.message)?String(err.message).slice(0,40):null});
     }
   );
 }

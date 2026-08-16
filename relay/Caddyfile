@@ -5,6 +5,48 @@
 {$RELAY_DOMAIN} {
 	encode gzip
 
+	# Per-request access log. Added 2026-08-16 because its ABSENCE was the
+	# blocker: on 2026-08-13 16:30 and 2026-08-14 18:45 the PWA journalled
+	# `relay-silent` while app.py's own log proves it was serving to the
+	# second. Nothing on this VM could say whether those requests ever
+	# ARRIVED — app.py only logs a served verdict, throttled to one line per
+	# SERVED_RELOG_S (5 min) when the verdict is unchanged, so its silence is
+	# not evidence of silence. Without this, "the phone's radio dropped it"
+	# and "the relay didn't answer" are indistinguishable, and every fix to
+	# the PWA's degraded-network behaviour would be tuned on a guess.
+	#
+	# ⚠️ SECURITY — headers are dropped WHOLESALE, not enumerated. /status and
+	# /wol authenticate with a shared X-Token header, so a log that keeps
+	# headers writes the token in clear into journald — a worse leak than the
+	# blindness being fixed, and journal excerpts are routinely pasted into
+	# chats and issues.
+	#
+	# Deleting `request>headers` entirely rather than naming X-Token, Cookie
+	# and Authorization one by one is deliberate, on two counts. It does not
+	# depend on knowing which headers Caddy redacts by default (a third-party
+	# behaviour that can change under us), and it cannot fail open the day a
+	# fifth header carries a secret — a new auth header would silently land in
+	# the log under an enumerated filter. Isolation by construction beats
+	# isolation by enumeration.
+	#
+	# Cost: no User-Agent in the log. Acceptable — this log exists to answer
+	# "did the request ARRIVE, and what did we answer", which needs timestamp,
+	# path, status and duration, none of which live in headers.
+	#
+	# Output is the default (stderr → journald), deliberately: journald is
+	# already bounded on this VM and reachable through the existing
+	# `logs-caddy` route, so this needs no new file, no logrotate config and
+	# no sudoers verb. Footprint headroom checked before shipping:
+	# 202 MB of logs against 25 GB free.
+	log {
+		format filter {
+			wrap console
+			fields {
+				request>headers delete
+			}
+		}
+	}
+
 	# CORS headers — set at the Caddy layer so they're present on
 	# Caddy-generated error responses too. When uvicorn is down, Caddy
 	# returns a 502 without ever calling FastAPI, and without these

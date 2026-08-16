@@ -437,6 +437,125 @@ def run_presumption_is_labelled(p):
     return ok
 
 
+def run_wake_journal_labels(p):
+    """During a wake, the journal must record the card the user SEES.
+
+    IRL 2026-08-16 07:00, Yann's journal, read on a phone: a tap at 07:00:37
+    then FIFTEEN entries `offline ← verdict-down [... waking]` spanning 43 s,
+    then green. Read literally — and the journal's own contract says to read it
+    literally ("`card` = what the user sees") — the wake spent 43 s painting a
+    red "hors ligne" at the user before working.
+
+    It never did. setOffline() hands over to setStarting() while wolSent is
+    true, on purpose, so the card read "Démarrage…" throughout. The branch
+    logged the verdict it had COMPUTED, not the card that landed.
+
+    Why this went unseen for so long: wake-e2e asserts on the DOM (it catches a
+    wrong card) and this suite asserts on the ring (it catches a wrong reason).
+    Nothing compared the two, so a label that contradicted the screen was
+    invisible to both. That is the pin below.
+
+    Positive control in the same run, and it is what makes the assertion mean
+    anything: the SAME relay body with NO tap must still journal `offline`.
+    Without it, "never log offline" would pass on a build that logs nothing at
+    all — and would hide a real red.
+    """
+    print("\n## during a wake the journal names the card on screen, not the verdict")
+    ok = True
+    for tapped in (True, False):
+        label = "with a local tap (wake in flight)" if tapped else "without a tap (control)"
+        b = getattr(p, ENGINE).launch()
+        ctx = b.new_context(viewport={"width": 390, "height": 844})
+        seen = {"relay": 0, "woken": False}
+
+        def handle(route):
+            parsed = urlparse(route.request.url)
+            if parsed.netloc == RELAY_HOST and parsed.path == "/status":
+                seen["relay"] += 1
+                # The IRL shape, in the order it actually happens: a plain
+                # heartbeat-sourced "down" until the wake is fired, then the
+                # relay starts advertising `waking`. Serving `waking` from the
+                # first poll would model something else entirely — the app would
+                # ADOPT a remote wake (enterRemoteWaking) before any tap, the
+                # power button would be owned by the countdown, and the scenario
+                # would never exercise the local-wake path it is about.
+                sa = f', "served_at": {int(time.time())}'
+                wk = ', "waking": true' if seen["woken"] else ""
+                route.fulfill(status=200, headers={
+                    "Content-Type": "application/json",
+                    "Access-Control-Allow-Origin": "*",
+                    "Access-Control-Allow-Headers": "*",
+                }, body='{"up": false, "stale": false, "age_s": 14282, '
+                        '"source": "heartbeat"' + wk + sa + '}')
+                return
+            if parsed.netloc == RELAY_HOST and parsed.path == "/wol":
+                seen["woken"] = True
+                route.fulfill(status=200, body='{"ok": true}', headers={
+                    "Content-Type": "application/json",
+                    "Access-Control-Allow-Origin": "*",
+                    "Access-Control-Allow-Headers": "*",
+                })
+                return
+            if parsed.netloc == CONFIG_HOST or parsed.netloc.endswith("." + CONFIG_HOST):
+                route.fulfill(status=200, body="")
+                return
+            route.continue_()
+
+        page = ctx.new_page()
+        page.route("**/*", handle)
+        # Off-window, so the pre-paint is the blue schedule presumption and any
+        # `offline` in the ring can only have come from the verdict branch.
+        page.goto(_url(PWA_BASE, _window(False)), wait_until="load")
+        page.wait_for_selector("#statusLabel", state="attached", timeout=10000)
+        # Let the first probe settle before tapping: sendWol() refuses on
+        # `!wolReady()`, so clicking into the cold-open check would silently
+        # do nothing and the scenario would assert on a wake that never was.
+        page.wait_for_timeout(3000)
+        if tapped:
+            page.click("#powerBtn")
+        # Several poll cycles (poll=2), so the down-verdict branch runs
+        # repeatedly under the wake — the 15-entry burst, in miniature.
+        page.wait_for_timeout(7000)
+
+        ring = page.evaluate(f"JSON.parse(localStorage.getItem('{PAINT_LOG_KEY}')||'[]')")
+        # Only the entries the verdict branch produced; the schedule presumption
+        # legitimately paints `offline` before any probe and is not at issue.
+        # Scoped to AFTER the tap on the wake run: the cold-open verdict that
+        # precedes it is a genuine red on a genuinely-off home, correctly
+        # labelled `offline`, and demanding "never offline" over the whole ring
+        # would have pinned the wrong rule — the bug is the label DURING a wake,
+        # not the label of a down.
+        start = 0
+        if tapped:
+            taps = [i for i, e in enumerate(ring) if e.get("w") == "local-tap"]
+            ok &= check("[tap] the tap reached the app (mock alive)", bool(taps),
+                        json.dumps([e.get("w") for e in ring]))
+            start = (taps[-1] + 1) if taps else len(ring)
+        verdicts = [e for e in ring[start:] if e.get("w") == "verdict-down"]
+        cards = sorted({e.get("c") for e in verdicts})
+        # The LABEL, not the card's class: setStarting() leaves statusCard at the
+        # plain 'status-card' and says "Démarrage…" in the tile — the wake state
+        # is legible to the user there and nowhere else. Asserting on the class
+        # would have been an assertion on the wrong element, which is the exact
+        # trap that let this bug live (see the docstring).
+        card_now = (page.text_content("#statusLabel") or "").strip()
+        ok &= check(f"[{label}] the verdict branch ran (mock alive)",
+                    bool(verdicts), json.dumps([e.get("w") for e in ring]))
+        if tapped:
+            # The screen first — the assertion is "the journal agrees with THIS",
+            # so a run where the card was not actually the wake card would prove
+            # nothing (and this is the half wake-e2e already owns).
+            ok &= check("[tap] the card on screen reads 'Démarrage…'",
+                        card_now.startswith("Démarrage"), card_now)
+            ok &= check("[tap] verdict-down entries are labelled 'waking', never 'offline'",
+                        cards == ["waking"], json.dumps(cards))
+        else:
+            ok &= check("[control] without a tap the same body still logs 'offline'",
+                        cards == ["offline"], json.dumps(cards))
+        b.close()
+    return ok
+
+
 def main():
     print(f"Paint journal E2E — engine={ENGINE} base={PWA_BASE}")
     with sync_playwright() as p:
@@ -488,6 +607,7 @@ def main():
         ok &= run_presumption_is_labelled(p)
         ok &= run_relay_silent_stabilises(p)
         ok &= run_slow_relay_stabilises(p)
+        ok &= run_wake_journal_labels(p)
     print("\n" + ("ALL PASS" if ok else "FAILURES ABOVE"))
     return 0 if ok else 1
 

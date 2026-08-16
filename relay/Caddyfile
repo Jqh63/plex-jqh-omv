@@ -38,6 +38,20 @@
 	# `logs-caddy` route, so this needs no new file, no logrotate config and
 	# no sudoers verb. Footprint headroom checked before shipping:
 	# 202 MB of logs against 25 GB free.
+	# ⚠️ SCOPE — measured 20 min after this log went live: 81 requests, of which
+	# 80 were /heartbeat (the home server announcing itself every ~15 s) and ONE
+	# was /status, the only endpoint this log was built to prove the arrival of.
+	# 99 % noise, ~906 bytes a line, ~150 MB/month against a 198 MB journal —
+	# it would have pushed the wol-relay journal's retention down, i.e. degraded
+	# the instrument that DID work (it is what dated the 13-14/08 episodes) to
+	# feed one that was answering 1 % of the time.
+	#
+	# /heartbeat needs no Caddy-level line: app.py already journals it with
+	# meaning ("home declares UP/DOWN"), which is the form anyone actually reads.
+	# Skipping it keeps `logs-caddy` at its pre-change span for idle traffic and
+	# removes the need for a depth argument on that route (reverted with this).
+	log_skip /heartbeat
+
 	log {
 		format filter {
 			wrap console

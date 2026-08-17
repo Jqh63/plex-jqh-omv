@@ -641,6 +641,69 @@ def scenario_degraded_resume_does_not_go_green_early(p):
     return ok
 
 
+def scenario_late_adopted_wake_still_shows_a_timer(p):
+    """v8.77 — a PWA opened cold LATE into someone else's wake must still show a
+    moving timer, not a frozen string.
+
+    Reported 2026-08-17: "la deuxième PWA ouverte après le démarrage dit juste
+    démarrage en cours sans timer". The window is structural, not rare — the relay
+    advertises `waking` for WAKE_SIGNAL_TTL_S (150 s) while the ETA is ~80 s, so
+    every cold open in that 70 s tail arrives with wake_age > ETA. startCountdown
+    then clamped the anchor to the ETA (`min(elapsed, etaMs)`), which pinned
+    countdownEndsAt to "now" and left the label on "Réveil… presque prêt" — and
+    past the -30 s threshold on a bare "Démarrage long…" that never changed again.
+
+    Two properties, and the SECOND is the one the user reported:
+      1. the countdown is armed at all (adoption works — it always did);
+      2. the label MOVES. Two samples 3 s apart must differ. A frozen widget is
+         indistinguishable from a hung app, which is what "sans timer" means.
+
+    Positive control in the same run: an EARLY adopter (wake_age 10 s) must show
+    the classic "environ Ns". Without it, "the label moves" would also pass on an
+    app that shows a meaningless ticking string in every state.
+    """
+    _reset_clock_skew()
+    print("\n## late-adopted-wake-still-shows-a-timer (v8.77)")
+    ok = True
+
+    def run(wake_age):
+        counters = {"relay": 0, "home": 0, "wol": 0}
+        b = getattr(p, ENGINE).launch()
+        ctx = b.new_context(viewport={"width": 390, "height": 844})
+        page = ctx.new_page()
+        page.route("**/*", _mk_handler(counters, lambda n: f"waking:{wake_age}",
+                                       lambda n: "fail"))
+        page.goto(PWA_URL, wait_until="load")
+        page.wait_for_selector("#statusLabel", state="attached", timeout=10000)
+        page.wait_for_timeout(1200)
+        first = card(page)
+        page.wait_for_timeout(3000)
+        second = card(page)
+        b.close()
+        return counters, first, second
+
+    # wake_age 110 s > the fixture's eta_s of 80 s — the reported case.
+    counters, first, second = run(110)
+    print(f"  late adopter (wake_age 110s, eta 80s) → {first['power']!r} "
+          f"then {second['power']!r}")
+    ok &= check("a late adopter arms the countdown without tapping",
+                is_counting_down(first) and counters["wol"] == 0,
+                f"progress={first['progress']!r} wol POSTs={counters['wol']}")
+    ok &= check("its timer MOVES (not a frozen 'presque prêt' / 'Démarrage long…')",
+                first["power"] != second["power"],
+                f"{first['power']!r} == {second['power']!r}")
+
+    # Positive control: the ordinary early adoption still reads as a countdown.
+    _, early_first, early_second = run(10)
+    print(f"  early adopter (wake_age 10s) → {early_first['power']!r} "
+          f"then {early_second['power']!r}")
+    ok &= check("control: an early adopter still counts down in seconds",
+                "environ" in early_first["power"]
+                and early_first["power"] != early_second["power"],
+                f"{early_first['power']!r} → {early_second['power']!r}")
+    return ok
+
+
 def main():
     print("=" * 72)
     print(f"WAKE-path E2E (v8.31 + v8.32) — engine={ENGINE} base={PWA_BASE}")
@@ -659,6 +722,7 @@ def main():
         ok &= scenario_failed_wake_says_contact_admin(p)
         ok &= scenario_adopted_wake_holds_the_screen(p)
         ok &= scenario_degraded_resume_does_not_go_green_early(p)
+        ok &= scenario_late_adopted_wake_still_shows_a_timer(p)
 
     print("\n" + "=" * 72)
     print("ALL PASS" if ok else "FAILURES — see above")

@@ -1743,7 +1743,17 @@ function enterRemoteWaking(wakeAgeS){
   }
 }
 
-var countdownTimer=null,countdownEndsAt=0,wolEtaMs=0;
+var countdownTimer=null,countdownEndsAt=0,wolEtaMs=0,countdownStartedAt=0;
+
+// Compact elapsed for the past-ETA label ("45s", "2min10"). Short on purpose:
+// it shares the power label with "Démarrage long… ", and this tile has already
+// been truncated four times at 320 px (see SUB_DEGRADED).
+function fmtElapsed(ms){
+  var s=Math.max(0,Math.round(ms/1000));
+  if(s<60)return s+'s';
+  var m=Math.floor(s/60),r=s%60;
+  return m+'min'+(r<10?'0':'')+r;
+}
 // elapsedMs (default 0) = how far into the boot we already are. 0 for a fresh
 // local wake; >0 when adopting an in-progress remote wake (relay `wake_age_s`),
 // so the countdown + progress bar start from the right position instead of 0.
@@ -1751,8 +1761,19 @@ function startCountdown(elapsedMs){
   stopCountdown();
   var etaMs=getEta();
   wolEtaMs=etaMs;
-  elapsedMs=Math.min(Math.max(elapsedMs||0,0),etaMs);
-  countdownEndsAt=Date.now()+(etaMs-elapsedMs);
+  // v8.77 — the anchor is NOT clamped to the ETA. Clamping was silently correct
+  // for a local wake (elapsed < ETA by construction) and a lie for an ADOPTED
+  // one: the relay advertises `waking` for WAKE_SIGNAL_TTL_S (150 s) while the
+  // ETA is ~80 s, so any PWA opened cold in that 70 s window arrived with
+  // wake_age > ETA, had its anchor pulled back to "exactly at the ETA", and
+  // showed a frozen "Réveil… presque prêt" — no number at all, which is the
+  // "démarrage en cours sans timer" reported on 2026-08-17. Reproduced in a
+  // browser at wake_age 79/90/150 s before the fix. Unclamped, the anchor is
+  // the wake's real start on every device, so all of them flip to the past-ETA
+  // labels at the same wall instant instead of each one 'wake_age - ETA' late.
+  elapsedMs=Math.max(elapsedMs||0,0);
+  countdownStartedAt=Date.now()-elapsedMs;
+  countdownEndsAt=countdownStartedAt+etaMs;
   var pl=document.getElementById('powerLabel');
   var bar=document.getElementById('powerProgressBar');
   var box=document.getElementById('powerProgress');
@@ -1761,8 +1782,13 @@ function startCountdown(elapsedMs){
   // reflow between the two width assignments so the browser registers the start
   // state before the transition begins — otherwise the second assignment
   // collapses with the first and the bar jumps with no animation.
+  // The BAR is clamped where the anchor is not: a boot already past its ETA has
+  // no remaining fraction to animate, so it starts full and stays there (the
+  // label carries "longer than usual" from there on). Guards a >100% width and
+  // a negative transition duration, both of which the unclamped anchor allows.
+  var barElapsedMs=Math.min(elapsedMs,etaMs);
   bar.style.transition='none';
-  bar.style.width=(etaMs?elapsedMs/etaMs*100:0)+'%';
+  bar.style.width=(etaMs?barElapsedMs/etaMs*100:0)+'%';
   void bar.offsetWidth;
   // !important: under prefers-reduced-motion the blanket `*{transition-duration:
   // .01ms!important}` rule (index.html) would otherwise beat this inline value
@@ -1770,7 +1796,7 @@ function startCountdown(elapsedMs){
   // mid-boot (Windows PC with animations off, 2026-08-01). An inline !important
   // outranks a stylesheet !important, so the real ETA-length transition wins.
   // The wake bar is essential feedback, exempt from motion reduction (WCAG 2.3.3).
-  bar.style.setProperty('transition','width '+((etaMs-elapsedMs)/1000)+'s linear','important');
+  bar.style.setProperty('transition','width '+((etaMs-barElapsedMs)/1000)+'s linear','important');
   bar.style.width='100%';
   // Three labels by elapsed time. Past T=0 we used to leave "presque prêt"
   // displayed for up to 5 min (the WoL_TIMEOUT_MS) which made the family
@@ -1781,7 +1807,13 @@ function startCountdown(elapsedMs){
     var diff=Math.round((countdownEndsAt-Date.now())/1000);
     if(isOnline||(!wolSent&&!remoteWaking)){stopCountdown();return;}
     var txt;
-    if(diff<-30)txt='Démarrage long…';
+    // v8.77 — past the "longer than usual" threshold the label used to be a
+    // FROZEN string, so a device that adopted a late wake had a widget that
+    // said "starting" and never moved again — indistinguishable from a hung
+    // app, and the half of "sans timer" the unclamped anchor alone does not
+    // fix. Count the elapsed time UP instead: there is no remaining time left
+    // to promise, but there is always an honest "it has been running for N".
+    if(diff<-30)txt='Démarrage long… '+fmtElapsed(Date.now()-countdownStartedAt);
     else if(diff<=0)txt='Réveil… presque prêt';
     else txt='Réveil… environ '+diff+'s';
     pl.textContent=txt;

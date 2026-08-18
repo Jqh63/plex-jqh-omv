@@ -240,7 +240,14 @@ EOF
       # Without this read-back the script would report success while changing
       # nothing at all, which is the exact failure mode it exists to prevent:
       # a fallback that everyone believes is protected and isn't.
-      if /usr/sbin/sshd -T 2>/dev/null | grep -qi '^clientaliveinterval 30$'; then
+      # NO `grep -q` here. This script runs under `set -o pipefail`, and -q
+      # closes the pipe on the first match: sshd then dies of SIGPIPE and the
+      # pipeline reports 141 — a MATCH turned into a failure. Observed live on
+      # 2026-08-18: the drop-in was correctly applied and this very check
+      # printed the warning saying it was not. Capturing the output makes grep
+      # drain its input, so no signal is ever sent upstream.
+      eff_keepalive="$(/usr/sbin/sshd -T 2>/dev/null | grep -i '^clientaliveinterval' || true)"
+      if [[ "$eff_keepalive" == *" 30" ]]; then
         echo "[bootstrap] sshd keepalive active (verified via sshd -T): $SSHD_DROPIN"
       else
         echo "[bootstrap] WARN drop-in written but NOT in the effective config —" >&2

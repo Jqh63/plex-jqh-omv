@@ -355,6 +355,40 @@ posted, env templates seeded (NOT real values),
 flags (no-pty, no-X11-forwarding, no-agent-forwarding,
 no-port-forwarding).
 
+### Re-running the bootstrap on a live VM
+
+Once provisioned, the VM needs **nothing from a workstation** to pick up a new
+`dispatch.sh`, `sudoers.deploy` or hardening drop-in: this repo is public, so it
+fetches its own sources, and both public keys are re-derivable from the
+`authorized_keys` already installed. The script is idempotent and restarts
+neither Caddy nor `wol-relay` (it only reloads sshd, so an admin session
+survives). Run it from an admin shell on the VM:
+
+```bash
+( set -e
+  [ "$(hostname -s)" = "wol-relay" ] || { echo "WRONG MACHINE — STOP"; exit 1; }
+  SRC=/tmp/relay-bootstrap
+  rm -rf "$SRC" && mkdir -p "$SRC"
+  URL=https://github.com/Jqh63/plex-jqh-omv/archive/refs/heads/main.tar.gz
+  curl -fsSL "$URL" | tar xz -C "$SRC"
+  BS="$SRC/plex-jqh-omv-main/relay/scripts/bootstrap-wol-relay.sh"
+  [ -f "$BS" ] || { echo "bootstrap not found — STOP"; exit 1; }
+  sudo grep -o 'ssh-ed25519 [A-Za-z0-9+/=]*' /home/deploy/.ssh/authorized_keys > /tmp/d.pub
+  sudo grep -o 'ssh-ed25519 [A-Za-z0-9+/=]*' /home/omvtunnel/.ssh/authorized_keys > /tmp/t.pub
+  grep -q '^ssh-ed25519 AAAA' /tmp/d.pub || { echo "deploy key not extracted — STOP"; exit 1; }
+  grep -q '^ssh-ed25519 AAAA' /tmp/t.pub || { echo "tunnel key not extracted — STOP"; exit 1; }
+  sudo bash "$BS" /tmp/d.pub /tmp/t.pub
+)
+```
+
+⚠️ The two `grep -q` guards are **not** decoration. An empty extraction still
+satisfies the script's `[[ -f ]]` precondition, and the bootstrap would then
+write an `authorized_keys` carrying options but **no key** — locking out the
+`deploy` channel and the reverse tunnel at once, on the machine whose whole
+job is to be reachable when the home server is not. Never drop them.
+
+Omit the second argument only if this VM has no reverse-SSH endpoint.
+
 **4. Fill in the real env values on the VM**
 
 ```bash

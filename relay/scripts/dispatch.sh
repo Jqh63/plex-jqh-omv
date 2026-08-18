@@ -44,6 +44,11 @@
 #   ssh wol-relay-deploy pat-list                # list stored blobs (read-only)
 #   ssh wol-relay-deploy pat-dump-latest         # newest blob → stdout (restore path, read-only)
 #
+# reverse-SSH out-of-band fallback (knowledge-base ADR 2026-06-05 — the
+# endpoint the admin uses when the home server's WireGuard container is down):
+#   ssh wol-relay-deploy tunnel-status           # listener + omvtunnel sessions (read-only)
+#   ssh wol-relay-deploy tunnel-reap             # drop stale sessions holding the listener
+#
 # Standard usage pattern: `relay/scripts/deploy.sh` on the deploying host
 # pipes the 3 push commands from the local repo, then triggers apply.
 # home-watch is deployed analogously by knowledge-base's deploy-home-watch.sh.
@@ -273,12 +278,49 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
     [ -n "$f" ] || { echo "ERR no backup stored" >&2; exit 66; }
     cat "$f"
     ;;
+  tunnel-status)
+    # Reverse-SSH out-of-band fallback endpoint (knowledge-base ADR
+    # 2026-06-05): is the home server's tunnel actually terminated here?
+    # Read-only, no sudo — the loopback listener shows up in `ss -lnt` and
+    # the session processes in `pgrep -u omvtunnel`. BOTH views on purpose:
+    # a listener whose session is gone is precisely the stale state that
+    # makes every reconnect fail with "remote port forwarding failed".
+    # `ss`/`pgrep` resolved through PATH, not pinned: no sudo is involved
+    # here, so nothing depends on the literal path (unlike the sudoers-pinned
+    # pkill of tunnel-reap), and a hardcoded /usr/bin would silently turn this
+    # read-only view into "(unavailable)" on a differently laid-out image.
+    echo "=== loopback listener (want 127.0.0.1:2222) ==="
+    ss -lnt 'src 127.0.0.1:2222' || echo "(ss unavailable)"
+    echo "=== omvtunnel sessions ==="
+    pgrep -a -u omvtunnel || echo "(none)"
+    ;;
+  tunnel-reap)
+    # Drop every sshd session owned by omvtunnel, freeing the loopback
+    # listener. Bounded and recoverable by construction: that user can hold
+    # nothing but this tunnel (nologin + permitlisten), and the home server's
+    # reverse-ssh-tunnel.service reconnects within its RestartSec.
+    #
+    # Why this exists: after an abrupt reboot of the home server, its old
+    # session survives here until the TCP keepalive expires (~2 h), holding
+    # the listener — so the fallback channel, whose only job is to exist
+    # during an outage, stays down exactly when it is needed. The keepalive
+    # drop-in installed by bootstrap-wol-relay.sh makes that self-healing in
+    # ~90 s; this verb is the manual override when it must be immediate.
+    before=$(pgrep -c -u omvtunnel || true)
+    # Path pinned HERE on purpose: this argv must match sudoers verbatim.
+    sudo /usr/bin/pkill -u omvtunnel sshd || true
+    sleep 2
+    after=$(pgrep -c -u omvtunnel || true)
+    echo "[tunnel-reap] omvtunnel processes: ${before:-0} -> ${after:-0}"
+    echo "[tunnel-reap] the home server reconnects on its own restart timer"
+    ;;
   *)
     echo "dispatch.sh: unknown command '${SSH_ORIGINAL_COMMAND:-}'" >&2
     echo "Expected: push-app, push-caddyfile, push-service, apply, push-window, apply-window, status, health, logs-wol-relay [500|3000], logs-caddy, log-footprint," >&2
     echo "          push-home-watch{,-service,-timer}, apply-home-watch, home-watch-status, logs-home-watch," >&2
     echo "          push-pock-sync-{app,service}, apply-pock-sync, pock-sync-status, logs-pock-sync, pock-dump," >&2
-    echo "          pat-receive {daily,weekly}, pat-list, pat-dump-latest." >&2
+    echo "          pat-receive {daily,weekly}, pat-list, pat-dump-latest," >&2
+    echo "          tunnel-status, tunnel-reap." >&2
     exit 64
     ;;
 esac

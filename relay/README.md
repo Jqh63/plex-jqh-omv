@@ -241,6 +241,8 @@ ssh wol-relay-deploy logs-wol-relay 500    # wider window
 ssh wol-relay-deploy logs-wol-relay 3000   # months of history (journald holds ~174 MB)
 ssh wol-relay-deploy logs-caddy     # journalctl -u caddy -n 100 --no-pager
 ssh wol-relay-deploy log-footprint  # journald size + log dirs + df (read-only)
+ssh wol-relay-deploy tunnel-status  # reverse-SSH fallback: listener + sessions (read-only)
+ssh wol-relay-deploy tunnel-reap    # free a listener held by a stale session
 ssh wol-relay-deploy push-app < relay/app.py             # stage only
 ssh wol-relay-deploy push-caddyfile < relay/Caddyfile    # stage only
 ssh wol-relay-deploy push-service < relay/wol-relay.service
@@ -410,6 +412,25 @@ guarantees zero command capability. The home-side tunnel unit (systemd
 `ssh -N -R`) is versioned separately in the operator's homelab repo. Validate
 **from 4G/VPN-off** with the home VPN deliberately cut server-side — a LAN test proves nothing
 here.
+
+**Stale listener after an abrupt reboot of the home server.** Its old session
+stays registered on the VM, sshd keeps `127.0.0.1:2222` bound, and every
+reconnect fails with `remote port forwarding failed for listen port 2222` —
+the fallback channel is down for as long as the kernel TCP keepalive takes to
+expire (~2 h), i.e. exactly when an outage is in progress. Two mitigations,
+both installed by the bootstrap:
+
+- `ClientAliveInterval 30` / `ClientAliveCountMax 3` in
+  `/etc/ssh/sshd_config.d/10-tunnel-keepalive.conf` — sshd notices the dead
+  peer in ~90 s and releases the listener by itself. Global on purpose: Debian
+  includes that drop-in dir at the *top* of `sshd_config`, so a
+  `Match User omvtunnel` block there would capture every global directive
+  that follows in the main file.
+- `ssh wol-relay-deploy tunnel-status` (read-only: listener + live sessions —
+  a listener with no session is the stale state) and
+  `ssh wol-relay-deploy tunnel-reap` (drop them now). The reap is bounded by
+  construction: `omvtunnel` is a nologin user that can hold nothing but this
+  tunnel, and the home server reconnects on its own restart timer.
 
 ## Initial VM provisioning (recovery from zero)
 

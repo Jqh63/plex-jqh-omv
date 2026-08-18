@@ -224,13 +224,28 @@ EOF
     # Validate BEFORE reloading: a bad sshd config plus a reload is how one
     # loses the only way back into a remote VM. `reload` (not restart) also
     # leaves the admin's current session alive.
-    if /usr/sbin/sshd -t; then
-      systemctl reload ssh 2>/dev/null || systemctl reload sshd
-      echo "[bootstrap] sshd keepalive drop-in installed + reloaded ($SSHD_DROPIN)"
-    else
+    if ! /usr/sbin/sshd -t; then
       rm -f "$SSHD_DROPIN"
       echo "[bootstrap] ERR sshd -t rejected the keepalive drop-in — reverted, sshd untouched" >&2
-      exit 1
+      # Deliberately NOT a hard exit: this hardening sits in the middle of an
+      # idempotent bootstrap, and aborting here would silently skip every
+      # later section (home-watch prerequisites, pock-sync…) on a re-run. The
+      # drop-in is already reverted, so continuing leaves sshd exactly as it
+      # was — the failure is loud, not fatal.
+    else
+      systemctl reload ssh 2>/dev/null || systemctl reload sshd
+      # Verify the RESULT, not the write. `sshd_config` only picks this file up
+      # if it Includes sshd_config.d/*.conf — true on stock Debian, NOT a
+      # property this script controls (a cloud image may ship its own config).
+      # Without this read-back the script would report success while changing
+      # nothing at all, which is the exact failure mode it exists to prevent:
+      # a fallback that everyone believes is protected and isn't.
+      if /usr/sbin/sshd -T 2>/dev/null | grep -qi '^clientaliveinterval 30$'; then
+        echo "[bootstrap] sshd keepalive active (verified via sshd -T): $SSHD_DROPIN"
+      else
+        echo "[bootstrap] WARN drop-in written but NOT in the effective config —" >&2
+        echo "[bootstrap]      check that /etc/ssh/sshd_config has: Include /etc/ssh/sshd_config.d/*.conf" >&2
+      fi
     fi
   else
     echo "[bootstrap] WARN /etc/ssh/sshd_config.d absent — keepalive drop-in skipped" >&2

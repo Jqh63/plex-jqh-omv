@@ -308,11 +308,22 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
     # ~90 s; this verb is the manual override when it must be immediate.
     before=$(pgrep -c -u omvtunnel || true)
     # Path pinned HERE on purpose: this argv must match sudoers verbatim.
-    sudo /usr/bin/pkill -u omvtunnel sshd || true
+    sudo /usr/bin/pkill -u omvtunnel -f sshd || true
     sleep 2
     after=$(pgrep -c -u omvtunnel || true)
     echo "[tunnel-reap] omvtunnel processes: ${before:-0} -> ${after:-0}"
-    echo "[tunnel-reap] the home server reconnects on its own restart timer"
+    # Report the RESULT, never a reassuring constant. `pkill` exits 1 both when
+    # nothing matched and when sudo refused it, so the process count is the only
+    # honest witness: a verb that prints "done" while a missing sudoers entry
+    # silently blocked it would be worse than no verb at all.
+    if [ "${before:-0}" -eq 0 ]; then
+      echo "[tunnel-reap] nothing to reap — no omvtunnel session was registered here"
+    elif [ "${after:-0}" -lt "${before:-0}" ]; then
+      echo "[tunnel-reap] listener released — the home server reconnects on its own restart timer"
+    else
+      echo "[tunnel-reap] FAILED: sessions still present. sudoers entry missing or pkill blocked?" >&2
+      exit 1
+    fi
     ;;
   *)
     echo "dispatch.sh: unknown command '${SSH_ORIGINAL_COMMAND:-}'" >&2

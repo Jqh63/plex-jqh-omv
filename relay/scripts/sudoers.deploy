@@ -77,6 +77,17 @@ Cmnd_Alias POCK_SYNC_LOGS = \
 Cmnd_Alias POCK_SYNC_DUMP = \
   /usr/bin/tar -C /var/lib/pock-sync -cf - .
 
+# tunnel-reap — free the reverse-SSH loopback listener held by a stale
+# omvtunnel session (dispatch.sh tunnel-reap). Bounded by construction: the
+# -u selector confines the kill to a nologin user that can hold nothing but
+# that tunnel, and the home server reconnects on its own restart timer. No
+# wildcard: the pattern `sshd` is a literal, so the arg vector is pinned.
+# `-f` matches the full command line — the exact form proven live on 2026-08-18;
+# the session process shows up as "sshd: omvtunnel@notty", not as a bare comm.
+Cmnd_Alias OMVTUNNEL_REAP = \
+  /usr/bin/pkill -u omvtunnel -f sshd
+
 deploy ALL=(root) NOPASSWD: WOL_RELAY_INSTALL, WOL_RELAY_SYSTEMCTL, WOL_RELAY_LOGS, WOL_RELAY_LOG_FOOTPRINT, \
                             HOME_WATCH_INSTALL, HOME_WATCH_SYSTEMCTL, HOME_WATCH_LOGS, \
-                            POCK_SYNC_INSTALL, POCK_SYNC_SYSTEMCTL, POCK_SYNC_LOGS, POCK_SYNC_DUMP
+                            POCK_SYNC_INSTALL, POCK_SYNC_SYSTEMCTL, POCK_SYNC_LOGS, POCK_SYNC_DUMP, \
+                            OMVTUNNEL_REAP

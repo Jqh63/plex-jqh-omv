@@ -195,6 +195,61 @@ if [[ -n "$OMVTUNNEL_PUBKEY_PATH" ]]; then
     chown omvtunnel:omvtunnel "$OMVTUNNEL_AUTH"
     echo "[bootstrap] omvtunnel authorized_keys installed (restrict + permitlisten=$TUNNEL_LISTEN)"
   fi
+
+  # --- 8b. sshd keepalive: reap a tunnel whose far end vanished -----------
+  # Without this, an abrupt reboot of the home server leaves its session
+  # registered here: sshd keeps the loopback listener bound until the kernel
+  # TCP keepalive expires (~2 h), and EVERY reconnect from the home server
+  # fails with "remote port forwarding failed for listen port 2222". Observed
+  # 2026-08-18 — the out-of-band fallback, whose single purpose is to exist
+  # while everything else is down, was itself down for 20 min and nothing
+  # said so. ClientAlive* makes sshd notice a dead peer in ~90 s and release
+  # the listener on its own. Same fix the home server applied to its own sshd
+  # (knowledge-base runbook omv/runbooks/sshd-match-address.md, 2026-07-25).
+  #
+  # Global, NOT a `Match User omvtunnel` block: Debian Includes this drop-in
+  # dir at the TOP of sshd_config, so a Match here would swallow every global
+  # directive that follows in the main file. A liveness probe is harmless for
+  # the admin's own IAP sessions — it only drops them once the network is
+  # genuinely gone.
+  SSHD_DROPIN=/etc/ssh/sshd_config.d/10-tunnel-keepalive.conf
+  if [[ -d /etc/ssh/sshd_config.d ]]; then
+    cat > "$SSHD_DROPIN" <<'EOF'
+# Managed by relay/scripts/bootstrap-wol-relay.sh — do not edit by hand.
+# Reap sessions whose peer vanished (see section 8b of that script).
+ClientAliveInterval 30
+ClientAliveCountMax 3
+EOF
+    chmod 0644 "$SSHD_DROPIN"
+    # Validate BEFORE reloading: a bad sshd config plus a reload is how one
+    # loses the only way back into a remote VM. `reload` (not restart) also
+    # leaves the admin's current session alive.
+    if ! /usr/sbin/sshd -t; then
+      rm -f "$SSHD_DROPIN"
+      echo "[bootstrap] ERR sshd -t rejected the keepalive drop-in — reverted, sshd untouched" >&2
+      # Deliberately NOT a hard exit: this hardening sits in the middle of an
+      # idempotent bootstrap, and aborting here would silently skip every
+      # later section (home-watch prerequisites, pock-sync…) on a re-run. The
+      # drop-in is already reverted, so continuing leaves sshd exactly as it
+      # was — the failure is loud, not fatal.
+    else
+      systemctl reload ssh 2>/dev/null || systemctl reload sshd
+      # Verify the RESULT, not the write. `sshd_config` only picks this file up
+      # if it Includes sshd_config.d/*.conf — true on stock Debian, NOT a
+      # property this script controls (a cloud image may ship its own config).
+      # Without this read-back the script would report success while changing
+      # nothing at all, which is the exact failure mode it exists to prevent:
+      # a fallback that everyone believes is protected and isn't.
+      if /usr/sbin/sshd -T 2>/dev/null | grep -qi '^clientaliveinterval 30$'; then
+        echo "[bootstrap] sshd keepalive active (verified via sshd -T): $SSHD_DROPIN"
+      else
+        echo "[bootstrap] WARN drop-in written but NOT in the effective config —" >&2
+        echo "[bootstrap]      check that /etc/ssh/sshd_config has: Include /etc/ssh/sshd_config.d/*.conf" >&2
+      fi
+    fi
+  else
+    echo "[bootstrap] WARN /etc/ssh/sshd_config.d absent — keepalive drop-in skipped" >&2
+  fi
 else
   echo "[bootstrap] no omvtunnel pubkey (2nd arg) — reverse-SSH endpoint skipped"
 fi

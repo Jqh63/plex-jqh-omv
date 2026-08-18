@@ -291,8 +291,8 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
     # read-only view into "(unavailable)" on a differently laid-out image.
     echo "=== loopback listener (want 127.0.0.1:2222) ==="
     ss -lnt 'src 127.0.0.1:2222' || echo "(ss unavailable)"
-    echo "=== omvtunnel sessions ==="
-    pgrep -a -u omvtunnel || echo "(none)"
+    echo "=== omvtunnel sessions (sshd) ==="
+    pgrep -a -u omvtunnel -f sshd || echo "(none)"
     ;;
   tunnel-reap)
     # Drop every sshd session owned by omvtunnel, freeing the loopback
@@ -306,11 +306,15 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
     # during an outage, stays down exactly when it is needed. The keepalive
     # drop-in installed by bootstrap-wol-relay.sh makes that self-healing in
     # ~90 s; this verb is the manual override when it must be immediate.
-    before=$(pgrep -c -u omvtunnel || true)
+    # Compter les sshd, PAS tous les process du user : la sortie réelle du
+    # 2026-08-18 montre un `systemd --user` + `(sd-pam)` qui survivent à la
+    # session. Sans le -f, un reap sans session à tuer verrait before=2,
+    # after=2 et rapporterait FAILED alors qu'il n'y avait rien à faire.
+    before=$(pgrep -c -u omvtunnel -f sshd || true)
     # Path pinned HERE on purpose: this argv must match sudoers verbatim.
     sudo /usr/bin/pkill -u omvtunnel -f sshd || true
     sleep 2
-    after=$(pgrep -c -u omvtunnel || true)
+    after=$(pgrep -c -u omvtunnel -f sshd || true)
     echo "[tunnel-reap] omvtunnel processes: ${before:-0} -> ${after:-0}"
     # Report the RESULT, never a reassuring constant. `pkill` exits 1 both when
     # nothing matched and when sudo refused it, so the process count is the only

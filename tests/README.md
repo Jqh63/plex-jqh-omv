@@ -116,6 +116,19 @@ cold-radio change.
 
 ## Run
 
+> **Before any browser suite: nothing to remember.** Every Playwright suite calls
+> `browser_guard.ensure()` on import. It is a no-op (one `ldd`, a few ms) when the
+> engines are healthy, and it is idempotent -- repeated calls in one process cost
+> nothing. When the system libraries are gone (browser binaries survive a container
+> recreate, their `.so` files do not), the suite stops immediately with the command
+> to run instead of dying mid-way in loader noise. Set `BROWSER_ENSURE_CMD` to a
+> command that installs the deps and the guard will run it, then **re-verify** --
+> it never reports "repaired" on the strength of an exit code alone.
+>
+> `python3 tests/browser-guard-selftest.py` pins that behaviour, positive control
+> included (a repair command that fixes nothing must still fail).
+
+
 State machine sim — no setup, no network, just Python 3.12+:
 
 ```bash

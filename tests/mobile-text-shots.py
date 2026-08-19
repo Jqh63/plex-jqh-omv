@@ -6,6 +6,12 @@ toast wrap. NOT part of the regression suite — a visual aid for one review."""
 import os, sys, pathlib
 from playwright.sync_api import sync_playwright
 
+# Fail early and legibly if the engines' system libs are gone (a sandbox
+# upgrade wipes /usr/lib while the binaries persist). No-op when healthy.
+from browser_guard import ensure as _ensure_browser
+
+_ensure_browser()
+
 BASE = os.environ.get('PWA_BASE', 'file:///config/workspace/plex-jqh-omv/index.html')
 # chromium (default) | webkit — webkit renders on the Safari engine but needs
 # its system libs (see tests/README.md § Engines); falls back with a clear error.

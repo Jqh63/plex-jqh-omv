@@ -30,6 +30,12 @@ import socketserver
 import sys
 import threading
 
+# Fail early and legibly if the engines' system libs are gone (a sandbox
+# upgrade wipes /usr/lib while the binaries persist). No-op when healthy.
+from browser_guard import ensure as _ensure_browser
+
+_ensure_browser()
+
 REPO = os.path.dirname(os.path.abspath(os.path.dirname(__file__)))
 LABEL_RE = re.compile(r"^v\d+ · \d{4}-\d{2}-\d{2}[a-z]?$")
 

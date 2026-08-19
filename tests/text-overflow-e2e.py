@@ -16,6 +16,12 @@ amount rather than by guesswork.
 import os, sys
 from playwright.sync_api import sync_playwright
 
+# Fail early and legibly if the engines' system libs are gone (a sandbox
+# upgrade wipes /usr/lib while the binaries persist). No-op when healthy.
+from browser_guard import ensure as _ensure_browser
+
+_ensure_browser()
+
 BASE = os.environ.get('PWA_BASE', 'https://jqh63.github.io/plex-jqh-omv/')
 
 # Widths: the phone's own CSS width is DIVIDED by Android's *display size*

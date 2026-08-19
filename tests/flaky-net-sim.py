@@ -37,6 +37,12 @@ from urllib.parse import urlparse
 
 from playwright.async_api import async_playwright
 
+# Fail early and legibly if the engines' system libs are gone (a sandbox
+# upgrade wipes /usr/lib while the binaries persist). No-op when healthy.
+from browser_guard import ensure as _ensure_browser
+
+_ensure_browser()
+
 CONFIG_HOST, RELAY_HOST = "test.example.com", "r.example.com"
 BASE = "file://" + os.path.abspath(
     os.path.join(os.path.dirname(__file__), os.pardir, "index.html"))

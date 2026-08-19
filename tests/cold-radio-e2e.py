@@ -83,6 +83,12 @@ import sys
 from urllib.parse import urlparse
 from playwright.sync_api import sync_playwright, Route
 
+# Fail early and legibly if the engines' system libs are gone (a sandbox
+# upgrade wipes /usr/lib while the binaries persist). No-op when healthy.
+from browser_guard import ensure as _ensure_browser
+
+_ensure_browser()
+
 CONFIG_HOST = "test.example.com"
 RELAY_HOST = "r.example.com"
 # Default = the WORKING TREE (file:// on this checkout) so a local fix is what

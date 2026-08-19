@@ -34,6 +34,12 @@ import sys
 
 from playwright.sync_api import sync_playwright
 
+# Fail early and legibly if the engines' system libs are gone (a sandbox
+# upgrade wipes /usr/lib while the binaries persist). No-op when healthy.
+from browser_guard import ensure as _ensure_browser
+
+_ensure_browser()
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 # Same config shape as a11y-e2e.py: wolReady() needs relay + token too, else
 # the power section stays hidden and the tile renders in a state no phone sees.

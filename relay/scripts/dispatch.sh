@@ -17,7 +17,8 @@
 #   ssh wol-relay-deploy health            # curl http://127.0.0.1:8000/health
 #   ssh wol-relay-deploy logs-wol-relay [500|3000]  # journalctl tail, read-only
 #                                          #   (defaut 100 lignes ~= 5 jours)
-#   ssh wol-relay-deploy logs-caddy        # journalctl -u caddy -n 100 (read-only)
+#   ssh wol-relay-deploy logs-caddy [500|3000]      # journalctl tail, read-only
+#                                          #   (defaut 100 lignes ~= 70 min)
 #   ssh wol-relay-deploy log-footprint     # journald size + log dirs + df (read-only)
 #
 # home-watch (external homelab monitor, content pushed in from the private
@@ -169,9 +170,22 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
     journal_banner wol-relay "$n"
     sudo /usr/bin/journalctl -u wol-relay -n "$n" --no-pager
     ;;
-  logs-caddy)
-    journal_banner caddy
-    sudo /usr/bin/journalctl -u caddy -n 100 --no-pager
+  logs-caddy|"logs-caddy 500"|"logs-caddy 3000")
+    # Same literal-enum shape as logs-wol-relay above: each depth is its own
+    # case pattern and its own pinned argv in sudoers — no parsed argument ever
+    # reaches sudo, so the static-enum property of this forced command holds.
+    #
+    # Why depth exists here (2026-08-21): the PWA's paint journal showed two
+    # /status probes dying at ~8 s on a cold 4G handshake at 09:21 CEST, and the
+    # question "did they reach Caddy at all, or die in TLS?" could only be
+    # answered on THIS unit — the wol-relay unit sees nothing that Caddy didn't
+    # pass on. Read at 16:11, the fixed 100 lines reached back only to ~15:00:
+    # the evidence had scrolled off while the route that needed it (logs-wol-relay)
+    # had 3000 all along. Measured on the real journal, 100 lines ≈ 70 min, so
+    # 3000 ≈ 35 h — comfortably past a full uptime window.
+    n="${SSH_ORIGINAL_COMMAND#logs-caddy}"; n="${n# }"; n="${n:-100}"
+    journal_banner caddy "$n"
+    sudo /usr/bin/journalctl -u caddy -n "$n" --no-pager
     ;;
   log-footprint)
     # Janitorial measurement (read-only): journald size + pinned log dirs +
@@ -331,7 +345,7 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
     ;;
   *)
     echo "dispatch.sh: unknown command '${SSH_ORIGINAL_COMMAND:-}'" >&2
-    echo "Expected: push-app, push-caddyfile, push-service, apply, push-window, apply-window, status, health, logs-wol-relay [500|3000], logs-caddy, log-footprint," >&2
+    echo "Expected: push-app, push-caddyfile, push-service, apply, push-window, apply-window, status, health, logs-wol-relay [500|3000], logs-caddy [500|3000], log-footprint," >&2
     echo "          push-home-watch{,-service,-timer}, apply-home-watch, home-watch-status, logs-home-watch," >&2
     echo "          push-pock-sync-{app,service}, apply-pock-sync, pock-sync-status, logs-pock-sync, pock-dump," >&2
     echo "          pat-receive {daily,weekly}, pat-list, pat-dump-latest," >&2

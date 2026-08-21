@@ -74,10 +74,22 @@ import heapq
 from dataclasses import dataclass, field
 from typing import Optional, List
 
-# v8 constants — mirror app.js. PROBE_TIMEOUT is generous on purpose: it must
-# outlast a cold mobile-radio TCP+TLS handshake so the first attempt succeeds
-# rather than timing out into the fallback.
-PROBE_TIMEOUT = 8.0      # app.js PROBE_TIMEOUT_MS — relay /status budget
+# v8 constants — mirror app.js.
+#
+# ⚠️ v8.77 — app.js now has TWO relay budgets, and this sim models only the warm
+# one. PROBE_TIMEOUT below is app.js's PROBE_TIMEOUT_MS, which applies once the
+# connection to the relay has answered within the last RELAY_WARM_FOR_MS (60 s).
+# A COLD connection gets COLD_PROBE_TIMEOUT_MS (15 s) instead, because a cold
+# Android/4G handshake was measured at ~7-8 s on 2026-08-21 — the "~3 s" this
+# comment used to assert was never measured and was wrong by 2×.
+#
+# Not mirrored here on purpose: every scenario below opens on a synthetic clock
+# with latencies it chooses itself, so a second budget would add a constant that
+# no scenario exercises — dead spec. The cold budget is pinned where it can
+# actually be observed, against the real app.js: tests/cold-radio-e2e.py
+# § cold-connection-slow-handshake-still-verdicts. Read the two together; this
+# file is NOT the whole spec of the probe budget.
+PROBE_TIMEOUT = 8.0      # app.js PROBE_TIMEOUT_MS — relay /status budget (warm)
 HOME_TIMEOUT = 5.0       # app.js HOME_FALLBACK_TIMEOUT_MS — direct-home fallback
 CHECK_INTERVAL = 8.0     # app.js STATUS_POLL_INTERVAL_MS — self-healing poll
                          # (foreground-only). v8.5: 15 s → 8 s to halve the

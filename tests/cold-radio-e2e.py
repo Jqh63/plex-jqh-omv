@@ -262,6 +262,15 @@ def _served(body, at=None):
     return json.dumps(b)
 
 
+# v8.77 — how long a cold connection takes to complete, in the "slow-up" plan.
+# Sits deliberately BETWEEN the two budgets in app.js: above PROBE_TIMEOUT_MS
+# (8 s, warm) and below COLD_PROBE_TIMEOUT_MS (15 s, cold). That is what makes
+# the scenario a discriminator rather than a smoke test — it FAILS against the
+# pre-v8.77 single-budget code (verified: final card "Statut inconnu") and passes
+# only because the cold budget outlasts the handshake.
+COLD_SETUP_S = 9.5
+
+
 def _relay_fulfill(route, verdict, aborted=None):
     h = {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"}
     if verdict == "up":
@@ -318,6 +327,22 @@ def _relay_fulfill(route, verdict, aborted=None):
         # Relay ANSWERS with a degraded oracle (STATUS_TARGET_URL unset → 503).
         # Relay alive, /wol works — the PWA must keep it reachable + fall back.
         route.fulfill(status=503, headers=h, body='{"detail": "status target not configured"}')
+    elif verdict == "slow-up":
+        # v8.77 — a relay that answers correctly, just SLOWLY, because the
+        # connection to it is cold. Measured 2026-08-21 on Android/4G: three
+        # consecutive requests each paid ~7-8 s of DNS+TCP+TLS setup before the
+        # relay saw them, then the same connection served in 274 ms.
+        #
+        # Distinct from "stall" (relay never answers, PWA's timeout is the only
+        # thing that ends it): here the answer DOES arrive, and the only question
+        # is whether our budget outlasted the handshake. That question is the
+        # whole scenario, so it cannot be expressed by aborting or by stalling.
+        #
+        # The sleep blocks the Python dispatcher, not the browser: the PWA's
+        # AbortController runs in-page and fires on its own schedule regardless.
+        time.sleep(COLD_SETUP_S)
+        route.fulfill(status=200, headers=h,
+                      body=_served({"up": True, "stale": False, "age_s": 0}))
     elif verdict == "stall":
         # The relay is ANSWERING nothing yet — the real off-hours shape: the home
         # drops the probe's packets, so the relay sits on FIRST+RETRY (~7 s) before
@@ -1058,6 +1083,28 @@ def collect_results():
         ok15d = r15d["checking_at"] == [1, 3] and not r15d["green_at"]
         results.append(("cold-open-inside-window-cached-down-still-checks", ok15d, r15d,
                         "inside window + cached down → orange, no green flash"))
+
+        # v8.77 — the cold-connection budget. IRL 2026-08-21 09:21 CEST (Android,
+        # 4G, PWA cold-launched): two /status probes died at 8007 and 8002 ms and
+        # the card painted "Statut inconnu" over a schedule presumption that was
+        # correct. The relay's own log proves it never received either request,
+        # and that the same phone was served in 274 ms nineteen seconds later —
+        # we were aborting the handshake about a second before it completed.
+        #
+        # Every call is slow here, not just the first: that is what pins the fix
+        # to the BUDGET rather than to a lucky retry. Pre-v8.77 the card never
+        # leaves "Statut inconnu" (every probe dies at 8 s); with the cold budget
+        # the first probe lands at 9.5 s and the card commits a verdict. Later
+        # probes run warm (8 s) and abort, which is correct and invisible — a
+        # fresh verdict is KEPT, not demoted (the kept-verdict branch).
+        r17 = run_scenario(p, "cold-connection-slow-handshake-still-verdicts",
+                           relay_plan=lambda n: "slow-up", home_plan=lambda n: "fail",
+                           sample_delays_s=[25])
+        ok17 = (r17["final_green"] and not r17["final_unknown"]
+                and not r17["unknown_at"] and not r17["final_red"])
+        results.append(("cold-connection-slow-handshake-still-verdicts", ok17, r17,
+                        "relay answers at 9.5 s (cold handshake) → verdict, never "
+                        "\"Statut inconnu\""))
 
         # v8.31 — the presumption must be CORRECTABLE: same off-hours open, but the
         # home is actually up (auto-WoL by home-watch, or another family member woke

@@ -240,6 +240,7 @@ ssh wol-relay-deploy logs-wol-relay        # journalctl tail, last 100 lines (~5
 ssh wol-relay-deploy logs-wol-relay 500    # wider window
 ssh wol-relay-deploy logs-wol-relay 3000   # months of history (journald holds ~174 MB)
 ssh wol-relay-deploy logs-caddy     # journalctl -u caddy -n 100 --no-pager
+ssh wol-relay-deploy logs-caddy 3000   # ~35 h — the access log is dense
 ssh wol-relay-deploy log-footprint  # journald size + log dirs + df (read-only)
 ssh wol-relay-deploy tunnel-status  # reverse-SSH fallback: listener + sessions (read-only)
 ssh wol-relay-deploy tunnel-reap    # free a listener held by a stale session

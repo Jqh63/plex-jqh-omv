@@ -1391,6 +1391,41 @@ function checkStatus(){
           setTimeout(function(){checkStatus();},UNKNOWN_GRACE_RETRY_MS);
           return;
         }
+        // v8.78 — SILENCE IS NOT CONTRADICTION, but only in ONE direction.
+        //
+        // Of the five paths that reach res.unknown, three are the relay actually
+        // answering (a stale body, an HTTP error, and the no-network first-hand
+        // fact — all handled elsewhere or above). Only failKind timeout/net are
+        // SILENCE: relayReachable stays false and we learned nothing at all. The
+        // old comment below claimed the relay "has now contradicted whatever we
+        // presumed" — for those two it is simply untrue, and acting on it cost a
+        // correct card. IRL 2026-08-21 09:21 CEST: two probes died on a phone
+        // with no data path (Caddy's own log proves NOTHING arrived for 32 s),
+        // and "Statut inconnu" was painted over "Éteint (prévu)" — which was
+        // right, the home was off, outside its window.
+        //
+        // But holding a presumption on silence is only safe ONE WAY, and this
+        // asymmetry is the whole design:
+        //
+        //   presumed OFF  → HOLD. The schedule is deterministic (autoshutdown ->
+        //                   relay /status.window), the claim is actionable (the
+        //                   wake button), and being wrong is harmless — a magic
+        //                   packet to a live host is ignored by the NIC.
+        //   presumed ON   → DEMOTE. "En ligne" that no probe confirmed sends the
+        //                   family clicking a Plex link that will fail. Louder
+        //                   than the ugly-but-honest unknown card it replaces.
+        //
+        // Deliberately NOT a time bound. The first sketch of this fix held the
+        // presumption for N seconds, which would have been one more constant
+        // chosen without measurement — the exact mistake that produced the 8 s
+        // budget. The criterion is the DIRECTION of the claim, not its age.
+        //
+        // The user is not left signal-less either way: relayMissStreak still
+        // hardens the "Relais injoignable" cosmetic on the 3rd consecutive miss.
+        if(cardKind==='presumed'&&!isOnline&&res.relayReachable===false){
+          logPaint('kept-presumption','relay-silent-holds-off',relayEvidence(res));
+          return;
+        }
         setUnknown();
         // The relay has now contradicted whatever we presumed: stop replaying it.
         presumptionRefuted=true;

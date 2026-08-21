@@ -513,6 +513,12 @@ class V8App(BaseApp):
         # has_confirmed_state — an unknown is not a state, it is the absence of
         # one. Only the picture changes, and only when the alternative is
         # spinning on "Vérification…" indefinitely.
+        # NOTE (v8.78): this condition has never included a PRESUMED card, so the
+        # sim has always modelled "silence leaves a presumption alone". app.js was
+        # the one that demoted it, and v8.78 removes that for the silence paths —
+        # i.e. the shipped app moved TOWARD this model, not away from it. Nothing
+        # to mirror here; the asymmetry it added (hold an OFF presumption, demote
+        # an ON one) is pinned in cold-radio-e2e.py, against the real app.
         stale_verdict = self.card_kind == "verdict" and not self.has_confirmed_state
         if self.card_kind in ("none", "checking") or stale_verdict:
             self.paint("unknown")

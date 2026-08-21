@@ -1090,6 +1090,52 @@ def collect_results():
         results.append(("cold-open-inside-window-cached-down-still-checks", ok15d, r15d,
                         "inside window + cached down → orange, no green flash"))
 
+        # v8.78 — SILENCE HOLDS AN "OFF" PRESUMPTION. IRL 2026-08-21 09:21 CEST:
+        # two probes died with no data path (Caddy's log proves nothing arrived
+        # for 32 s) and "Statut inconnu" replaced a correct "Éteint (prévu)".
+        # `fail` = route.abort() = failKind 'net' = relayReachable false = the
+        # silence case. Sampled past the grace re-probe (~1.5 s), where the
+        # pre-v8.78 code has already demoted to unknown.
+        r18 = run_scenario(p, "relay-silent-holds-off-presumption",
+                           relay_plan=lambda n: "fail", home_plan=lambda n: "fail",
+                           sample_delays_s=[3, 8],
+                           url_extra="&window=" + _window_excluding_now(inside=False))
+        #
+        # `final_warn` is asserted, not incidental. Holding the presumption has
+        # ONE bad case: relay down AND the home actually up outside its window
+        # (auto-WoL, or someone woke it by hand) — the card would then say
+        # "Éteint (prévu)" while the home runs. What makes that acceptable is
+        # that the user is TOLD the relay is unreachable: relayMissStreak
+        # promotes the "Relais injoignable" cosmetic + the manual-wake link on
+        # the 3rd miss. Pinned here so it cannot quietly disappear and turn this
+        # fix into a regression.
+        ok18 = (r18["sleep_at"] == [3, 8] and not r18["unknown_at"]
+                and not r18["green_at"] and not r18["checking_at"]
+                and r18["final_warn"])
+        results.append(("relay-silent-holds-off-presumption", ok18, r18,
+                        "outside window + SILENT relay → the sleep card holds "
+                        "(never \"Statut inconnu\") AND the relay warn still fires"))
+
+        # POSITIVE CONTROL for r18, and the reason the fix is a two-sided change
+        # rather than "stop demoting". Same window, same presumption — but here
+        # the relay ANSWERS (503), so relayReachable is TRUE and this is a
+        # CONTRADICTION, not silence. It must still demote to unknown.
+        #
+        # Without this scenario, r18 would also pass against a predicate that
+        # simply never demotes anything — i.e. against the bug of holding a
+        # presumption the relay actively disagreed with. It fails if the
+        # `res.relayReachable===false` guard is dropped from the new branch
+        # (verified by removing it).
+        r18b = run_scenario(p, "relay-degraded-still-refutes-off-presumption",
+                            relay_plan=lambda n: "degraded", home_plan=lambda n: "fail",
+                            sample_delays_s=[3, 8],
+                            url_extra="&window=" + _window_excluding_now(inside=False))
+        ok18b = (r18b["final_unknown"] and not r18b["sleep_at"]
+                 and not r18b["green_at"])
+        results.append(("relay-degraded-still-refutes-off-presumption", ok18b, r18b,
+                        "outside window + relay ANSWERING 503 → still demotes to "
+                        "unknown (silence != contradiction)"))
+
         # v8.77 — the cold-connection budget. IRL 2026-08-21 09:21 CEST (Android,
         # 4G, PWA cold-launched): two /status probes died at 8007 and 8002 ms and
         # the card painted "Statut inconnu" over a schedule presumption that was

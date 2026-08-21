@@ -228,10 +228,20 @@ For each scenario:
   http.server.
 
 - **`route.abort()` rejects the fetch INSTANTLY**, while the real PWA timeout
-  is `PROBE_TIMEOUT_MS` (8 s, relay) / `HOME_FALLBACK_TIMEOUT_MS` (5 s, home).
+  is `PROBE_TIMEOUT_MS` (8 s, relay, warm) / `COLD_PROBE_TIMEOUT_MS` (15 s,
+  relay, cold — v8.77) / `HOME_FALLBACK_TIMEOUT_MS` (5 s, home).
   For failure paths this is fine — app.js's fallback runs identically whether
   the fetch was rejected or timed out. The *timing bounds* (orange ≤ 13 s) are
   the sim's job; the E2E checks the transitions.
+
+  **The one thing `abort()` cannot express** is a relay that answers *slowly*
+  rather than not at all — precisely the IRL failure of 2026-08-21 (two probes
+  killed at ~8 s by our own budget, the same connection then served in 274 ms).
+  That needs the response to actually arrive, late: the `slow-up` plan verdict
+  sleeps `COLD_SETUP_S` (9.5 s, deliberately between the warm and cold budgets)
+  and then fulfils. Scenario
+  `cold-connection-slow-handshake-still-verdicts` — verified failing against
+  pre-v8.77 app.js with the exact user-visible symptom (`Statut inconnu`).
 
 - **visibilitychange spoofing** has a stable cross-browser pattern: override
   `document.hidden` AND `document.visibilityState` via

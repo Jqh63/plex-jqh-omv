@@ -220,12 +220,49 @@ function sealAsPresumption(){
 // green instead of flashing the transient red v8.0–v8.6 accepted. See the ADR
 // (knowledge-base) superseding the 2026-05-27 relay-as-oracle addendum.
 var probeGen=0;
-// Relay /status fetch budget. Generous on purpose: it must outlast a cold
-// mobile-radio TCP+TLS handshake (~3 s observed on Android 4G) so the first
-// attempt succeeds rather than timing out into the fallback. The relay's own
-// /status is server-side SWR-cached, so the relay never makes us wait on the
-// relay→home leg — this budget covers only the PWA→relay last mile.
+// Relay /status fetch budget, once the connection to the relay is WARM. The
+// relay's own /status is server-side SWR-cached, so the relay never makes us
+// wait on the relay→home leg — this budget covers only the PWA→relay last mile,
+// which is ~300 ms on a live connection.
 var PROBE_TIMEOUT_MS=8000;
+// v8.77 — COLD budget, for the first probe of a connection that isn't warm yet.
+//
+// The "~3 s observed on Android 4G" that used to justify a single 8 s budget was
+// a comment, never a measurement — and it was wrong by more than a factor of two.
+// Measured 2026-08-21 09:21 CEST, both ends corrected for the relay's UTC clock:
+//
+//   09:20:55  probe #1 starts
+//   09:21:03  timeout 8007 ms   — relay's app log: NOTHING
+//   09:21:11  timeout 8002 ms   — relay's app log: NOTHING
+//   09:21:21  user taps wake
+//   09:21:28  POST /wol lands   — 7 s after the tap, first request to arrive AT ALL
+//   09:21:30  GET /status 274 ms
+//
+// Three requests in a row each paid ~7-8 s of setup, then the same connection
+// served in 274 ms. Nothing was wrong with the relay (it answered every request
+// it received) and nothing was wrong with the freshness logic: we were simply
+// aborting the handshake ~1 s before it completed, twice, and painting "Statut
+// inconnu" over a schedule presumption that was correct. Caddy logs the TLS as
+// `resumed: false`, so every cold connection pays a full handshake against an
+// e2-micro.
+//
+// Widened rather than removed: an unbounded first probe would hang the card on a
+// genuinely dead relay. 15 s is ~2× the worst setup measured, and it applies ONLY
+// while cold — the steady-state cadence is untouched.
+var COLD_PROBE_TIMEOUT_MS=15000;
+// When the relay last proved the path works. "Answered" deliberately includes an
+// HTTP error (err.answered): a 503 means the handshake completed, which is the
+// only thing this budget is about. Reset by nothing — it simply ages out, so a
+// resume after a long background (radio re-attached, TLS session gone) is cold
+// again without needing a visibilitychange hook to say so.
+var lastRelayAnswerAt=0;
+// Warm window. Deliberately shorter than the mobile-radio idle timers (~30-60 s
+// on LTE) that are what actually tear the connection down.
+var RELAY_WARM_FOR_MS=60000;
+function probeBudgetMs(){
+  return (Date.now()-lastRelayAnswerAt<RELAY_WARM_FOR_MS)
+    ?PROBE_TIMEOUT_MS:COLD_PROBE_TIMEOUT_MS;
+}
 // Direct-home fallback budget. Only used when the relay /status fetch fails
 // (transport failure or answered-but-degraded). One shot, no retry — by the
 // time we reach it the radio is warm, so 5 s is ample.
@@ -272,7 +309,11 @@ var cardKind='none';
 // Since v8.5 it exceeds STATUS_POLL_INTERVAL_MS (8 s), so a wedge is reclaimed
 // on the first self-healing tick whose age clears the watchdog (~2 ticks ≈ 16 s
 // worst case) rather than the next single tick — still guaranteed-eventually.
-var CHECK_WATCHDOG_MS=PROBE_TIMEOUT_MS+HOME_FALLBACK_TIMEOUT_MS+1000;
+// v8.77 — derived from the budget actually in flight, not the warm one: sizing
+// it on 8 s while a cold probe legitimately runs 15 s would let a later tick
+// preempt a probe that was about to succeed — re-creating the very timeout we
+// just widened away, one layer up.
+function checkWatchdogMs(){return probeBudgetMs()+HOME_FALLBACK_TIMEOUT_MS+1000;}
 var checkStartedAt=0;
 // Mini-cache for back-to-back reopens (closing then reopening the PWA
 // within a minute). Kept short on purpose — beyond a minute the user
@@ -1073,7 +1114,11 @@ function fetchStatusFromRelay(){
   // computed server-side at response build and is stale by ~RTT/2 + download
   // by the time it's applied here (~0.3-0.5 s measured on the e2-micro leg).
   var t0=Date.now();
-  return fetchOnce(config.relay+'/status',opts).then(function(r){
+  return fetchOnce(config.relay+'/status',opts,probeBudgetMs()).then(function(r){
+    // v8.77 — the handshake completed. That is what warms the budget (see
+    // probeBudgetMs); whether the BODY is usable is a separate question,
+    // answered below and by isLiveBody.
+    lastRelayAnswerAt=Date.now();
     if(!r.ok)return answered('HTTP '+r.status);
     return r.json().catch(function(){return answered('bad json');});
   }).then(function(j){
@@ -1113,12 +1158,12 @@ function fetchHomeDirectly(){
 // retry/hold/streak machinery.
 function checkStatus(){
   if(!config)return;
-  // v8.2 watchdog (see CHECK_WATCHDOG_MS): don't let a wedged in-flight check —
+  // v8.2 watchdog (see checkWatchdogMs): don't let a wedged in-flight check —
   // a probe suspended mid-fetch that never resolved, or a check whose resume
   // event never fired — block re-probing forever. If the prior check is older
   // than the watchdog budget, fall through and start a fresh one; the ++probeGen
   // below drops the stale probe if it ever resolves late.
-  if(checking&&Date.now()-checkStartedAt<CHECK_WATCHDOG_MS)return;
+  if(checking&&Date.now()-checkStartedAt<checkWatchdogMs())return;
   checking=true;checkStartedAt=Date.now();
   var gen=++probeGen;
   // v8.10 staleness guard — a confirmed state only earns the "keep the prior
@@ -1851,6 +1896,12 @@ function clearWolPoll(){
 // (v8.47). Strict 401/403/network handling so a misconfigured token
 // surfaces immediately instead of waiting for the 5-min timeout.
 function postWol(){
+  // v8.77 — deliberately does NOT warm lastRelayAnswerAt (see probeBudgetMs),
+  // and carries no AbortController of its own: a wake is a user-initiated
+  // one-shot that must survive exactly the cold handshake that motivated the
+  // cold budget (IRL 2026-08-21: this POST took 7 s to reach the relay and is
+  // the only reason the wake happened at all). Leaving the next /status COLD is
+  // the conservative side of the trade — worst case it waits 15 s instead of 8.
   fetch(config.relay+'/wol',{
     method:'POST',
     cache:'no-store',

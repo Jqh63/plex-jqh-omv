@@ -145,7 +145,10 @@ each owned by the relevant service user:
   wake, default 150 s), `WOL_CAMPAIGN_DELAYS_S` (comma-separated offsets in
   seconds of the server-side wake campaign bursts, default `15,30,60,90`),
   `USAGE_LOG_DEDUPE_S` (min interval between `open` log
-  lines per client, default 600 s), `UPTIME_WINDOW` (e.g. `13h50-00h10` or `13:50-00:10` —
+  lines per client, default 600 s),
+  `STATUS_AUTH_MAX_FAILS` (per-IP cap on **rejected** `/status` attempts per
+  60 s window, default 10 — past it the answer is 429 and the warning line is
+  dropped; authenticated polls are never counted, see below), `UPTIME_WINDOW` (e.g. `13h50-00h10` or `13:50-00:10` —
   echoed as a `window` field in `/status`; the PWA adopts it
   automatically, so every user gets the scheduled-uptime "En veille"
   display without a new URL. Validated at startup — a malformed value

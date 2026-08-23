@@ -8,8 +8,10 @@ Security model (defense in depth):
 - MAC allowlist (a leaked token can only wake the listed MAC)
 - TARGET_HOST resolved server-side (clients cannot redirect packets
   to arbitrary hosts)
-- Sliding-window rate limit per source IP (limits scan / brute force
-  velocity on the /wol endpoint, applied before any other check)
+- Sliding-window rate limit per source IP: every /wol call (applied before
+  any other check), and on /status the REJECTED attempts only — an
+  authenticated poll every ~8 s must never be throttled, several family
+  devices sharing one NAT egress IP
 - Audit log of every /wol attempt (status + client IP, never token or
   MAC) — visible via `journalctl -u wol-relay`
 - CORS restricted to the GitHub Pages origin
@@ -335,6 +337,23 @@ MAX_TRACKED_IPS = 4096
 _rate_lock = threading.Lock()
 _rate_state: dict[str, deque] = defaultdict(deque)
 
+# Same treatment for /status, but on REJECTED attempts only (2026-08-23 audit).
+# /status carries the same shared token as /wol and had no cap at all, so the
+# asymmetry cut two ways: the token could be tried without limit, and every
+# rejection wrote a warning line — an anonymous scanner could inflate the
+# wol-relay journal, eroding the retention of the very journal used to diagnose
+# this service (the 80:1 heartbeat noise measured 2026-08-16 is the same class
+# of problem, one step upstream).
+#
+# ⚠️ The obvious fix — reuse the /wol limiter as-is — would break the family:
+# a legitimate poll runs every ~8 s (~7.5/min PER DEVICE) and several devices
+# share one NAT egress IP, so a 10/60 s cap on ALL /status calls would throttle
+# real users. Authenticated polls are therefore never counted; only 401s are.
+# Once over budget the response is 429 AND the log line is dropped — logging
+# the flood we are capping would defeat half the purpose.
+STATUS_AUTH_MAX_FAILS = int(os.environ.get("STATUS_AUTH_MAX_FAILS", "10"))
+_status_auth_state: dict[str, deque] = defaultdict(deque)
+
 # Wake-state shared between POST /wol (writer) and GET /status (reader).
 # uvicorn runs a single worker (see wol-relay.service) so a module global is
 # coherent without locking — a stale read at worst flips `waking` one poll late.
@@ -451,26 +470,43 @@ def note_usage(cid: str, ua: str | None, ip: str) -> None:
     logger.info("open ip=%s device=%s cid=%s", ip, device_class(ua), cid)
 
 
-def rate_limited(ip: str) -> bool:
+def _sliding_window_limited(state: dict, ip: str, max_req: int) -> bool:
+    """Shared sliding-window limiter. True => this call is OVER budget.
+
+    One implementation, two budgets (see the two callers below): duplicating it
+    per endpoint is how the two would drift apart, and the memory-bounding is
+    the subtle half.
+    """
     now = time.monotonic()
     cutoff = now - RATE_LIMIT_WINDOW_S
     with _rate_lock:
-        dq = _rate_state[ip]
+        dq = state[ip]
         while dq and dq[0] < cutoff:
             dq.popleft()
         if not dq:
             # Drop empty entries to bound dict growth on scan traffic.
-            _rate_state.pop(ip, None)
-            dq = _rate_state[ip]
-        if len(dq) >= RATE_LIMIT_MAX_REQ:
+            state.pop(ip, None)
+            dq = state[ip]
+        if len(dq) >= max_req:
             return True
         dq.append(now)
-        if len(_rate_state) > MAX_TRACKED_IPS:
+        if len(state) > MAX_TRACKED_IPS:
             # Bound memory: drop entries whose window has fully drained.
-            stale = [k for k, d in _rate_state.items() if not d or d[-1] < cutoff]
+            stale = [k for k, d in state.items() if not d or d[-1] < cutoff]
             for k in stale:
-                _rate_state.pop(k, None)
+                state.pop(k, None)
     return False
+
+
+def rate_limited(ip: str) -> bool:
+    # /wol: counts EVERY request, before the token comparison is reached.
+    return _sliding_window_limited(_rate_state, ip, RATE_LIMIT_MAX_REQ)
+
+
+def status_auth_limited(ip: str) -> bool:
+    # /status: counts REJECTED attempts only — an authenticated family device
+    # polling every 8 s must never be throttled.
+    return _sliding_window_limited(_status_auth_state, ip, STATUS_AUTH_MAX_FAILS)
 
 
 @app.get("/health")
@@ -944,7 +980,14 @@ async def status(request: Request, x_token: str | None = Header(None)):
     # without a token fall back to their direct-home probe (the 401 is an
     # "answered" rejection on the PWA side — relay alive, oracle denied).
     if x_token is None or not hmac.compare_digest(x_token, SHARED_TOKEN):
-        logger.warning("status ip=%s status=401 reason=bad_token", client_ip(request))
+        ip = client_ip(request)
+        # Over budget => 429 and NO log line (2026-08-23 audit). The PWA treats
+        # any non-ok status the same way (`answered('HTTP '+r.status)` →
+        # direct-home fallback), so a family device left on a stale token
+        # degrades exactly as it did on 401 — verified in app.js before shipping.
+        if status_auth_limited(ip):
+            raise HTTPException(status_code=429, detail="too many rejected attempts")
+        logger.warning("status ip=%s status=401 reason=bad_token", ip)
         raise HTTPException(status_code=401, detail="bad token")
     if not STATUS_TARGET_URL:
         # Config-missing → degraded mode, surface as 503 so the PWA falls

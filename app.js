@@ -599,6 +599,20 @@ function readUrlParams(){
   if(mac){cleaned=cleanMac(mac);if(!validMac(cleaned))return false;}
   var portNum=parseInt(p.get('port')||'9',10);
   if(isNaN(portNum)||portNum<1||portNum>65535)portNum=9;
+  // v8.79 — a re-provisioning URL must not throw away what the RELAY taught this
+  // profile. Chrome desktop opens the app from the bookmark that still carries
+  // ?mac/?relay/?token, so this function rebuilt `config` from scratch on EVERY
+  // open and dropped the relay-owned `window`/`winSrc`/`eta` (learned + persisted
+  // in the /status branch of checkStatus). Proven on the paint journal, 11 cold
+  // opens out of 12: `checking ← no-usable-prior [no-prior]` — with no window,
+  // inUptimeWindow() returns null, the in-window presumption can never fire, and
+  // the desktop stared at the orange "Vérification..." where the phone (whose
+  // start_url is the stripped path) showed the presumed green with "non vérifié".
+  // Carried only when the URL re-provisions the SAME host, so pointing the app at
+  // another server still starts clean; saveConfig() applies the same rule on the
+  // settings path.
+  var prev=loadConfig()||{};
+  var sameHost=prev.host===host;
   config={host:host,port:String(portNum)};
   if(cleaned)config.mac=cleaned;
   var relay=p.get('relay');if(relay){var cr=cleanRelay(relay);if(validRelay(cr))config.relay=cr;}
@@ -607,7 +621,14 @@ function readUrlParams(){
   var apps=p.get('apps');if(apps)config.apps=apps;
   var status=p.get('status');if(status&&validHost(status))config.status=status;
   var ip=p.get('ip');if(ip&&validIp(ip))config.ip=ip;
-  var win=p.get('window');if(win&&parseWindow(win))config.window=win;
+  var win=p.get('window');
+  if(win&&parseWindow(win))config.window=win;
+  else if(sameHost&&config.relay&&prev.winSrc==='relay'&&prev.window&&parseWindow(prev.window)){
+    config.window=prev.window;config.winSrc='relay';
+  }
+  // The relay-served boot ETA is what syncs the wake countdown across devices;
+  // rebuilt-from-URL it fell back to the hardcoded default on every desktop open.
+  if(sameHost&&typeof prev.eta==='number')config.eta=prev.eta;
   // v8.50 — admin-only rescue-page link, provisioned via ?rescue= (no settings
   // field): the URL segment is a secret, typing it in a form would spread it.
   var rescue=p.get('rescue');if(rescue){var cr=cleanRelay(rescue);if(validRelay(cr))config.rescue=cr;}

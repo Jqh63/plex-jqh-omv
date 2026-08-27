@@ -562,6 +562,81 @@ def run_wake_journal_labels(p):
     return ok
 
 
+def run_reprovisioning_keeps_relay_window(p):
+    """A re-provisioning URL must keep the window the RELAY taught this profile.
+
+    IRL 2026-08-27: the desktop bookmark still carries ?mac/?relay/?token, so
+    every open re-entered readUrlParams() and rebuilt `config` from scratch,
+    dropping `window`/`winSrc`. With no window `inUptimeWindow()` returns null,
+    the in-window presumption cannot fire, and Chrome showed the orange
+    "Verification..." on 11 of the 12 cold opens in Yann's journal while the
+    phone (start_url = the stripped path) presumed green. Same class as the rule
+    saveConfig() already applies on the settings path.
+
+    The URL carries NO &window= on purpose — the whole point is the value the
+    relay served on the first visit. Control: `no-usable-prior` must be ABSENT
+    from the SECOND open, otherwise "the journal has a presumption somewhere"
+    would pass on the buggy build, whose first open legitimately logs one.
+    """
+    print("\n## a re-provisioning URL keeps the relay-owned window")
+    win = _window(True)
+    b = getattr(p, ENGINE).launch()
+    ctx = b.new_context(viewport={"width": 390, "height": 844})
+    seen = {"relay": 0}
+
+    def handle(route):
+        parsed = urlparse(route.request.url)
+        if parsed.netloc == RELAY_HOST and parsed.path == "/status":
+            seen["relay"] += 1
+            body = ('{"up": true, "stale": false, "age_s": 1, "source": "heartbeat",'
+                    ' "window": "%s", "served_at": %d}' % (win, int(time.time())))
+            route.fulfill(status=200, body=body, headers={
+                "Content-Type": "application/json",
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Headers": "*",
+            })
+            return
+        if parsed.netloc == CONFIG_HOST or parsed.netloc.endswith("." + CONFIG_HOST):
+            route.fulfill(status=200, body="")
+            return
+        route.continue_()
+
+    page = ctx.new_page()
+    page.route("**/*", handle)
+    # The provisioning URL as the bookmark holds it: every param EXCEPT window.
+    url = (f"{PWA_BASE}?host={CONFIG_HOST}&mac=AABBCCDDEEFF"
+           f"&relay=https://{RELAY_HOST}&token=x&apps=seerr,plexweb&poll=2")
+    page.goto(url, wait_until="load")
+    page.wait_for_timeout(3000)
+    learned = page.evaluate(
+        "()=>{try{return JSON.parse(localStorage.getItem('plex-jqh-omv-cfg')||'{}');}"
+        "catch(e){return {};}}")
+    ok = check("the relay taught the window on the first open",
+               learned.get("window") == win and learned.get("winSrc") == "relay",
+               json.dumps(learned.get("window")) + " src=" + str(learned.get("winSrc")))
+    # Second cold open, same bookmark — DAYS later, as the desktop is used.
+    # The 60 s status cache is dropped with the ring: left in place it fires the
+    # `cache-prepaint-open` branch, which paints green off the cache on the
+    # buggy build too and hides the defect entirely (measured while writing
+    # this pin — the first version passed against the bug for that reason).
+    # The ring is cleared so the assertions can only see what THIS open decided.
+    page.evaluate(
+        "([pk,sk])=>{localStorage.removeItem(pk);localStorage.removeItem(sk);}",
+        [PAINT_LOG_KEY, "plex-jqh-omv-status"])
+    page.goto(url, wait_until="load")
+    page.wait_for_timeout(3000)
+    ring = page.evaluate(f"JSON.parse(localStorage.getItem('{PAINT_LOG_KEY}')||'[]')")
+    reasons = [e["w"] for e in ring]
+    ok &= check("the second open PRESUMES in-window", "presume-in-window" in reasons,
+                json.dumps(reasons))
+    ok &= check("no orange wait on the second open (control)",
+                "no-usable-prior" not in reasons, json.dumps(reasons))
+    ok &= check("the relay was actually consulted (mock alive)", seen["relay"] >= 2,
+                f"{seen['relay']} call(s)")
+    b.close()
+    return ok
+
+
 def main():
     print(f"Paint journal E2E — engine={ENGINE} base={PWA_BASE}")
     with sync_playwright() as p:
@@ -614,6 +689,7 @@ def main():
         ok &= run_relay_silent_stabilises(p)
         ok &= run_slow_relay_stabilises(p)
         ok &= run_wake_journal_labels(p)
+        ok &= run_reprovisioning_keeps_relay_window(p)
     print("\n" + ("ALL PASS" if ok else "FAILURES ABOVE"))
     return 0 if ok else 1
 

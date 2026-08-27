@@ -34,6 +34,14 @@ https://<your-github>.github.io/plex-jqh-omv/?mac=AABBCCDDEEFF&host=myserver.exa
 
 Parameters are read on first visit and stored in localStorage. The app works immediately.
 
+They are re-read on **every** visit that carries them — a bookmark keeps them in the URL on
+desktop, where the address bar survives. Re-provisioning replaces the stored config, except
+for what the relay itself taught this profile (`window`, boot ETA): those are carried over
+when the URL re-provisions the same `host` and does not override them. Without that carry-
+over the desktop lost the uptime window on every open, so it could not presume a status
+while probing and showed the orange "Vérification…" where an installed PWA — whose
+`start_url` has the parameters stripped — showed the presumed state (fixed 2026-08-27).
+
 #### All URL parameters
 
 | Parameter | Required | Default | Description |

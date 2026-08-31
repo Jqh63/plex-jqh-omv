@@ -45,6 +45,16 @@
 #   ssh wol-relay-deploy pat-list                # list stored blobs (read-only)
 #   ssh wol-relay-deploy pat-dump-latest         # newest blob → stdout (restore path, read-only)
 #
+# secrets-offsite (encrypted escrow of the home server's UNVERSIONED secret
+# files — knowledge-base BACKLOG "Gestion des mots de passe et des secrets",
+# volet 3. Deliberately NOT folded into pat-offsite: separate age recipient,
+# separate rotation, and a name that says what it holds — `pat-` was read as
+# "Personal Access Token" once, and discoverability IS an escrow's job):
+#   ssh wol-relay-deploy secrets-receive daily   # stdin (age blob) → ~deploy/secrets-offsite, keep 7
+#   ssh wol-relay-deploy secrets-receive weekly  # idem, keep 4
+#   ssh wol-relay-deploy secrets-list            # list stored blobs (read-only)
+#   ssh wol-relay-deploy secrets-dump-latest     # newest blob → stdout (restore path, read-only)
+#
 # reverse-SSH out-of-band fallback (knowledge-base ADR 2026-06-05 — the
 # endpoint the admin uses when the home server's WireGuard container is down):
 #   ssh wol-relay-deploy tunnel-status           # listener + omvtunnel sessions (read-only)
@@ -292,6 +302,49 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
     [ -n "$f" ] || { echo "ERR no backup stored" >&2; exit 66; }
     cat "$f"
     ;;
+  "secrets-receive daily"|"secrets-receive weekly")
+    # Off-site escrow of the home server's secret FILES (per-stack .env,
+    # /etc/msmtprc, host tokens). Same shape as pat-receive above — two
+    # literal case patterns, so the static-enum property holds — but a
+    # DISTINCT directory, rotation and age recipient: losing one key must
+    # not lose both escrows, and the sender rotates them independently.
+    #
+    # This VM stores ciphertext it cannot read (public-key age, private key
+    # never leaves home). It also cannot check WHAT is inside — so the
+    # "expected files are present" control lives at the sending end, which
+    # is the only place cleartext exists. All this end can do is refuse a
+    # payload too small to be a real archive, which is the failure mode a
+    # broken pipe actually produces.
+    class="${SSH_ORIGINAL_COMMAND#secrets-receive }"
+    dir="$HOME/secrets-offsite"
+    mkdir -p "$dir" && chmod 700 "$dir"
+    f="$dir/secrets-$class-$(date -u +%Y%m%dT%H%M%SZ).age"
+    cat > "$f.tmp"
+    sz=$(wc -c < "$f.tmp")
+    # A bare age header is ~200 bytes; the real payload is a gzipped tar of
+    # ~20 small files, i.e. kilobytes. 500 keeps the floor above the header
+    # without pinning a size that legitimate shrinkage could cross.
+    if [ "$sz" -le 500 ]; then
+      rm -f "$f.tmp"
+      echo "ERR payload too small ($sz bytes) — refusing to store" >&2
+      exit 65
+    fi
+    mv "$f.tmp" "$f"
+    chmod 600 "$f"
+    keep=7; [ "$class" = "weekly" ] && keep=4
+    ls -1t "$dir"/secrets-"$class"-*.age 2>/dev/null | tail -n +$((keep + 1)) | xargs -r rm -f
+    echo "OK $sz bytes -> $(basename "$f")"
+    ;;
+  secrets-list)
+    ls -lh "$HOME/secrets-offsite" 2>/dev/null || echo "(no escrow stored yet)"
+    ;;
+  secrets-dump-latest)
+    # Restore path: newest blob (any class) to stdout. Decryption happens at
+    # home with the secrets age private key — the VM never sees cleartext.
+    f=$(ls -1t "$HOME/secrets-offsite"/secrets-*.age 2>/dev/null | head -1 || true)
+    [ -n "$f" ] || { echo "ERR no escrow stored" >&2; exit 66; }
+    cat "$f"
+    ;;
   tunnel-status)
     # Reverse-SSH out-of-band fallback endpoint (knowledge-base ADR
     # 2026-06-05): is the home server's tunnel actually terminated here?
@@ -349,6 +402,7 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
     echo "          push-home-watch{,-service,-timer}, apply-home-watch, home-watch-status, logs-home-watch," >&2
     echo "          push-pock-sync-{app,service}, apply-pock-sync, pock-sync-status, logs-pock-sync, pock-dump," >&2
     echo "          pat-receive {daily,weekly}, pat-list, pat-dump-latest," >&2
+    echo "          secrets-receive {daily,weekly}, secrets-list, secrets-dump-latest," >&2
     echo "          tunnel-status, tunnel-reap." >&2
     exit 64
     ;;

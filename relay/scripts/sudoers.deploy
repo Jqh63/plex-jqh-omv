@@ -43,7 +43,7 @@ Cmnd_Alias WOL_RELAY_LOGS = \
   /usr/bin/journalctl -u caddy -n 3000 --no-pager
 
 # log-footprint — janitorial measurement (knowledge-base ADR
-# 2026-07-07-housekeeping-janitorial §6): journal size + pinned log dirs,
+# 2026-07-07-housekeeping-janitorial-autonome §6): journal size + pinned log dirs,
 # read-only exact arg vectors, no wildcards.
 Cmnd_Alias WOL_RELAY_LOG_FOOTPRINT = \
   /usr/bin/journalctl --disk-usage, \

@@ -200,7 +200,7 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
   log-footprint)
     # Janitorial measurement (read-only): journald size + pinned log dirs +
     # disk headroom. Decides whether the e2-micro needs a journald cap
-    # (knowledge-base ADR 2026-07-07-housekeeping-janitorial §6).
+    # (knowledge-base ADR 2026-07-07-housekeeping-janitorial-autonome §6).
     echo "=== JOURNALD ==="
     sudo /usr/bin/journalctl --disk-usage
     echo "=== LOG DIRS (du -shx) ==="

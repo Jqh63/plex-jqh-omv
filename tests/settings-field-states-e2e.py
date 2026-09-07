@@ -142,6 +142,19 @@ def run(engine, port):
             "syncRelayDependentFields();return b.disabled;}")
         check(still is True, "D1 a test in flight survives a re-render / keystroke")
 
+        # --- E. iOS auto-zoom trigger (reported by Yann, 2026-09-07)
+        # Safari magnifies the page on focus for ANY text control under 16px and
+        # never zooms back out. The sandbox cannot reproduce that magnification --
+        # no engine here emulates it -- so the pin is on its CAUSE, which is the
+        # part we control and the part that regresses. A real iPhone stays the
+        # only witness that the zoom is gone.
+        sizes = pg.eval_on_selector_all(
+            ".field input",
+            "els=>els.map(e=>[e.id,parseFloat(getComputedStyle(e).fontSize)])")
+        check(len(sizes) >= 8, f"E0 the audit actually saw the fields ({len(sizes)} found)")
+        small = [i for i, px in sizes if px < 16]
+        check(not small, f"E1 no text field under 16px (iOS would zoom on focus): {small}")
+
         b.close()
 
 

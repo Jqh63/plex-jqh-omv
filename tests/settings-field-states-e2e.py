@@ -155,6 +155,35 @@ def run(engine, port):
         small = [i for i, px in sizes if px < 16]
         check(not small, f"E1 no text field under 16px (iOS would zoom on focus): {small}")
 
+        # --- F. the 16px bump must not cost Android or desktop anything
+        # Raising the inputs to 16px (iOS auto-zoom) makes every field wider, and
+        # `text-overflow-e2e.py` audits tile labels and toasts -- never this
+        # screen. So its green proved nothing here. Sweep the family's real range:
+        # 256/280/300 px is what Android's *display size* slider produces on a
+        # 360 px phone, 412 px a large one, 1280 px desktop Chrome.
+        PROBE = """()=>{
+          const over=[...document.querySelectorAll('.field input,.field label,.hint,button')]
+            .filter(e=>e.getBoundingClientRect().right>window.innerWidth+0.5)
+            .map(e=>e.id||e.tagName);
+          return {page:document.documentElement.scrollWidth, vw:window.innerWidth, over:over};}"""
+        for w in (256, 280, 300, 320, 360, 412, 1280):
+            pg.set_viewport_size({"width": w, "height": 800})
+            pg.evaluate(
+                "()=>{config={host:'monserveur.exemple.com',port:'9',"
+                "relay:'https://wol.exemple.com',winSrc:'relay',window:'13h50-00h10',"
+                "mac:'AABBCCDDEEFF',apps:'seerr,plexweb'};showSettings();}")
+            r = pg.evaluate(PROBE)
+            check(r["page"] <= r["vw"] + 0.5 and not r["over"],
+                  f"F{w} settings fit at {w}px (page={r['page']} vw={r['vw']} over={r['over']})")
+
+        # Positive control: without it, "nothing overflows" would also pass on a
+        # selector that matches nothing. Measured armed 2026-09-07.
+        pg.set_viewport_size({"width": 256, "height": 800})
+        pg.evaluate("()=>{const e=document.getElementById('cfgHost');"
+                    "e.style.fontSize='48px';e.style.width='600px';}")
+        check(pg.evaluate(PROBE)["over"] == ["cfgHost"],
+              "F! the overflow probe is armed (a forced-wide field IS caught)")
+
         b.close()
 
 

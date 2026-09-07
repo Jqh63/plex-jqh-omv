@@ -687,7 +687,10 @@ function showSettings(){
     // Relay-owned window: field is display-only (a manual edit would be
     // silently overwritten by the next /status poll — the relay wins).
     var winRelay=!!(config.relay&&config.winSrc==='relay');
-    document.getElementById('cfgWindow').disabled=winRelay;
+    // readonly, not disabled: the field's whole job is to SHOW a value the relay
+    // owns, so it must stay selectable/copyable and readable by screen readers.
+    // `disabled` would also drop it from the accessibility tree.
+    document.getElementById('cfgWindow').readOnly=winRelay;
     document.getElementById('cfgWindowHint').textContent=winRelay
       ?'Synchronisée automatiquement depuis le relais (plage d\'extinction du serveur) — non modifiable ici'
       // v8.67 — wording realigned on what the tile ACTUALLY paints. v8.53 merged
@@ -698,6 +701,7 @@ function showSettings(){
       // they are looking at the right screen.
       :'Si le serveur s\'éteint volontairement la nuit : hors plage, l\'arrêt s\'affiche « Éteint » en bleu avec l\'heure de réveil auto';
   }
+  syncRelayDependentFields();
   if(checkInterval)clearInterval(checkInterval);
   // (focus is done by switchScreen's callback above, once the field is on screen)
 }
@@ -756,6 +760,22 @@ function saveConfig(){
 // "Tester le relais" button: surfaces reachability + DNS/UDP readiness inline,
 // without sending a /wol POST (would wake the server) and without touching
 // the configured token (testing it would require POST /wol — same problem).
+// Relay-dependent fields carry their own state: a token and a connectivity test
+// are meaningless with no relay URL, and the token is the most sensitive secret
+// on this screen — offering it as an ordinary setting invites the exact doubt
+// this UI exists to remove. Called on render and on every keystroke in cfgRelay.
+function syncRelayDependentFields(){
+  var hasRelay=!!document.getElementById('cfgRelay').value.trim();
+  var tok=document.getElementById('cfgToken');
+  var btn=document.getElementById('testRelayBtn');
+  tok.disabled=!hasRelay;
+  // Never fight an in-flight test, which disables the button itself.
+  if(!btn.dataset.testing)btn.disabled=!hasRelay;
+  document.getElementById('cfgTokenHint').textContent=hasRelay
+    ?'Secret partagé envoyé au relais (header X-Token)'
+    :'Renseigner d\'abord un relais ci-dessus pour utiliser un token';
+}
+
 function testRelay(btn){
   var status=document.getElementById('relayTestStatus');
   var relay=document.getElementById('cfgRelay').value.trim();
@@ -763,8 +783,8 @@ function testRelay(btn){
   var cleaned=cleanRelay(relay);
   if(!validRelay(cleaned)){status.className='test-status fail';status.textContent='✕ URL invalide (https://…)';return;}
   status.className='test-status';status.textContent='Test en cours…';
-  btn.disabled=true;
-  var done=function(cls,txt){btn.disabled=false;status.className='test-status '+cls;status.textContent=txt;};
+  btn.dataset.testing='1';btn.disabled=true;
+  var done=function(cls,txt){delete btn.dataset.testing;syncRelayDependentFields();status.className='test-status '+cls;status.textContent=txt;};
   var ctrl=new AbortController(),timer=setTimeout(function(){ctrl.abort()},5000);
   fetch(cleaned+'/health/deep',{cache:'no-store',signal:ctrl.signal})
     .then(function(r){
@@ -2357,6 +2377,7 @@ setInterval(function(){
 // so the CSP can drop 'unsafe-inline' from script-src — see <meta http-equiv
 // "Content-Security-Policy"> in index.html).
 document.getElementById('testRelayBtn').addEventListener('click',function(){testRelay(this);});
+document.getElementById('cfgRelay').addEventListener('input',syncRelayDependentFields);
 document.getElementById('cancelBtn').addEventListener('click',cancelSettings);
 document.getElementById('backBtn').addEventListener('click',cancelSettings);
 document.getElementById('saveBtn').addEventListener('click',saveConfig);

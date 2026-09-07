@@ -250,6 +250,14 @@
   .field input:focus{border-color:var(--accent)}
   .field input::placeholder{color:var(--text-dim);opacity:.5}
   .field .hint{font-size:11px;color:var(--text-dim);opacity:.6}
+  /* Field states. Derived from the vocabulary already in this sheet, never a new
+     value: .4 + not-allowed = inert control (.test-btn:disabled); .6 + dashed =
+     present but not actionable (.status-card.nonet/.unknown). Without these, a
+     locked field painted exactly like an editable one — measured identical on
+     both Chromium and WebKit, so it was never a per-engine default.
+     Order matters: a disabled input also matches :read-only, so :disabled last. */
+  .field input:read-only{opacity:.6;background:transparent;border-style:dashed;cursor:default}
+  .field input:disabled{opacity:.4;border-style:dashed;cursor:not-allowed}
   .save-btn{width:100%;padding:14px;background:var(--accent);border:none;border-radius:12px;color:white;font-family:'DM Sans',sans-serif;font-size:15px;font-weight:600;cursor:pointer;transition:opacity .2s;margin-top:8px}
   .save-btn:active{opacity:.8}
   .button-row{display:flex;gap:8px;width:100%;margin-top:8px}
@@ -310,7 +318,7 @@
     <div class="field">
       <label for="cfgToken">Token relais <span style="font-size:11px;font-weight:400;opacity:.6">(optionnel)</span></label>
       <input type="password" id="cfgToken" placeholder="" autocomplete="off">
-      <span class="hint">Secret partagé envoyé au relais (header X-Token)</span>
+      <span class="hint" id="cfgTokenHint">Secret partagé envoyé au relais (header X-Token)</span>
     </div>
     <div class="field">
       <button class="test-btn" id="testRelayBtn" type="button">Tester le relais</button>

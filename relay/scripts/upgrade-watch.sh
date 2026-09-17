@@ -40,7 +40,17 @@ if [ -d "$APT_CONF_DIR" ]; then
   conf="$(cat "$APT_CONF_DIR"/* 2>/dev/null)"
   if printf '%s' "$conf" | grep -qE 'APT::Periodic::Unattended-Upgrade[^0-9]*1'; then
     armed="yes"
-    origins="$(printf '%s\n' "$conf" | grep -oE '"(origin=|o=)[^"]*"' | tr -d '"' | tr '\n' ' ')"
+    # ⚠️ Skip COMMENTED lines before collecting origins. Debian ships
+    # /etc/apt/apt.conf.d/50unattended-upgrades with a dozen example origins
+    # commented out (`//`); grepping the raw file reported `stable`,
+    # `proposed-updates` and `backports` as ACTIVE on the live VM — the line
+    # overstated the automation's scope, which is the one thing a reader uses
+    # it for. Found on the route's very first real run (2026-09-17); the bench
+    # had seven green cases and could not have caught it, because the fixture
+    # was written from my model of the file rather than from the file.
+    origins="$(printf '%s\n' "$conf" \
+               | sed -e 's://.*::' -e 's:#.*::' \
+               | grep -oE '"(origin=|o=)[^"]*"' | tr -d '"' | tr '\n' ' ')"
     auto_detail="enabled${origins:+ — origins: $origins}"
   fi
 fi

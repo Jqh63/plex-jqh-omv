@@ -80,4 +80,25 @@ ok 3 "$RC" "exit 3"
 has "COULD NOT CLASSIFY" "$OUT" "does not silently call everything manual"
 no "NEEDS A MANUAL GESTURE" "$OUT" "no fabricated split"
 
+echo "case H — REGRESSION: commented example origins must NOT be reported as active"
+# Shape taken from the REAL /etc/apt/apt.conf.d/50unattended-upgrades Debian
+# ships: a dozen example origins, commented out with `//`. Reading them as
+# active made the live VM report `stable` and `backports` as covered — the
+# route overstating the very thing a reader consults it for. This case FAILS
+# against the code before the fix.
+mkdir -p "$TMP/commented"
+printf 'APT::Periodic::Unattended-Upgrade "1";\n' > "$TMP/commented/20auto-upgrades"
+cat > "$TMP/commented/50unattended-upgrades" <<'CONF'
+Unattended-Upgrade::Origins-Pattern {
+//      "o=Debian,a=stable";
+//      "o=Debian,a=proposed-updates";
+//      "origin=Debian,codename=${distro_codename}-backports";
+        "origin=Debian,codename=${distro_codename}-security,label=Debian-Security";
+};
+CONF
+run "$TMP/commented" "$TMP/lists" "sim_none"
+has "codename=\${distro_codename}-security" "$OUT" "the ACTIVE origin is reported"
+no "a=stable" "$OUT" "a commented example is NOT reported as active"
+no "backports" "$OUT" "nor is a commented backports line"
+
 [ "$fail" -eq 0 ] && { echo "ALL CASES OK"; exit 0; } || { echo "FAILURES"; exit 1; }

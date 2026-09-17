@@ -470,6 +470,37 @@ both installed by the bootstrap:
   construction: `omvtunnel` is a nologin user that can hold nothing but this
   tunnel, and the home server reconnects on its own restart timer.
 
+### OS updates — `upgrade-watch`
+
+Until 2026-09-17 this VM installed **no** security update on its own, and
+nothing short of an IAP SSH session could tell you what was pending. On the
+most exposed machine of the ecosystem (public IP, Caddy, FastAPI) that was the
+widest blind spot left. Two pieces close it:
+
+- **`unattended-upgrades`, security origins only** (bootstrap section 10).
+  Deliberately not a full auto-upgrade: that could restart Caddy or pull a
+  Python minor under the relay at 06:00 with nobody watching. Non-security
+  updates stay a manual gesture. `Automatic-Reboot` is off. Mail is off too —
+  this VM already mails through `home-watch`'s msmtp, and a second unformatted
+  emitter is the noise the knowledge-base mail doctrine forbids.
+- **`ssh wol-relay-deploy upgrade-watch`** — the read side. Reports whether the
+  automation is armed at all, how stale the package lists are, what is pending,
+  and **who will install each pending package**. That split is the point: "12
+  pending" is noise, "12 pending, none of which anyone will install" is a fact.
+
+Three verdicts, never two: `0` compliant · `2` a manual gesture is pending ·
+`3` **could not measure** (or could not classify — if not one pending line
+carries a parsable origin, the split would be an artefact of the parser, and a
+unanimous verdict is exactly what a broken predicate looks like). An unmeasured
+VM is never reported as a green one.
+
+**Unprivileged by construction**: `apt-get -s dist-upgrade` simulates as a
+plain user, so the route adds no sudoers entry and no privileged surface.
+
+Bench: `bash relay/tests/test_upgrade_watch.sh` — healthy states first (armed
+and idle, pending but fully covered), because this detector will spend its life
+on a VM where nothing is pending, and that is where a wrong verdict slips in.
+
 ## Initial VM provisioning (recovery from zero)
 
 This section covers building a fresh VM from scratch. Skip it if you

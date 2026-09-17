@@ -20,6 +20,7 @@
 #   ssh wol-relay-deploy logs-caddy [500|3000]      # journalctl tail, read-only
 #                                          #   (defaut 100 lignes ~= 70 min)
 #   ssh wol-relay-deploy log-footprint     # journald size + log dirs + df (read-only)
+#   ssh wol-relay-deploy upgrade-watch     # pending OS updates + who installs them (read-only)
 #
 # home-watch (external homelab monitor, content pushed in from the private
 # knowledge-base repo — never stored here):
@@ -196,6 +197,17 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
     n="${SSH_ORIGINAL_COMMAND#logs-caddy}"; n="${n# }"; n="${n:-100}"
     journal_banner caddy "$n"
     sudo /usr/bin/journalctl -u caddy -n "$n" --no-pager
+    ;;
+  upgrade-watch)
+    # What OS updates are pending on this VM, and who will install them.
+    # Counterpart of the home server's `host-upgrade-watch`: until 2026-09-17
+    # this VM — the most exposed machine of the ecosystem — had no update
+    # visibility at all short of an IAP SSH session.
+    #
+    # No sudo: `apt-get -s dist-upgrade` simulates as a plain user, so this
+    # route adds ZERO privileged surface. Exit 0 compliant / 2 manual gesture
+    # pending / 3 could not measure — an unmeasured VM is never a green light.
+    exec /opt/wol-relay/scripts/upgrade-watch.sh
     ;;
   log-footprint)
     # Janitorial measurement (read-only): journald size + pinned log dirs +
@@ -398,7 +410,7 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
     ;;
   *)
     echo "dispatch.sh: unknown command '${SSH_ORIGINAL_COMMAND:-}'" >&2
-    echo "Expected: push-app, push-caddyfile, push-service, apply, push-window, apply-window, status, health, logs-wol-relay [500|3000], logs-caddy [500|3000], log-footprint," >&2
+    echo "Expected: push-app, push-caddyfile, push-service, apply, push-window, apply-window, status, health, logs-wol-relay [500|3000], logs-caddy [500|3000], log-footprint, upgrade-watch," >&2
     echo "          push-home-watch{,-service,-timer}, apply-home-watch, home-watch-status, logs-home-watch," >&2
     echo "          push-pock-sync-{app,service}, apply-pock-sync, pock-sync-status, logs-pock-sync, pock-dump," >&2
     echo "          pat-receive {daily,weekly}, pat-list, pat-dump-latest," >&2

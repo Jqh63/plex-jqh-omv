@@ -117,6 +117,10 @@ fi
 install -d -m 0755 -o root -g root /opt/wol-relay/scripts
 install -m 0755 -o root -g root "$DISPATCH_SRC" /opt/wol-relay/scripts/dispatch.sh
 echo "[bootstrap] /opt/wol-relay/scripts/dispatch.sh installed"
+# upgrade-watch.sh is exec'd by the `upgrade-watch` route. It needs NO sudoers
+# entry: `apt-get -s` simulates as a plain user.
+install -m 0755 -o root -g root "$SCRIPT_DIR/upgrade-watch.sh" /opt/wol-relay/scripts/upgrade-watch.sh
+echo "[bootstrap] /opt/wol-relay/scripts/upgrade-watch.sh installed"
 
 # --- 4. ~deploy/.ssh/authorized_keys --------------------------------------
 install -d -m 0700 -o deploy -g deploy /home/deploy/.ssh
@@ -287,6 +291,46 @@ if [[ -n "$HW_PKGS" ]]; then
     || echo "[bootstrap] WARN: dep install failed — install$HW_PKGS manually before deploying home-watch"
 else
   echo "[bootstrap] home-watch deps (dig, msmtp) already present (skip)"
+fi
+
+# --- 10. unattended-upgrades (security only) ------------------------------
+# Until 2026-09-17 nothing on this VM installed security updates on its own —
+# on the most exposed machine of the ecosystem (public IP, Caddy, FastAPI).
+# The home server has had this for months; this closes the asymmetry.
+#
+# Scope is deliberately SECURITY ONLY. A full auto-upgrade could restart Caddy
+# or pull a Python minor under the relay, and nobody is watching at 06:00;
+# a security-only origin set is the smallest thing that still protects.
+# Non-security updates stay a manual gesture, and `ssh wol-relay-deploy
+# upgrade-watch` is what says so out loud.
+if ! dpkg -s unattended-upgrades &>/dev/null; then
+  echo "[bootstrap] installing unattended-upgrades ..."
+  DEBIAN_FRONTEND=noninteractive apt-get install -y unattended-upgrades \
+    || echo "[bootstrap] WARN: unattended-upgrades install failed — the VM has NO automatic security updates" >&2
+else
+  echo "[bootstrap] unattended-upgrades already installed (skip)"
+fi
+if dpkg -s unattended-upgrades &>/dev/null; then
+  # Written every run (idempotent), which also re-asserts the setting if a
+  # package upgrade reseeds the defaults — the exact failure mode that kept
+  # apticron alive on the home server for months.
+  install -m 0644 -o root -g root /dev/stdin /etc/apt/apt.conf.d/20auto-upgrades <<'AUTOCONF'
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+APT::Periodic::AutocleanInterval "7";
+AUTOCONF
+  install -m 0644 -o root -g root /dev/stdin /etc/apt/apt.conf.d/52relay-unattended <<'UUCONF'
+// Managed by relay/scripts/bootstrap-wol-relay.sh — security origins only.
+// Mail is deliberately OFF here: this VM already mails through home-watch's
+// msmtp, and a second, unformatted emitter is exactly the noise the
+// knowledge-base mail doctrine forbids. Visibility is the `upgrade-watch`
+// route, which reports what is pending AND who will install it.
+Unattended-Upgrade::Origins-Pattern {
+        "origin=Debian,codename=${distro_codename}-security,label=Debian-Security";
+};
+Unattended-Upgrade::Automatic-Reboot "false";
+UUCONF
+  echo "[bootstrap] unattended-upgrades configured (security origins, no mail, no auto-reboot)"
 fi
 
 cat <<EOF

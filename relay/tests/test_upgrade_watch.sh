@@ -101,4 +101,26 @@ has "codename=\${distro_codename}-security" "$OUT" "the ACTIVE origin is reporte
 no "a=stable" "$OUT" "a commented example is NOT reported as active"
 no "backports" "$OUT" "nor is a commented backports line"
 
+
+echo "case I — REGRESSION: the bootstrap's REAL config must cancel Debian's stable origin"
+# apt MERGES list options across files: Debian's 50unattended-upgrades ships
+# `label=Debian` (the whole stable archive) UNcommented, and the VM installed
+# point releases while the route said "security only" (live, 2026-09-19).
+# The 52 file is extracted from the bootstrap itself, not retyped here.
+mkdir -p "$TMP/merged"
+printf 'APT::Periodic::Unattended-Upgrade "1";\n' > "$TMP/merged/20auto-upgrades"
+cat > "$TMP/merged/50unattended-upgrades" <<'CONF'
+Unattended-Upgrade::Origins-Pattern {
+        "origin=Debian,codename=${distro_codename},label=Debian";
+        "origin=Debian,codename=${distro_codename}-security,label=Debian-Security";
+};
+CONF
+run "$TMP/merged" "$TMP/lists" "sim_none"
+has "label=Debian " "$OUT" "POSITIVE CONTROL: without the bootstrap file, stable IS reported"
+sed -n "/<<'UUCONF'/,/^UUCONF/p" "$HERE/../scripts/bootstrap-wol-relay.sh" | sed '1d;$d' > "$TMP/merged/52relay-unattended"
+has "#clear" "$(cat "$TMP/merged/52relay-unattended")" "bootstrap heredoc extracted"
+run "$TMP/merged" "$TMP/lists" "sim_none"
+no "label=Debian " "$OUT" "stable origin cancelled by the bootstrap config"
+has "label=Debian-Security" "$OUT" "security origin still active"
+
 [ "$fail" -eq 0 ] && { echo "ALL CASES OK"; exit 0; } || { echo "FAILURES"; exit 1; }

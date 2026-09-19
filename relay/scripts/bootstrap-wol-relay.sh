@@ -146,10 +146,16 @@ systemctl daemon-reload
 echo "[bootstrap] caddy.service.d/wol-relay.conf installed + daemon-reload done"
 
 # --- 6. Env file templates (seed only if runtime file is missing) ---------
+# FRESH_ENV / FRESH_TUNNEL decide whether the one-shot "Next steps" are printed
+# at the end: they are useful on the FIRST run only. Reprinted on every rerun
+# they became noise that hides the one line that matters (asked by the admin,
+# 2026-09-19 — "an info that is useful on a first run is noise afterwards").
+FRESH_ENV=0; FRESH_TUNNEL=0
 if [[ ! -f /etc/caddy/wol-relay.env ]]; then
   install -d -m 0755 -o root -g root /etc/caddy
   install -m 0640 -o root -g caddy "$CADDY_ENV_SRC" /etc/caddy/wol-relay.env
   echo "[bootstrap] /etc/caddy/wol-relay.env seeded from template — EDIT IT before restarting caddy"
+  FRESH_ENV=1
 else
   echo "[bootstrap] /etc/caddy/wol-relay.env already present (skip)"
 fi
@@ -157,6 +163,7 @@ fi
 if [[ ! -f /etc/wol-relay.env ]]; then
   install -m 0640 -o root -g wol "$WOL_ENV_SRC" /etc/wol-relay.env
   echo "[bootstrap] /etc/wol-relay.env seeded from template — EDIT IT before starting wol-relay"
+  FRESH_ENV=1
 else
   echo "[bootstrap] /etc/wol-relay.env already present (skip)"
 fi
@@ -182,6 +189,7 @@ if [[ -n "$OMVTUNNEL_PUBKEY_PATH" ]]; then
   if ! id -u omvtunnel >/dev/null 2>&1; then
     useradd -m -s /usr/sbin/nologin omvtunnel
     echo "[bootstrap] user 'omvtunnel' created (nologin shell, no sudo)"
+    FRESH_TUNNEL=1
   else
     echo "[bootstrap] user 'omvtunnel' already present (skip)"
   fi
@@ -341,9 +349,16 @@ UUCONF
   echo "[bootstrap] unattended-upgrades configured (security origins, no mail, no auto-reboot)"
 fi
 
+if [[ "$FRESH_ENV" -eq 0 && "$FRESH_TUNNEL" -eq 0 ]]; then
+  echo
+  echo "[bootstrap] DONE — rerun on an already provisioned VM, nothing manual to do."
+  echo "            Verify from the deploy host: ssh wol-relay-deploy health ; ssh wol-relay-deploy upgrade-watch"
+  exit 0
+fi
+
 cat <<EOF
 
-[bootstrap] DONE.
+[bootstrap] DONE — first provisioning: manual steps below.
 
 Next steps (manual, ONE-SHOT):
   1. Edit /etc/caddy/wol-relay.env with real LE_EMAIL / RELAY_DOMAIN / CORS_ORIGIN
@@ -359,7 +374,7 @@ Next steps (manual, ONE-SHOT):
        bash wol-relay/scripts/deploy-home-watch.sh   # (knowledge-base repo)
 EOF
 
-if [[ -n "$OMVTUNNEL_PUBKEY_PATH" ]]; then
+if [[ "$FRESH_TUNNEL" -eq 1 ]]; then
   cat <<EOF
   5. Reverse-SSH fallback endpoint provisioned (omvtunnel). Remaining,
      ONE-SHOT, host-side (NOT done by this script):

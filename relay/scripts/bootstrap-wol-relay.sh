@@ -325,6 +325,14 @@ AUTOCONF
 // msmtp, and a second, unformatted emitter is exactly the noise the
 // knowledge-base mail doctrine forbids. Visibility is the `upgrade-watch`
 // route, which reports what is pending AND who will install it.
+//
+// ⚠️ `#clear` is load-bearing: apt MERGES list options across files, so
+// without it Debian's own 50unattended-upgrades keeps adding
+// `label=Debian` (the whole stable archive) and this VM auto-installed
+// point-release updates while claiming "security only" — confirmed on the
+// live VM on 2026-09-19 by `unattended-upgrade --dry-run -d`.
+#clear Unattended-Upgrade::Origins-Pattern;
+#clear Unattended-Upgrade::Allowed-Origins;
 Unattended-Upgrade::Origins-Pattern {
         "origin=Debian,codename=${distro_codename}-security,label=Debian-Security";
 };

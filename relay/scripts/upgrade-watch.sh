@@ -40,17 +40,25 @@ if [ -d "$APT_CONF_DIR" ]; then
   conf="$(cat "$APT_CONF_DIR"/* 2>/dev/null)"
   if printf '%s' "$conf" | grep -qE 'APT::Periodic::Unattended-Upgrade[^0-9]*1'; then
     armed="yes"
-    # ⚠️ Skip COMMENTED lines before collecting origins. Debian ships
-    # /etc/apt/apt.conf.d/50unattended-upgrades with a dozen example origins
-    # commented out (`//`); grepping the raw file reported `stable`,
-    # `proposed-updates` and `backports` as ACTIVE on the live VM — the line
-    # overstated the automation's scope, which is the one thing a reader uses
-    # it for. Found on the route's very first real run (2026-09-17); the bench
-    # had seven green cases and could not have caught it, because the fixture
-    # was written from my model of the file rather than from the file.
-    origins="$(printf '%s\n' "$conf" \
-               | sed -e 's://.*::' -e 's:#.*::' \
-               | grep -oE '"(origin=|o=)[^"]*"' | tr -d '"' | tr '\n' ' ')"
+    # Origins are read from apt's RESOLVED configuration, never grepped from
+    # the files. Two lessons, both from the live VM: (1) 2026-09-17, a raw grep
+    # reported Debian's commented example origins as active; (2) 2026-09-19,
+    # skipping comments still reported every file's list side by side, while
+    # apt MERGES lists across files and honours `#clear` — the only honest
+    # answer is apt's own. `apt-config dump` with Dir::Etc::Parts pointed at
+    # the directory under test resolves exactly what unattended-upgrade sees.
+    origins=""
+    if command -v apt-config >/dev/null 2>&1; then
+      aptcfg="$(mktemp)"
+      printf 'Dir::Etc::main "%s";\nDir::Etc::Parts "%s";\n' \
+        "$APT_CONF_DIR/.none" "$APT_CONF_DIR" > "$aptcfg"
+      origins="$(APT_CONFIG="$aptcfg" apt-config dump 2>/dev/null \
+                 | grep -E '^Unattended-Upgrade::(Origins-Pattern|Allowed-Origins):: ' \
+                 | sed -E 's/^[^"]*"//; s/";$//' | tr '\n' ' ')"
+      rm -f "$aptcfg"
+    else
+      origins="(apt-config absent — origins not resolved)"
+    fi
     auto_detail="enabled${origins:+ — origins: $origins}"
   fi
 fi

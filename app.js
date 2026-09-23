@@ -562,7 +562,10 @@ var TOAST_MS=4500,TOAST_LONG_MS=7000;
 // setting), and this sub is shown right after a wake — the moment the family
 // is actually looking. Fourth truncation on this tile (v8.13, v8.14, v8.54).
 var SUB_DEGRADED='services en démarrage…';
-function showToast(msg,warn,ms){var t=document.getElementById('toast');t.textContent=msg;t.className=warn?'toast warn show':'toast show';setTimeout(function(){t.className='toast'},ms||TOAST_MS)}
+// Each toast owns its duration: cancel the previous timer, or it hides the next
+// toast early (a 4,5 s ack cut the 7 s relay error that followed it to ~3,5 s).
+var toastTimer=null;
+function showToast(msg,warn,ms){var t=document.getElementById('toast');t.textContent=msg;t.className=warn?'toast warn show':'toast show';clearTimeout(toastTimer);toastTimer=setTimeout(function(){t.className='toast'},ms||TOAST_MS)}
 
 function getEta(){
   // The relay-served canonical ETA (shared across devices, persisted as
@@ -728,6 +731,8 @@ function saveConfig(){
   var prevRescue=(config&&config.rescue)||'';
   var prevWinSrc=(config&&config.winSrc)||'';
   var prevWindow=(config&&config.window)||'';
+  var prevHost=(config&&config.host)||'';
+  var prevEta=config&&config.eta;
   if(!host){showToast('⚠ Domaine requis',true);return}
   if(!validHost(host)){showToast('⚠ Domaine invalide',true);return}
   var cleaned='';
@@ -751,6 +756,9 @@ function saveConfig(){
   if(prevWinSrc==='relay'&&cleanedRelay){config.window=prevWindow;config.winSrc='relay';}
   if(prevStatus)config.status=prevStatus;
   if(prevRescue)config.rescue=prevRescue;
+  // Relay-learned boot ETA: same rule as readUrlParams() — kept for the same
+  // home, dropped for another one (a different machine boots differently).
+  if(host===prevHost&&typeof prevEta==='number')config.eta=prevEta;
   storeConfig(config);
   startApp();
 }
@@ -929,6 +937,9 @@ function acquireWakeLock(){
     wakeLockPending=false;
     if(!wolSent&&!remoteWaking){l.release().catch(function(){});return;}
     wakeLock=l;
+    // The OS releases the sentinel on background. Forget it then, or the guard
+    // above keeps seeing a dead lock and onForeground() never re-acquires.
+    if(l.addEventListener)l.addEventListener('release',function(){if(wakeLock===l)wakeLock=null;});
   }).catch(function(){wakeLockPending=false;});
 }
 function releaseWakeLock(){

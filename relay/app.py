@@ -815,7 +815,8 @@ def _in_uptime_window() -> bool:
     if not window:
         return False   # no window configured → never assume it is safe to poll forever
     try:
-        start_s, end_s = window.split("-", 1)
+        # _WINDOW_RE accepts "13h50" as well as "13:50" — parse both.
+        start_s, end_s = window.replace("h", ":").split("-", 1)
         sh, sm = (int(x) for x in start_s.split(":"))
         eh, em = (int(x) for x in end_s.split(":"))
         now = datetime.now(ZoneInfo(KEEPALIVE_TZ))

@@ -710,6 +710,72 @@ def scenario_late_adopted_wake_still_shows_a_timer(p):
     return ok
 
 
+def scenario_wake_lock_reacquired_after_background(p):
+    """v8.xx — the OS releases the wake lock when the page is hidden; coming back
+    mid-boot must take a NEW one.
+
+    Found by the KB PWA/relay audit, 2026-09-23: the code never listened for the
+    sentinel's `release` event, so `wakeLock` kept pointing at the dead sentinel and
+    `acquireWakeLock()` bailed on `if(wakeLock||…)` — the v8.18 re-acquire in
+    onForeground() was a no-op, and the screen locked again for the rest of the boot.
+    The stub in adopted-wake-holds-the-screen could not see it: its sentinel never
+    releases (`addEventListener: function(){}`). This one behaves like the platform —
+    on hide it flips `released` and fires `release` on its listeners.
+    """
+    _reset_clock_skew()
+    print("\n## wake-lock-reacquired-after-background")
+    counters = {"relay": 0, "home": 0, "wol": 0}
+
+    b = getattr(p, ENGINE).launch()
+    ctx = b.new_context(viewport={"width": 390, "height": 844})
+    page = ctx.new_page()
+    page.route("**/*", _mk_handler(counters, lambda n: "waking:18", lambda n: "ok"))
+    page.add_init_script("""
+      window.__wl = {req: 0, rel: 0, live: []};
+      Object.defineProperty(Navigator.prototype, 'wakeLock', {configurable: true, get: function(){
+        return {request: function(){
+          window.__wl.req++;
+          var ls = [];
+          var s = {released: false,
+            addEventListener: function(t, f){ if (t === 'release') ls.push(f); },
+            release: function(){ window.__wl.rel++; s.released = true; return Promise.resolve(); },
+            __osRelease: function(){ if (s.released) return; s.released = true;
+              ls.forEach(function(f){ f(new Event('release')); }); }};
+          window.__wl.live.push(s);
+          return Promise.resolve(s);
+        }};
+      }});
+      window.__hidden = false;
+      Object.defineProperty(Document.prototype, 'hidden', {configurable: true,
+        get: function(){ return window.__hidden; }});
+      Object.defineProperty(Document.prototype, 'visibilityState', {configurable: true,
+        get: function(){ return window.__hidden ? 'hidden' : 'visible'; }});
+    """)
+    page.goto(PWA_URL, wait_until="load")
+    page.wait_for_selector("#statusLabel", state="attached", timeout=10000)
+    page.wait_for_timeout(1200)
+    before = page.evaluate("() => window.__wl.req")
+    ok = check("a wake is running and holds the screen (fixture sanity)",
+               is_counting_down(card(page)) and before == 1, f"requests={before}")
+
+    # Background: the platform releases every sentinel, then the page comes back.
+    page.evaluate("""() => { window.__hidden = true;
+      window.__wl.live.forEach(function(s){ s.__osRelease(); });
+      document.dispatchEvent(new Event('visibilitychange')); }""")
+    page.wait_for_timeout(300)
+    page.evaluate("() => { window.__hidden = false; document.dispatchEvent(new Event('visibilitychange')); }")
+    page.wait_for_timeout(800)
+    after = page.evaluate("() => window.__wl.req")
+    still = card(page)
+    print(f"  after background → countdown={still['power']!r} requests={after}")
+    ok &= check("the wake is still running after the background (fixture sanity)",
+                is_counting_down(still), f"countdown={still['power']!r}")
+    ok &= check("a NEW lock is requested on foreground (the bug)",
+                after == 2, f"requests={after}")
+    b.close()
+    return ok
+
+
 def main():
     print("=" * 72)
     print(f"WAKE-path E2E (v8.31 + v8.32) — engine={ENGINE} base={PWA_BASE}")
@@ -727,6 +793,7 @@ def main():
         ok &= scenario_failed_wake_promotes_the_manual_page(p)
         ok &= scenario_failed_wake_says_contact_admin(p)
         ok &= scenario_adopted_wake_holds_the_screen(p)
+        ok &= scenario_wake_lock_reacquired_after_background(p)
         ok &= scenario_degraded_resume_does_not_go_green_early(p)
         ok &= scenario_late_adopted_wake_still_shows_a_timer(p)
 

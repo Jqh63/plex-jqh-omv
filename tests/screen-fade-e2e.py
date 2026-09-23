@@ -111,6 +111,22 @@ def main():
                              not offenders and len(calls) >= 10,
                              f"{len(calls)} call sites, offenders={offenders}"))
 
+        # --- pin 6: a toast gets ITS OWN duration, not the leftover of the ---
+        # previous one. Found 2026-09-23 (KB PWA/relay audit): showToast never
+        # cancelled the earlier timer, so "Demande de réveil envoyée" (4,5 s)
+        # hid the relay-error toast that followed ~1 s later (7 s) after ~3,5 s
+        # — the toasts that need the longest read were the ones cut.
+        pg.evaluate("showToast('A')")
+        pg.wait_for_timeout(1000)
+        pg.evaluate("showToast('B', true, TOAST_LONG_MS)")
+        pg.wait_for_timeout(4200)   # 5,2 s after A: A's timer has fired
+        mid = pg.evaluate("document.getElementById('toast').className")
+        pg.wait_for_timeout(3300)   # 7,5 s after B: B's own timer has fired
+        end = pg.evaluate("document.getElementById('toast').className")
+        results.append(check("a later toast is not hidden by the earlier toast's timer",
+                             "show" in mid and "show" not in end,
+                             f"at B+4,2s={mid!r} at B+7,5s={end!r}"))
+
         # 2026-07-29 — in-app help must not describe a label the app never
         # paints. v8.53 merged the two blue labels into a bare « Éteint », but
         # the settings hint (in BOTH index.html and the JS that rewrites it)

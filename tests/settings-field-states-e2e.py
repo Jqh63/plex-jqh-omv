@@ -155,6 +155,20 @@ def run(engine, port):
         small = [i for i, px in sizes if px < 16]
         check(not small, f"E1 no text field under 16px (iOS would zoom on focus): {small}")
 
+        # --- H. a save keeps the relay-learned boot ETA for the same home
+        # Found 2026-09-23 (KB PWA/relay audit): saveConfig() rebuilt config
+        # field by field and carried window/winSrc/status/rescue but not `eta`,
+        # so any save (even a title edit) sent the next wake back to the 80 s
+        # hard-coded countdown, out of sync with the other devices. Same rule
+        # as readUrlParams(): kept for the same host, dropped for another one.
+        def saved_eta(new_host):
+            return pg.evaluate(
+                "(h)=>{config={host:'h.example',port:'9',relay:'https://r.example',eta:42};"
+                "showSettings();document.getElementById('cfgHost').value=h;saveConfig();"
+                "return JSON.parse(localStorage.getItem('plex-jqh-omv-cfg')).eta;}", new_host)
+        check(saved_eta("h.example") == 42, "H1 a save keeps the relay-learned eta for the same home")
+        check(saved_eta("other.example") is None, "H2 ... and drops it when the home changes (control)")
+
         # --- F. the 16px bump must not cost Android or desktop anything
         # Raising the inputs to 16px (iOS auto-zoom) makes every field wider, and
         # `text-overflow-e2e.py` audits tile labels and toasts -- never this

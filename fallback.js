@@ -3,6 +3,11 @@ var mac = p.get('mac') || '';
 var host = p.get('host') || '';
 var port = p.get('port') || '9';
 var ip = p.get('ip') || '';
+// host and port end up in commands the family PASTES into a shell (port
+// unquoted, host inside '…'): anything but a plain hostname / 1-65535 is
+// dropped, or a crafted link to this page could hand them an arbitrary command.
+if (!/^[A-Za-z0-9.-]{1,253}$/.test(host)) host = '';
+if (!/^\d{1,5}$/.test(port) || +port < 1 || +port > 65535) port = '9';
 if (ip && !/^(\d{1,3}\.){3}\d{1,3}$/.test(ip)) ip = '';
 
 function formatMac(m) {

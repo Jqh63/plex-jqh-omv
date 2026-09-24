@@ -39,6 +39,7 @@ ok 0 "$RC" "exit 0"
 has "VERDICT: DONE" "$OUT" "verdict DONE"
 has "reboot required: no" "$OUT" "no reboot flag"
 has "NOT restarted" "$OUT" "says services were not restarted"
+has "priority: nice=19 io=best-effort: prio 7" "$OUT" "runs at lowest CPU/IO priority"
 # The argv must match the sudoers pin word for word, or sudo -n refuses live.
 has "^/usr/bin/apt-get update$" "$CALLS" "update argv pinned"
 has "^/usr/bin/env DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get -y -o DPkg::Lock::Timeout=600 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold dist-upgrade$" "$CALLS" "dist-upgrade argv pinned"

@@ -37,6 +37,22 @@ exec >>"$LOG" 2>&1
 ts() { date '+%F %T %Z'; }
 echo "=== RELAY VM UPGRADE — start $(ts) ==="
 
+# Lowest CPU/IO priority, set on THIS shell so sudo → apt → dpkg inherit it:
+# the pinned sudo argv stays unchanged. Caddy and sshd keep the upper hand on
+# the 2 vCPU e2-micro (2026-09-24: an upgrade froze the VM for an hour).
+# Best-effort class 7, not idle: idle could starve dpkg while it holds the lock.
+# Does NOT cap memory — that freeze was RAM (google-cloud-cli, now removed).
+renice -n 19 -p $$ >/dev/null 2>&1 || true
+ionice -c2 -n7 -p $$ 2>/dev/null || true
+echo "--- priority: nice=$(nice) io=$(ionice -p $$ 2>/dev/null || echo unknown)"
+# Proof the priority survived sudo: one sample of the live apt/dpkg process.
+( for _ in $(seq 1 600); do
+    s="$(ps -o ni=,comm= -C apt-get,dpkg 2>/dev/null | head -1)"
+    [ -n "$s" ] && { echo "--- priority under sudo: nice=$s"; exit 0; }
+    sleep 1
+  done ) &
+sampler=$!
+
 rc_update=0; rc_upgrade=0
 $SUDO /usr/bin/apt-get update || rc_update=$?
 echo "--- apt-get update rc=$rc_update"
@@ -46,6 +62,7 @@ if [ "$rc_update" -eq 0 ]; then
     -o Dpkg::Options::=--force-confold dist-upgrade || rc_upgrade=$?
   echo "--- apt-get dist-upgrade rc=$rc_upgrade"
 fi
+kill "$sampler" 2>/dev/null; wait "$sampler" 2>/dev/null
 
 health="KO"; $HEALTH_CMD >/dev/null 2>&1 && health="OK"
 reboot="no"; [ -e "$REBOOT_FLAG" ] && reboot="YES"

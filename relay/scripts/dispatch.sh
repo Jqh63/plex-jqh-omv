@@ -21,6 +21,8 @@
 #                                          #   (defaut 100 lignes ~= 70 min)
 #   ssh wol-relay-deploy log-footprint     # journald size + log dirs + df (read-only)
 #   ssh wol-relay-deploy upgrade-watch     # pending OS updates + who installs them (read-only)
+#   ssh wol-relay-deploy upgrade           # WRITE: apt update + dist-upgrade, detached, no reboot
+#   ssh wol-relay-deploy upgrade-log       # newest upgrade run log + running/finished (read-only)
 #
 # home-watch (external homelab monitor, content pushed in from the private
 # knowledge-base repo — never stored here):
@@ -208,6 +210,26 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
     # route adds ZERO privileged surface. Exit 0 compliant / 2 manual gesture
     # pending / 3 could not measure — an unmeasured VM is never a green light.
     exec /opt/wol-relay/scripts/upgrade-watch.sh
+    ;;
+  upgrade)
+    # WRITE: install pending OS updates (apt update + dist-upgrade, options
+    # pinned in sudoers), then health-check the relay. Detached so an SSH drop
+    # never interrupts dpkg; never reboots, never restarts a service. Meant to
+    # be run with somebody watching — read the outcome with `upgrade-log`.
+    setsid nohup /opt/wol-relay/scripts/upgrade-run.sh </dev/null >/dev/null 2>&1 &
+    echo "[upgrade] started detached (pid=$!). Read the outcome: ssh wol-relay-deploy upgrade-log"
+    ;;
+  upgrade-log)
+    # Read-only: the newest upgrade run log (running or finished), or says none.
+    latest="$(ls -1t /home/deploy/upgrade-logs/*.log 2>/dev/null | head -1 || true)"
+    if [ -z "$latest" ]; then echo "[upgrade-log] no upgrade run recorded yet"; exit 0; fi
+    echo "[upgrade-log] $latest"
+    if flock -n /home/deploy/upgrade-logs/.lock true 2>/dev/null; then
+      echo "[upgrade-log] state: finished"
+    else
+      echo "[upgrade-log] state: RUNNING"
+    fi
+    tail -n 60 "$latest"
     ;;
   log-footprint)
     # Janitorial measurement (read-only): journald size + pinned log dirs +
@@ -410,7 +432,7 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
     ;;
   *)
     echo "dispatch.sh: unknown command '${SSH_ORIGINAL_COMMAND:-}'" >&2
-    echo "Expected: push-app, push-caddyfile, push-service, apply, push-window, apply-window, status, health, logs-wol-relay [500|3000], logs-caddy [500|3000], log-footprint, upgrade-watch," >&2
+    echo "Expected: push-app, push-caddyfile, push-service, apply, push-window, apply-window, status, health, logs-wol-relay [500|3000], logs-caddy [500|3000], log-footprint, upgrade-watch, upgrade, upgrade-log," >&2
     echo "          push-home-watch{,-service,-timer}, apply-home-watch, home-watch-status, logs-home-watch," >&2
     echo "          push-pock-sync-{app,service}, apply-pock-sync, pock-sync-status, logs-pock-sync, pock-dump," >&2
     echo "          pat-receive {daily,weekly}, pat-list, pat-dump-latest," >&2

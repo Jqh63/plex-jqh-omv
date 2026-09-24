@@ -121,6 +121,10 @@ echo "[bootstrap] /opt/wol-relay/scripts/dispatch.sh installed"
 # entry: `apt-get -s` simulates as a plain user.
 install -m 0755 -o root -g root "$SCRIPT_DIR/upgrade-watch.sh" /opt/wol-relay/scripts/upgrade-watch.sh
 echo "[bootstrap] /opt/wol-relay/scripts/upgrade-watch.sh installed"
+# upgrade-run.sh backs the `upgrade` route; its only privilege is the pinned
+# OS_UPGRADE alias in sudoers.deploy.
+install -m 0755 -o root -g root "$SCRIPT_DIR/upgrade-run.sh" /opt/wol-relay/scripts/upgrade-run.sh
+echo "[bootstrap] /opt/wol-relay/scripts/upgrade-run.sh installed"
 
 # --- 4. ~deploy/.ssh/authorized_keys --------------------------------------
 install -d -m 0700 -o deploy -g deploy /home/deploy/.ssh

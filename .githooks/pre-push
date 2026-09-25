@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# pre-push — refuse to push a branch that changes a SERVED file without bumping
+# the `CACHE` name in sw.js (CLAUDE.md § Versioning). Without the bump,
+# installed PWAs keep serving the old assets, silently: the family phone just
+# stays on yesterday's code.
+#
+# Judged on the whole BRANCH (merge-base with origin/main → pushed head), not
+# per commit: the rule is "same PR", and a bump made in its own commit is
+# healthy (replayed on real history 2026-09-25 — a per-commit check would have
+# blocked 3 sound PRs).
+#
+# A git hook, not a Claude hook: this repo is mostly edited from knowledge-base
+# sessions, where a .claude/settings.json hook here would never load.
+# Activation (per clone): git config core.hooksPath .githooks
+# Deliberate bypass: git push --no-verify
+set -uo pipefail
+
+# Served = everything the PWA ships. Not served: server code, tests, tooling,
+# dotfiles, prose.
+served_files() {
+  awk 'NF && !/^(relay|tests|\.claude|\.github|\.githooks)\// && !/^\./ \
+       && !/\.md$/ && $0 != "LICENSE"'
+}
+
+rc=0
+while read -r _lref lsha _rref _rsha; do
+  case "$lsha" in *[!0]*) ;; *) continue ;; esac       # branch deletion
+  base="$(git merge-base origin/main "$lsha" 2>/dev/null)" || continue
+  served="$(git diff --name-only "$base" "$lsha" | served_files)"
+  [ -z "$served" ] && continue
+  git diff -U0 "$base" "$lsha" -- sw.js |
+    awk '/^\+[^+]/ && /CACHE[[:space:]]*=/ { f = 1 } END { exit !f }' && continue
+  {
+    echo "✗ pre-push: served file(s) changed without a CACHE bump in sw.js:"
+    printf '%s\n' "$served" | sed 's/^/    /'
+    echo "  Bump the date in sw.js (var CACHE = 'plex-jqh-omv-v8-<today><letter>')."
+    echo "  Bypass only if intentional: git push --no-verify"
+  } >&2
+  rc=1
+done
+exit "$rc"

@@ -44,3 +44,7 @@ tests/screenshots/
 # nearly committed by a git add -A).
 core
 core.*
+
+# Claude Security scan reports (/claude-security writes them at the repo root).
+# Public repo: a committed report would publish the findings.
+CLAUDE-SECURITY-*/

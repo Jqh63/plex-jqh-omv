@@ -511,6 +511,20 @@ function validHost(h){return h.length>0&&h.length<255&&/\./.test(h)&&!h.includes
 function validIp(s){return /^(\d{1,3}\.){3}\d{1,3}$/.test(s)}
 function cleanRelay(u){return u.replace(/\/+$/,'')}
 function validRelay(u){return /^https:\/\/[a-zA-Z0-9.\-]+(:\d+)?(\/.*)?$/.test(u)&&u.length<255}
+// Server-identity fields a provisioning link would CHANGE on an already
+// configured app, as human-readable "old → new" lines (empty = nothing to ask).
+// Only valid values count: an invalid one is dropped by readUrlParams anyway.
+function serverChanges(prev,host,p){
+  if(!prev.host)return [];
+  var out=[];
+  if(prev.host!==host)out.push('Serveur : '+prev.host+' → '+host);
+  [['relay','Relais'],['rescue','Secours']].forEach(function(f){
+    var v=p.get(f[0]);if(!v)return;
+    v=cleanRelay(v);
+    if(validRelay(v)&&v!==prev[f[0]])out.push(f[1]+' : '+(prev[f[0]]||'aucun')+' → '+v);
+  });
+  return out;
+}
 // v8.11 — scheduled-uptime window. Format "HH:MM-HH:MM" or "HHhMM-HHhMM"
 // ("13:50-00:10" / "13h50-00h10"), may wrap past midnight. Purely informative:
 // it only rephrases the red card ("Éteint (prévu)" + auto-wake hint vs "Hors ligne")
@@ -616,6 +630,19 @@ function readUrlParams(){
   // settings path.
   var prev=loadConfig()||{};
   var sameHost=prev.host===host;
+  // 2026-09-27 — a link must not SILENTLY repoint an installed app at another
+  // server. The Seerr/Plex tiles, the wake relay and the rescue page all derive
+  // from host/relay/rescue, so a forged `?host=evil&relay=https://evil` turned
+  // a trusted home-screen icon into a Plex-login phishing page with no visible
+  // sign (claude-security candidate on app.js, PWA scan 2026-09-26). First
+  // provisioning and a same-server refresh stay silent (the bookmark case
+  // above); only a CHANGE asks. Refused ⇒ stored config kept, params stripped.
+  var changed=serverChanges(prev,host,p);
+  if(changed.length&&!confirm('Ce lien veut changer le serveur de l’application :\n\n'+
+      changed.join('\n')+'\n\nN’acceptez que si ce lien vient de la personne qui gère votre serveur.')){
+    try{history.replaceState(null,'',location.pathname);}catch(e){}
+    return false;
+  }
   config={host:host,port:String(portNum)};
   if(cleaned)config.mac=cleaned;
   var relay=p.get('relay');if(relay){var cr=cleanRelay(relay);if(validRelay(cr))config.relay=cr;}

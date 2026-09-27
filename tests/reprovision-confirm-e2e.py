@@ -17,6 +17,11 @@ Rows:
      stripped from the address bar anyway.
   D. HOST CHANGE, ACCEPTED — prompt shown, new config adopted.
   E. RELAY CHANGE ONLY    — same host, other relay: still a server change.
+  F. APPS INJECTION       — same host, `?apps=x@evil.example/`: prompts (F7),
+     and even once accepted no tile may link outside the home host.
+  G. BARE SAME HOST       — `?host=<same>` alone: silent AND keeps relay/mac
+     (F9: it used to wipe them, hiding the wake button).
+  H. STATUS CHANGE        — same host, `?status=evil.example`: prompts (F9).
 
 Run: python3 tests/reprovision-confirm-e2e.py   (PWA_ENGINES=chromium to narrow)
 """
@@ -39,6 +44,9 @@ REPO = os.path.dirname(os.path.abspath(os.path.dirname(__file__)))
 HOME = "host=home.example&relay=https://relay.home.example&mac=AA:BB:CC:DD:EE:01"
 EVIL = "host=evil.example&relay=https://relay.evil.example"
 OTHER_RELAY = "host=home.example&relay=https://relay.evil.example"
+EVIL_APPS = "host=home.example&apps=seerr,x@evil.example/%3F"
+BARE = "host=home.example"
+EVIL_STATUS = "host=home.example&status=evil.example"
 
 failures = []
 
@@ -83,6 +91,8 @@ def run(engine, pw, base):
         page.goto(f"{base}/index.html?{second}", wait_until="load")
         cfg = json.loads(page.evaluate("localStorage.getItem('plex-jqh-omv-cfg')") or "{}")
         url = page.url
+        hrefs = page.evaluate("Array.from(document.querySelectorAll('a[href]')).map(a => a.href)")
+        scenario.hrefs = hrefs
         ctx.close()
         return seen, cfg, url
 
@@ -107,6 +117,22 @@ def run(engine, pw, base):
     seen, cfg, _ = scenario(HOME, OTHER_RELAY, answer=False)
     check(engine, "E relay-only change prompts",
           len(seen) == 1 and cfg.get("relay") == "https://relay.home.example", f"dialogs={seen} cfg={cfg}")
+
+    seen, cfg, _ = scenario(HOME, EVIL_APPS, answer=False)
+    check(engine, "F apps injection prompts", len(seen) == 1, f"dialogs={seen}")
+    seen, cfg, _ = scenario(HOME, EVIL_APPS, answer=True)
+    evil = [h for h in scenario.hrefs if "evil.example" in h.split("?")[0].split("#")[0].split("/")[2]]
+    check(engine, "F accepted: no tile links outside the home host", not evil, f"hrefs={evil}")
+
+    seen, cfg, _ = scenario(HOME, BARE, answer=False)
+    check(engine, "G bare same host is silent", not seen, f"dialogs={seen}")
+    check(engine, "G bare same host keeps relay and mac",
+          cfg.get("relay") == "https://relay.home.example" and cfg.get("mac") == "aabbccddee01",
+          f"cfg={cfg}")
+
+    seen, cfg, _ = scenario(HOME, EVIL_STATUS, answer=False)
+    check(engine, "H status change prompts",
+          len(seen) == 1 and not cfg.get("status"), f"dialogs={seen} cfg={cfg}")
 
     browser.close()
 

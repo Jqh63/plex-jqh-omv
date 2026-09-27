@@ -508,20 +508,27 @@ function cleanMac(m){return m.replace(/[:\-\s]/g,'').toLowerCase()}
 function validMac(m){return /^[0-9a-f]{12}$/.test(m)}
 function macToColon(m){return m.replace(/(.{2})/g,'$1:').slice(0,-1)}
 function validHost(h){return h.length>0&&h.length<255&&/\./.test(h)&&!h.includes('..')&&/^[a-zA-Z0-9][a-zA-Z0-9\-\.]*[a-zA-Z0-9]$/.test(h)}
+function validSub(s){return /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/i.test(s)}
 function validIp(s){return /^(\d{1,3}\.){3}\d{1,3}$/.test(s)}
 function cleanRelay(u){return u.replace(/\/+$/,'')}
 function validRelay(u){return /^https:\/\/[a-zA-Z0-9.\-]+(:\d+)?(\/.*)?$/.test(u)&&u.length<255}
-// Server-identity fields a provisioning link would CHANGE on an already
-// configured app, as human-readable "old → new" lines (empty = nothing to ask).
-// Only valid values count: an invalid one is dropped by readUrlParams anyway.
-function serverChanges(prev,host,p){
+// Fields a provisioning link would CHANGE on an already configured app, as
+// human-readable "old → new" lines (empty = nothing to ask). Compares the stored
+// config with the one the link would store, so every field the tiles, the wake
+// button or the status verdict depend on is covered — not only host/relay/rescue
+// (claude-security F7/F9, 2026-09-27: `?apps=` and `?status=` slipped past).
+var PROVISION_FIELDS=[['host','Serveur'],['relay','Relais'],['rescue','Secours'],
+  ['apps','Tuiles'],['status','Sonde'],['token','Jeton'],['mac','MAC'],
+  ['ip','IP'],['port','Port'],['title','Titre']];
+function serverChanges(prev,next){
   if(!prev.host)return [];
   var out=[];
-  if(prev.host!==host)out.push('Serveur : '+prev.host+' → '+host);
-  [['relay','Relais'],['rescue','Secours']].forEach(function(f){
-    var v=p.get(f[0]);if(!v)return;
-    v=cleanRelay(v);
-    if(validRelay(v)&&v!==prev[f[0]])out.push(f[1]+' : '+(prev[f[0]]||'aucun')+' → '+v);
+  PROVISION_FIELDS.forEach(function(f){
+    var a=prev[f[0]]||'',b=next[f[0]]||'';
+    if(a===b)return;
+    // A token is a secret: say it changes, never print it.
+    if(f[0]==='token')out.push(f[1]+' : modifié');
+    else out.push(f[1]+' : '+(a||'aucun')+' → '+(b||'aucun'));
   });
   return out;
 }
@@ -591,7 +598,12 @@ function getEta(){
 
 function parseApps(str){
   var keys=(str||'').split(',').map(function(s){return s.trim()}).filter(Boolean);
-  return keys.map(function(k){return APP_CATALOG[k]||{sub:k,label:k,icon:'🔗',cls:'cfg'}});
+  // A non-catalog key becomes `<key>.<host>` in the tile href, so it must be ONE
+  // DNS label: `x@evil.example/` would move the link's real host to the
+  // attacker (claude-security F7, 2026-09-27). Anything else is dropped here, at
+  // the sink, which also neutralises a bad value already stored.
+  return keys.filter(function(k){return APP_CATALOG[k]||validSub(k)})
+    .map(function(k){return APP_CATALOG[k]||{sub:k,label:k,icon:'🔗',cls:'cfg'}});
 }
 
 function firstSubOf(apps){
@@ -632,36 +644,37 @@ function readUrlParams(){
   var sameHost=prev.host===host;
   // 2026-09-27 — a link must not SILENTLY repoint an installed app at another
   // server. The Seerr/Plex tiles, the wake relay and the rescue page all derive
-  // from host/relay/rescue, so a forged `?host=evil&relay=https://evil` turned
-  // a trusted home-screen icon into a Plex-login phishing page with no visible
-  // sign (claude-security candidate on app.js, PWA scan 2026-09-26). First
-  // provisioning and a same-server refresh stay silent (the bookmark case
-  // above); only a CHANGE asks. Refused ⇒ stored config kept, params stripped.
-  var changed=serverChanges(prev,host,p);
-  if(changed.length&&!confirm('Ce lien veut changer le serveur de l’application :\n\n'+
+  // from the stored config, so a forged link turned a trusted home-screen icon
+  // into a Plex-login phishing page with no visible sign (claude-security, PWA
+  // scans 2026-09-26/27). On the SAME host the link is merged into the stored
+  // config — an absent param keeps its value instead of being wiped (F9: a bare
+  // `?host=<same>` used to drop relay/token/mac and hide the wake button). Another
+  // host starts clean. First provisioning and a same-values refresh (the
+  // bookmark case above) stay silent; any CHANGE asks. Refused ⇒ stored config
+  // kept, params stripped.
+  var next={};
+  if(sameHost)Object.keys(prev).forEach(function(k){next[k]=prev[k]});
+  next.host=host;
+  if(p.get('port')||!sameHost)next.port=String(portNum);
+  if(cleaned)next.mac=cleaned;
+  var relay=p.get('relay');if(relay){var cr=cleanRelay(relay);if(validRelay(cr))next.relay=cr;}
+  var token=p.get('token');if(token)next.token=token;
+  var title=p.get('title');if(title)next.title=title;
+  var apps=p.get('apps');if(apps)next.apps=apps;
+  var status=p.get('status');if(status&&validHost(status))next.status=status;
+  var ip=p.get('ip');if(ip&&validIp(ip))next.ip=ip;
+  var win=p.get('window');
+  if(win&&parseWindow(win)){next.window=win;delete next.winSrc;}
+  // v8.50 — admin-only rescue-page link, provisioned via ?rescue= (no settings
+  // field): the URL segment is a secret, typing it in a form would spread it.
+  var rescue=p.get('rescue');if(rescue){var cx=cleanRelay(rescue);if(validRelay(cx))next.rescue=cx;}
+  var changed=serverChanges(prev,next);
+  if(changed.length&&!confirm('Ce lien veut changer la configuration de l’application :\n\n'+
       changed.join('\n')+'\n\nN’acceptez que si ce lien vient de la personne qui gère votre serveur.')){
     try{history.replaceState(null,'',location.pathname);}catch(e){}
     return false;
   }
-  config={host:host,port:String(portNum)};
-  if(cleaned)config.mac=cleaned;
-  var relay=p.get('relay');if(relay){var cr=cleanRelay(relay);if(validRelay(cr))config.relay=cr;}
-  var token=p.get('token');if(token)config.token=token;
-  var title=p.get('title');if(title)config.title=title;
-  var apps=p.get('apps');if(apps)config.apps=apps;
-  var status=p.get('status');if(status&&validHost(status))config.status=status;
-  var ip=p.get('ip');if(ip&&validIp(ip))config.ip=ip;
-  var win=p.get('window');
-  if(win&&parseWindow(win))config.window=win;
-  else if(sameHost&&config.relay&&prev.winSrc==='relay'&&prev.window&&parseWindow(prev.window)){
-    config.window=prev.window;config.winSrc='relay';
-  }
-  // The relay-served boot ETA is what syncs the wake countdown across devices;
-  // rebuilt-from-URL it fell back to the hardcoded default on every desktop open.
-  if(sameHost&&typeof prev.eta==='number')config.eta=prev.eta;
-  // v8.50 — admin-only rescue-page link, provisioned via ?rescue= (no settings
-  // field): the URL segment is a secret, typing it in a form would spread it.
-  var rescue=p.get('rescue');if(rescue){var cr=cleanRelay(rescue);if(validRelay(cr))config.rescue=cr;}
+  config=next;
   storeConfig(config);
   // Strip the provisioning params from the address bar once adopted: the URL
   // carries the relay token in clear, and it would otherwise persist in the

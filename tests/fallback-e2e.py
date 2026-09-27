@@ -176,7 +176,7 @@ def scenario_app_links(p):
 
 
 def scenario_hostile_params_never_reach_the_commands(p):
-    """The page turns ?host= and ?port= into commands the family PASTES into a
+    """The page turns ?host=, ?port= and ?mac= into commands the family PASTES into a
     shell. Found 2026-09-23 (KB PWA/relay audit): neither was validated —
     `port` sits unquoted and `host` inside '…' in the PowerShell line, so a
     crafted link to the real jqh63.github.io page could hand the reader an
@@ -187,13 +187,17 @@ def scenario_hostile_params_never_reach_the_commands(p):
     page = b.new_context().new_page()
     bad_port = quote("9);Write-Host PWNED;(")
     bad_host = quote("x');Write-Host PWNED;('")
-    page.goto(f"{BASE}?mac={MAC}&host={bad_host}&port={bad_port}", wait_until="load")
+    # ?mac= joined them on 2026-09-27 (claude-security scan of this repo):
+    # formatMac() returned an invalid MAC untouched, straight into wakeonlan.
+    bad_mac = quote("x;echo PWNED")
+    page.goto(f"{BASE}?mac={bad_mac}&host={bad_host}&port={bad_port}", wait_until="load")
     ps, cmd = txt(page, "#psLine"), txt(page, "#cmdLine")
     ok = check("a hostile ?port=/?host= never reaches the PowerShell command",
                "PWNED" not in ps, ps[-90:])
     ok &= check("... nor the wakeonlan command", "PWNED" not in cmd, cmd)
     ok &= check("... nor the displayed parameters",
-                "PWNED" not in txt(page, "#paramPort") + txt(page, "#paramHost"))
+                "PWNED" not in txt(page, "#paramPort") + txt(page, "#paramHost")
+                + txt(page, "#paramMac"))
     # Control: valid values survive, or "never PWNED" would pass on a page that
     # ignores its parameters altogether.
     page.goto(f"{BASE}?mac={MAC}&host={HOST}&port=7", wait_until="load")

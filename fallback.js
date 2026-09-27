@@ -10,8 +10,11 @@ if (!/^[A-Za-z0-9.-]{1,253}$/.test(host)) host = '';
 if (!/^\d{1,5}$/.test(port) || +port < 1 || +port > 65535) port = '9';
 if (ip && !/^(\d{1,3}\.){3}\d{1,3}$/.test(ip)) ip = '';
 
+// ?mac= too: an invalid value used to be returned as-is, straight into the
+// wakeonlan line (claude-security, 2026-09-27). Anything but 12 hex digits is
+// dropped like host/port above; cmdLine then falls back to its placeholder.
 function formatMac(m) {
-  if (!m || !/^[0-9a-fA-F]{12}$/.test(m)) return m || '—';
+  if (!m || !/^[0-9a-fA-F]{12}$/.test(m)) return '—';
   return m.match(/.{2}/g).join(':').toUpperCase();
 }
 

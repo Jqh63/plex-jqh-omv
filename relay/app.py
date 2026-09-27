@@ -863,13 +863,24 @@ class HeartbeatReq(BaseModel):
     degraded: bool = False
 
 
+def token_ok(given: str | None, expected: str) -> bool:
+    # Compare BYTES: hmac.compare_digest(str, str) raises TypeError on any
+    # non-ASCII character, so a crafted X-Token used to yield a 500 + traceback
+    # (claude-security F7, 2026-09-27). Header values reach us latin-1 decoded;
+    # utf-8 with surrogateescape encodes any str without raising.
+    if given is None or not expected:
+        return False
+    return hmac.compare_digest(given.encode("utf-8", "surrogateescape"),
+                               expected.encode("utf-8", "surrogateescape"))
+
+
 @app.post("/heartbeat")
 def heartbeat(req: HeartbeatReq, request: Request,
               x_token: str | None = Header(None)):
     global _hb_last_at, _hb_up, _hb_degraded, _wake_pending
     if not HEARTBEAT_TOKEN:
         raise HTTPException(status_code=503, detail="heartbeat not configured")
-    if x_token is None or not hmac.compare_digest(x_token, HEARTBEAT_TOKEN):
+    if not token_ok(x_token, HEARTBEAT_TOKEN):
         logger.warning("heartbeat ip=%s status=401 reason=bad_token", client_ip(request))
         raise HTTPException(status_code=401, detail="bad token")
     now = time.monotonic()
@@ -980,7 +991,7 @@ async def status(request: Request, x_token: str | None = Header(None)):
     # nothing (not even whether STATUS_TARGET_URL is configured). Clients
     # without a token fall back to their direct-home probe (the 401 is an
     # "answered" rejection on the PWA side — relay alive, oracle denied).
-    if x_token is None or not hmac.compare_digest(x_token, SHARED_TOKEN):
+    if not token_ok(x_token, SHARED_TOKEN):
         ip = client_ip(request)
         # Over budget => 429 and NO log line (2026-08-23 audit). The PWA treats
         # any non-ok status the same way (`answered('HTTP '+r.status)` →
@@ -1249,7 +1260,7 @@ def wol(req: WolReq, request: Request, x_token: str = Header(...)):
     # Constant-time comparison defeats timing-based brute-force on the
     # token (a regular `!=` short-circuits on the first byte mismatch
     # and leaks length / prefix information through response timing).
-    if not hmac.compare_digest(x_token, SHARED_TOKEN):
+    if not token_ok(x_token, SHARED_TOKEN):
         logger.warning("wol ip=%s status=401 reason=bad_token", ip)
         raise HTTPException(status_code=401, detail="bad token")
     if req.mac.lower() != ALLOWED_MAC:

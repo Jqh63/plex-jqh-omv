@@ -1,5 +1,20 @@
 {
 	email {$LE_EMAIL}
+
+	# ⚠️ SECURITY — the site's `log` filter below covers ONLY its access log.
+	# When the upstream fails (every relay restart => 502), Caddy writes the
+	# request, headers included, to `http.log.error.log0`, which lands in THIS
+	# default logger — X-Token in clear in journald (claude-security F8,
+	# 2026-09-27, reproduced locally on 2.11.4 before the fix). Same wholesale
+	# delete as the site log; also covers the :80 redirect's access log.
+	log default {
+		format filter {
+			wrap json
+			fields {
+				request>headers delete
+			}
+		}
+	}
 }
 
 {$RELAY_DOMAIN} {

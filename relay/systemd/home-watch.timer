@@ -1,0 +1,11 @@
+[Unit]
+Description=home-watch external monitor — 2 min after boot, then every 5 min
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+RandomizedDelaySec=30
+Persistent=false
+
+[Install]
+WantedBy=timers.target

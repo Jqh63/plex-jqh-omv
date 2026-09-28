@@ -5,13 +5,17 @@
 # Minimal sudoers for the `deploy` user invoked by dispatch.sh:
 # exact verbs, literal paths, no wildcards.
 #
+# Invariant: NOTHING that arrives on stdin is ever run as root. Every install
+# below lands a file that an unprivileged service user runs or reads (app.py
+# as `wol`/`pock`, home-watch.sh as `homewatch`, the Caddyfile as `caddy`).
+# systemd units are NOT installable from here: a unit is root-equivalent
+# (ExecStart, User=, ExecStartPre=+…), so units are installed by the bootstrap
+# scripts from a reviewed copy — an admin gesture, never the deploy key
+# (scan finding F8, 2026-09-27; guarded by relay/tests/test_deploy_channel_privilege.sh).
+#
 # Allowed surface:
-#   - install the 3 staged files to their runtime destinations
-#     (app.py owned wol:wol to match the uvicorn user; the others
-#     root:root mode 0644)
-#   - systemctl daemon-reload (needed when wol-relay.service changes)
-#   - systemctl restart wol-relay
-#   - systemctl reload caddy
+#   - install the staged app / Caddyfile / window to their runtime destinations
+#   - systemctl restart wol-relay / reload caddy
 #   - journalctl read-only tail (--no-pager, fixed args, no glob) on the
 #     two services this VM runs, for the dispatch.sh logs-* subcommands.
 #     wol-relay has 3 pinned depths (100 default / 500 / 3000) because a
@@ -26,11 +30,9 @@
 Cmnd_Alias WOL_RELAY_INSTALL = \
   /usr/bin/install -o wol -g wol -m 0644 /tmp/wol-relay-staging/app.py /opt/wol-relay/app.py, \
   /usr/bin/install -o wol -g wol -m 0644 /tmp/wol-relay-staging/window /opt/wol-relay/window, \
-  /usr/bin/install -m 0644 /tmp/wol-relay-staging/Caddyfile /etc/caddy/Caddyfile, \
-  /usr/bin/install -m 0644 /tmp/wol-relay-staging/wol-relay.service /etc/systemd/system/wol-relay.service
+  /usr/bin/install -m 0644 /tmp/wol-relay-staging/Caddyfile /etc/caddy/Caddyfile
 
 Cmnd_Alias WOL_RELAY_SYSTEMCTL = \
-  /bin/systemctl daemon-reload, \
   /bin/systemctl restart wol-relay, \
   /bin/systemctl reload caddy
 
@@ -50,12 +52,10 @@ Cmnd_Alias WOL_RELAY_LOG_FOOTPRINT = \
   /usr/bin/du -shx /var/log /var/lib/caddy
 
 # home-watch — external homelab monitor (apply-home-watch / logs-home-watch).
-# Same isolation: exact verbs, literal paths, no wildcards. (daemon-reload is
-# already covered by WOL_RELAY_SYSTEMCTL above.)
+# Same isolation: exact verbs, literal paths, no wildcards. The units come
+# from bootstrap-wol-relay.sh (relay/systemd/home-watch.*).
 Cmnd_Alias HOME_WATCH_INSTALL = \
-  /usr/bin/install -o homewatch -g homewatch -m 0755 /tmp/wol-relay-staging/home-watch.sh /opt/home-watch/home-watch.sh, \
-  /usr/bin/install -m 0644 /tmp/wol-relay-staging/home-watch.service /etc/systemd/system/home-watch.service, \
-  /usr/bin/install -m 0644 /tmp/wol-relay-staging/home-watch.timer /etc/systemd/system/home-watch.timer
+  /usr/bin/install -o homewatch -g homewatch -m 0755 /tmp/wol-relay-staging/home-watch.sh /opt/home-watch/home-watch.sh
 
 Cmnd_Alias HOME_WATCH_SYSTEMCTL = \
   /bin/systemctl enable --now home-watch.timer
@@ -64,11 +64,11 @@ Cmnd_Alias HOME_WATCH_LOGS = \
   /usr/bin/journalctl -u home-watch -n 100 --no-pager
 
 # pock-sync — per-app JSON blob store (apply-pock-sync / logs-pock-sync /
-# pock-dump). Same isolation: exact verbs, literal paths, no wildcards.
+# pock-dump). Same isolation: exact verbs, literal paths, no wildcards. The
+# unit comes from the pock repo's sync/bootstrap-pock-sync.sh.
 # The tar dump is read-only by construction (-cf - to stdout, fixed dir).
 Cmnd_Alias POCK_SYNC_INSTALL = \
-  /usr/bin/install -o pock -g pock -m 0644 /tmp/wol-relay-staging/pock-sync-app.py /opt/pock-sync/app.py, \
-  /usr/bin/install -m 0644 /tmp/wol-relay-staging/pock-sync.service /etc/systemd/system/pock-sync.service
+  /usr/bin/install -o pock -g pock -m 0644 /tmp/wol-relay-staging/pock-sync-app.py /opt/pock-sync/app.py
 
 Cmnd_Alias POCK_SYNC_SYSTEMCTL = \
   /bin/systemctl restart pock-sync

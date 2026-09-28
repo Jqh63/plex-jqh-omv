@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # deploy.sh — deploy the relay's code/config to the VM.
 #
-# Pipes the 3 files (app.py, Caddyfile, wol-relay.service) over stdin
-# to the VM-side dispatch.sh, then triggers apply + health.
+# Pipes app.py + Caddyfile over stdin to the VM-side dispatch.sh, then
+# triggers apply + health. wol-relay.service is NOT deployed here: a unit is
+# root-equivalent, so only bootstrap-wol-relay.sh installs it (finding F8).
 #
 # Prerequisites (one-shot, see relay/README.md § *GitOps deploy channel → One-shot bootstrap*):
 #   - SSH key `id_ed25519_wol_relay_deploy` present on the deploying host
@@ -35,9 +36,6 @@ ssh "$ALIAS" push-app < "$REPO_DIR/app.py"
 
 echo "[deploy] push Caddyfile ..."
 ssh "$ALIAS" push-caddyfile < "$REPO_DIR/Caddyfile"
-
-echo "[deploy] push wol-relay.service ..."
-ssh "$ALIAS" push-service < "$REPO_DIR/wol-relay.service"
 
 echo "[deploy] apply ..."
 ssh "$ALIAS" apply

@@ -9,8 +9,7 @@
 # Usage from the deploying host (via SSH alias `wol-relay-deploy`):
 #   ssh wol-relay-deploy push-app          # stdin → /tmp/wol-relay-staging/app.py
 #   ssh wol-relay-deploy push-caddyfile    # stdin → /tmp/wol-relay-staging/Caddyfile
-#   ssh wol-relay-deploy push-service      # stdin → /tmp/wol-relay-staging/wol-relay.service
-#   ssh wol-relay-deploy apply             # install the 3 files + restart services
+#   ssh wol-relay-deploy apply             # install app.py + Caddyfile, restart wol-relay, reload caddy
 #   ssh wol-relay-deploy push-window       # stdin (1 line HH:MM-HH:MM) → staging
 #   ssh wol-relay-deploy apply-window      # install /opt/wol-relay/window (hot, no restart)
 #   ssh wol-relay-deploy status            # systemctl is-active wol-relay caddy
@@ -26,15 +25,14 @@
 #
 # home-watch (external homelab monitor, content pushed in from the private
 # knowledge-base repo — never stored here):
-#   ssh wol-relay-deploy push-home-watch{,-service,-timer}  # stdin → staging
-#   ssh wol-relay-deploy apply-home-watch  # install + enable home-watch.timer
+#   ssh wol-relay-deploy push-home-watch   # stdin → staging (the script only)
+#   ssh wol-relay-deploy apply-home-watch  # install the script + enable home-watch.timer
 #   ssh wol-relay-deploy home-watch-status # timer active + next run (read-only)
 #   ssh wol-relay-deploy logs-home-watch   # journalctl -u home-watch -n 100 (read-only)
 #
 # pock-sync (per-app JSON blob store, code in the public repo Jqh63/pock
 # under sync/ — deployed by that repo's sync/deploy.sh):
 #   ssh wol-relay-deploy push-pock-sync-app      # stdin → staging app.py
-#   ssh wol-relay-deploy push-pock-sync-service  # stdin → staging unit
 #   ssh wol-relay-deploy apply-pock-sync         # install + restart pock-sync
 #   ssh wol-relay-deploy pock-sync-status        # is-active + /pock/health (read-only)
 #   ssh wol-relay-deploy logs-pock-sync          # journalctl -u pock-sync -n 100 (read-only)
@@ -67,14 +65,19 @@
 # pipes the 3 push commands from the local repo, then triggers apply.
 # home-watch is deployed analogously by knowledge-base's deploy-home-watch.sh.
 #
+# systemd units are NOT deployable here (scan finding F8, 2026-09-27): a unit
+# is root-equivalent, so wol-relay.service and home-watch.{service,timer} are
+# installed by bootstrap-wol-relay.sh, pock-sync.service by the pock repo's
+# bootstrap-pock-sync.sh. The former push-*-service routes are kept as no-ops
+# that drain stdin, so a client not yet updated keeps deploying its code.
+#
 # Security by construction:
 #   - Static enum whitelist (no regex, no glob, no free args).
 #   - To extend, edit this file in a reviewed PR.
 #   - Push commands accept stdin but write to /tmp/wol-relay-staging/
 #     (fixed path, outside any sensitive directory).
-#   - apply delegates to sudo with a minimal sudoers file — exact verbs
-#     for the 3 installs + 3 systemctl invocations, nothing else
-#     (see sudoers.deploy).
+#   - apply delegates to sudo with a minimal sudoers file — exact verbs,
+#     and nothing received on stdin ever runs as root (see sudoers.deploy).
 
 set -euo pipefail
 
@@ -102,21 +105,15 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
     cat > "$STAGING_DIR/Caddyfile"
     echo "[push-caddyfile] OK ($(wc -c < "$STAGING_DIR/Caddyfile") bytes)"
     ;;
-  push-service)
-    cat > "$STAGING_DIR/wol-relay.service"
-    echo "[push-service] OK ($(wc -c < "$STAGING_DIR/wol-relay.service") bytes)"
+  push-service|push-home-watch-service|push-home-watch-timer|push-pock-sync-service)
+    # Retired (F8): a unit pushed here ran as root. Drain stdin so the old
+    # client's pipe closes cleanly, stage nothing, and say where units live now.
+    cat > /dev/null
+    echo "[${SSH_ORIGINAL_COMMAND}] IGNORED — systemd units are installed by the bootstrap scripts, not the deploy channel. Update the calling deploy script."
     ;;
   push-home-watch)
     cat > "$STAGING_DIR/home-watch.sh"
     echo "[push-home-watch] OK ($(wc -c < "$STAGING_DIR/home-watch.sh") bytes)"
-    ;;
-  push-home-watch-service)
-    cat > "$STAGING_DIR/home-watch.service"
-    echo "[push-home-watch-service] OK ($(wc -c < "$STAGING_DIR/home-watch.service") bytes)"
-    ;;
-  push-home-watch-timer)
-    cat > "$STAGING_DIR/home-watch.timer"
-    echo "[push-home-watch-timer] OK ($(wc -c < "$STAGING_DIR/home-watch.timer") bytes)"
     ;;
   push-window)
     # Scheduled-uptime window, single line on stdin ("HH:MM-HH:MM" or
@@ -142,8 +139,9 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
     echo "[apply-window] OK — live on next /status poll ($(cat "$STAGING_DIR/window"))"
     ;;
   apply)
-    # Pre-condition: the 3 staged files must exist.
-    for f in app.py Caddyfile wol-relay.service; do
+    # Pre-condition: the 2 staged files must exist. The unit is not part of
+    # the deploy channel (F8) — bootstrap-wol-relay.sh installs it.
+    for f in app.py Caddyfile; do
       if [[ ! -s "$STAGING_DIR/$f" ]]; then
         echo "[apply] FAIL — $STAGING_DIR/$f missing or empty. Run push-* first." >&2
         exit 1
@@ -151,8 +149,6 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
     done
     sudo /usr/bin/install -o wol -g wol -m 0644 "$STAGING_DIR/app.py" /opt/wol-relay/app.py
     sudo /usr/bin/install -m 0644 "$STAGING_DIR/Caddyfile" /etc/caddy/Caddyfile
-    sudo /usr/bin/install -m 0644 "$STAGING_DIR/wol-relay.service" /etc/systemd/system/wol-relay.service
-    sudo /bin/systemctl daemon-reload
     sudo /bin/systemctl restart wol-relay
     sudo /bin/systemctl reload caddy
     echo "[apply] OK — wol-relay restarted, caddy reloaded"
@@ -244,17 +240,13 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
     ;;
   apply-home-watch)
     # home-watch = external homelab monitor (private content pushed via stdin
-    # from the knowledge-base repo). Pre-condition: the 3 staged files exist.
-    for f in home-watch.sh home-watch.service home-watch.timer; do
-      if [[ ! -s "$STAGING_DIR/$f" ]]; then
-        echo "[apply-home-watch] FAIL — $STAGING_DIR/$f missing or empty. Run push-home-watch* first." >&2
-        exit 1
-      fi
-    done
+    # from the knowledge-base repo). Pre-condition: the staged script exists;
+    # its units come from bootstrap-wol-relay.sh (relay/systemd/home-watch.*).
+    if [[ ! -s "$STAGING_DIR/home-watch.sh" ]]; then
+      echo "[apply-home-watch] FAIL — $STAGING_DIR/home-watch.sh missing or empty. Run push-home-watch first." >&2
+      exit 1
+    fi
     sudo /usr/bin/install -o homewatch -g homewatch -m 0755 "$STAGING_DIR/home-watch.sh" /opt/home-watch/home-watch.sh
-    sudo /usr/bin/install -m 0644 "$STAGING_DIR/home-watch.service" /etc/systemd/system/home-watch.service
-    sudo /usr/bin/install -m 0644 "$STAGING_DIR/home-watch.timer" /etc/systemd/system/home-watch.timer
-    sudo /bin/systemctl daemon-reload
     sudo /bin/systemctl enable --now home-watch.timer
     echo "[apply-home-watch] OK — home-watch.timer enabled"
     ;;
@@ -270,22 +262,15 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
     cat > "$STAGING_DIR/pock-sync-app.py"
     echo "[push-pock-sync-app] OK ($(wc -c < "$STAGING_DIR/pock-sync-app.py") bytes)"
     ;;
-  push-pock-sync-service)
-    cat > "$STAGING_DIR/pock-sync.service"
-    echo "[push-pock-sync-service] OK ($(wc -c < "$STAGING_DIR/pock-sync.service") bytes)"
-    ;;
   apply-pock-sync)
     # pock-sync = per-app JSON blob store (code from the public Jqh63/pock
-    # repo, pushed via stdin). Pre-condition: the 2 staged files exist.
-    for f in pock-sync-app.py pock-sync.service; do
-      if [[ ! -s "$STAGING_DIR/$f" ]]; then
-        echo "[apply-pock-sync] FAIL — $STAGING_DIR/$f missing or empty. Run push-pock-sync-* first." >&2
-        exit 1
-      fi
-    done
+    # repo, pushed via stdin). Pre-condition: the staged app exists; the unit
+    # comes from the pock repo's sync/bootstrap-pock-sync.sh.
+    if [[ ! -s "$STAGING_DIR/pock-sync-app.py" ]]; then
+      echo "[apply-pock-sync] FAIL — $STAGING_DIR/pock-sync-app.py missing or empty. Run push-pock-sync-app first." >&2
+      exit 1
+    fi
     sudo /usr/bin/install -o pock -g pock -m 0644 "$STAGING_DIR/pock-sync-app.py" /opt/pock-sync/app.py
-    sudo /usr/bin/install -m 0644 "$STAGING_DIR/pock-sync.service" /etc/systemd/system/pock-sync.service
-    sudo /bin/systemctl daemon-reload
     sudo /bin/systemctl restart pock-sync
     echo "[apply-pock-sync] OK — pock-sync restarted"
     ;;
@@ -432,9 +417,9 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
     ;;
   *)
     echo "dispatch.sh: unknown command '${SSH_ORIGINAL_COMMAND:-}'" >&2
-    echo "Expected: push-app, push-caddyfile, push-service, apply, push-window, apply-window, status, health, logs-wol-relay [500|3000], logs-caddy [500|3000], log-footprint, upgrade-watch, upgrade, upgrade-log," >&2
-    echo "          push-home-watch{,-service,-timer}, apply-home-watch, home-watch-status, logs-home-watch," >&2
-    echo "          push-pock-sync-{app,service}, apply-pock-sync, pock-sync-status, logs-pock-sync, pock-dump," >&2
+    echo "Expected: push-app, push-caddyfile, apply, push-window, apply-window, status, health, logs-wol-relay [500|3000], logs-caddy [500|3000], log-footprint, upgrade-watch, upgrade, upgrade-log," >&2
+    echo "          push-home-watch, apply-home-watch, home-watch-status, logs-home-watch," >&2
+    echo "          push-pock-sync-app, apply-pock-sync, pock-sync-status, logs-pock-sync, pock-dump," >&2
     echo "          pat-receive {daily,weekly}, pat-list, pat-dump-latest," >&2
     echo "          secrets-receive {daily,weekly}, secrets-list, secrets-dump-latest," >&2
     echo "          tunnel-status, tunnel-reap." >&2

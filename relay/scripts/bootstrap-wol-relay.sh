@@ -10,9 +10,14 @@
 #
 # Optional reverse-SSH fallback endpoint: pass a SECOND argument (path to
 # the OMV tunnel public key) to also provision the `omvtunnel` user. That
-# user can ONLY terminate a reverse-listener bound to the VM loopback
-# (127.0.0.1:2222) — no shell, no PTY, no other forward (restrict +
-# permitlisten). It is the VM-side endpoint of the out-of-band SSH fallback
+# user's REVERSE forward is pinned to the VM loopback (127.0.0.1:2222 via
+# permitlisten); no shell, no PTY. ⚠️ LOCAL forwards (-L/-D) are NOT blocked:
+# `restrict`/no-port-forwarding would also kill the -R (see section 8), and
+# permitlisten only bounds -R. So the key can reach VM-loopback services
+# (relay :8000, Caddy admin :2019). Accepted risk, 2026-09-28: the private
+# key is root-only on the home server, whose root already controls every
+# credential this could reach. Revisit if that key ever lives elsewhere.
+# It is the VM-side endpoint of the out-of-band SSH fallback
 # (admin → VM via IAP → tunnel → OMV sshd) decided in knowledge-base ADR
 # 2026-06-05-fallback-ssh-out-of-band-reverse-autossh. Omit the 2nd arg to
 # skip it entirely (backward compatible with the deploy-only bootstrap).

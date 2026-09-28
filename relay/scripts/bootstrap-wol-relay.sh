@@ -130,6 +130,10 @@ echo "[bootstrap] /opt/wol-relay/scripts/upgrade-watch.sh installed"
 # OS_UPGRADE alias in sudoers.deploy.
 install -m 0755 -o root -g root "$SCRIPT_DIR/upgrade-run.sh" /opt/wol-relay/scripts/upgrade-run.sh
 echo "[bootstrap] /opt/wol-relay/scripts/upgrade-run.sh installed"
+# port-audit.sh backs the `port-audit` route: connect() probes as `deploy`,
+# no sudoers entry, nothing to install (bash /dev/tcp + coreutils timeout).
+install -m 0755 -o root -g root "$SCRIPT_DIR/port-audit.sh" /opt/wol-relay/scripts/port-audit.sh
+echo "[bootstrap] /opt/wol-relay/scripts/port-audit.sh installed"
 
 # --- 4. ~deploy/.ssh/authorized_keys --------------------------------------
 install -d -m 0700 -o deploy -g deploy /home/deploy/.ssh

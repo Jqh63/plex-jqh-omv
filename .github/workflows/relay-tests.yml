@@ -28,7 +28,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Python deps
-        run: python3 -m pip install --quiet 'fastapi==0.139.2' 'httpx==0.28.1' 'pytest==9.0.3'
+        run: python3 -m pip install --quiet 'fastapi==0.139.2' 'httpx==0.28.1' 'h2==4.3.0' 'pytest==9.0.3'
 
       - name: Caddy (for the log-redaction bench)
         run: |

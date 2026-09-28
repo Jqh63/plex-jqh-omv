@@ -121,14 +121,15 @@ without flooding. The client-id is charset/length-constrained before logging
 |---|---|---|
 | `app.py` | `/opt/wol-relay/app.py` (owner `wol:wol`) | FastAPI relay. Rate-limits per source IP, validates token + MAC allowlist, audit-logs every attempt, sends 3 magic packets spaced 500 ms apart |
 | `Caddyfile` | `/etc/caddy/Caddyfile` | Reverse proxy + automatic HTTPS via Let's Encrypt + CORS handling on 502 |
-| `wol-relay.service` | `/etc/systemd/system/wol-relay.service` | systemd unit for uvicorn, sandboxed (NoNewPrivileges, ProtectSystem=strict) |
+| `wol-relay.service` | `/etc/systemd/system/wol-relay.service` | systemd unit for uvicorn, sandboxed (NoNewPrivileges, ProtectSystem=strict). Installed by the bootstrap only |
+| `systemd/home-watch.{service,timer}` | `/etc/systemd/system/` | Units of the external home monitor (script pushed from knowledge-base). Installed by the bootstrap only |
 | `wol-relay.env.example` | (template) | FastAPI env file template. Copy to `/etc/wol-relay.env` (mode `0640 root:wol`), fill in real values |
 | `caddy.env.example` | (template) | Caddy env file template. Copy to `/etc/caddy/wol-relay.env` (mode `0640 root:caddy`), fill in real values |
 | `systemd/caddy.service.d/wol-relay.conf` | `/etc/systemd/system/caddy.service.d/wol-relay.conf` | Drop-in that wires `EnvironmentFile=/etc/caddy/wol-relay.env` into the Caddy unit |
 | `scripts/dispatch.sh` | `/opt/wol-relay/scripts/dispatch.sh` (owner `root`, mode 0755) | Forced-command in `~deploy/.ssh/authorized_keys`, routes the SSH GitOps subcommands |
-| `scripts/sudoers.deploy` | `/etc/sudoers.d/deploy` (mode 0440) | Minimal sudoers for the `deploy` user: 3 installs + 3 systemctl verbs, exact paths |
-| `scripts/bootstrap-wol-relay.sh` | (run one-shot) | Installs the `deploy` user, sudoers, dispatch.sh, drop-in, env templates, authorized_keys with forced-command |
-| `scripts/deploy.sh` | (run on the deploying host) | Pipes app.py + Caddyfile + wol-relay.service to the VM and triggers apply + health |
+| `scripts/sudoers.deploy` | `/etc/sudoers.d/deploy` (mode 0440) | Minimal sudoers for the `deploy` user: exact paths, no systemd unit, nothing from stdin runs as root |
+| `scripts/bootstrap-wol-relay.sh` | (run one-shot) | Installs the `deploy` user, sudoers, dispatch.sh, drop-in, systemd units, env templates, authorized_keys with forced-command |
+| `scripts/deploy.sh` | (run on the deploying host) | Pipes app.py + Caddyfile to the VM and triggers apply + health |
 
 ## Configuration model
 
@@ -228,11 +229,19 @@ From the host that holds your SSH key:
 bash relay/scripts/deploy.sh
 ```
 
-The script pipes the 3 files (`app.py`, `Caddyfile`,
-`wol-relay.service`) over stdin to the VM-side `dispatch.sh`, then
-triggers `apply` (install + `systemctl daemon-reload` + `restart
-wol-relay` + `reload caddy`) and a final `health`. Typical duration:
-~5 s.
+The script pipes `app.py` and `Caddyfile` over stdin to the VM-side
+`dispatch.sh`, then triggers `apply` (install + `restart wol-relay` +
+`reload caddy`) and a final `health`. Typical duration: ~5 s.
+
+> ⚠️ **systemd units never go through this channel** (scan finding F8,
+> 2026-09-27). A unit is root-equivalent (`ExecStart`, `User=`,
+> `ExecStartPre=+…`), so letting the deploy key write one made that key root.
+> `wol-relay.service` and `relay/systemd/home-watch.{service,timer}` are
+> installed by `bootstrap-wol-relay.sh` (only a changed unit is rewritten and
+> try-restarted); `pock-sync.service` by the pock repo's
+> `sync/bootstrap-pock-sync.sh`. **A unit change = a bootstrap re-run.** The
+> former `push-*-service` routes are no-ops kept for old clients.
+> Guard: `bash relay/tests/test_deploy_channel_privilege.sh`.
 
 ### Individual subcommands
 
@@ -249,7 +258,6 @@ ssh wol-relay-deploy tunnel-status  # reverse-SSH fallback: listener + sessions 
 ssh wol-relay-deploy tunnel-reap    # free a listener held by a stale session
 ssh wol-relay-deploy push-app < relay/app.py             # stage only
 ssh wol-relay-deploy push-caddyfile < relay/Caddyfile    # stage only
-ssh wol-relay-deploy push-service < relay/wol-relay.service
 ssh wol-relay-deploy apply          # install + restart (run push-* first)
 ssh wol-relay-deploy push-window    # stage uptime window (stdin, one line)
 ssh wol-relay-deploy apply-window   # install /opt/wol-relay/window (hot-reload)
@@ -258,13 +266,13 @@ ssh wol-relay-deploy apply-window   # install /opt/wol-relay/window (hot-reload)
 > ⚠️ **`dispatch.sh` and `sudoers.deploy` are NOT deployed by `deploy.sh`** —
 > they are installed by `bootstrap-wol-relay.sh`, so a new subcommand or sudoers
 > entry (like the `500`/`3000` depths above) needs the bootstrap re-run on the
-> VM, or the file reinstalled by hand (admin, Cloud Shell — idempotent). App /
-> Caddyfile / service changes go through `deploy.sh` as usual. Merging alone
-> changes nothing on the VM.
+> VM, or the file reinstalled by hand (admin, Cloud Shell — idempotent). The
+> same goes for any **systemd unit**. App / Caddyfile changes go through
+> `deploy.sh` as usual. Merging alone changes nothing on the VM.
 
 Security by construction: forced-command `dispatch.sh` on the VM
 (static enum whitelist, no free-form parsing), minimal sudoers
-(3 installs + 3 systemctl verbs, exact paths), fixed staging
+(exact paths; nothing received on stdin ever runs as root), fixed staging
 directory `/tmp/wol-relay-staging/`. No GitHub PAT or secret embedded
 on the VM — files flow over stdin SSH, no `git pull` server-side.
 

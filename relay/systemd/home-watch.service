@@ -1,0 +1,22 @@
+[Unit]
+Description=home-watch — external observation of the home server from the relay VM
+Documentation=https://github.com/Jqh63/plex-jqh-omv/blob/main/relay/scripts/bootstrap-wol-relay.sh
+After=network-online.target
+Wants=network-online.target
+
+# Installed by bootstrap-wol-relay.sh only (a unit is root-equivalent, so it
+# never travels through the deploy channel). The script itself is private and
+# pushed from the knowledge-base repo (push-home-watch / apply-home-watch).
+[Service]
+Type=oneshot
+User=homewatch
+Group=homewatch
+EnvironmentFile=-/etc/home-watch.env
+ExecStart=/opt/home-watch/home-watch.sh
+# Hardening, same pattern as wol-relay.service.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/home-watch
+Nice=10

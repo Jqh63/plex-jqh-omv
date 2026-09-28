@@ -23,6 +23,7 @@
 #   - dispatch.sh
 #   - sudoers.deploy
 #   - ../systemd/caddy.service.d/wol-relay.conf  (Caddy drop-in)
+#   - ../wol-relay.service, ../systemd/home-watch.{service,timer}  (units)
 #   - ../caddy.env.example                       (Caddy vars template)
 #   - ../wol-relay.env.example                   (FastAPI vars template)
 #
@@ -40,6 +41,9 @@
 #     no-agent-forwarding, no-port-forwarding)
 #   - Installs /etc/systemd/system/caddy.service.d/wol-relay.conf
 #     (drop-in for the Caddy unit's EnvironmentFile)
+#   - Installs the wol-relay and home-watch systemd units — the ONLY path
+#     for them: a unit is root-equivalent, so the deploy key cannot push one
+#     (scan finding F8, 2026-09-27). Changed units are try-restarted.
 #   - Seeds /etc/caddy/wol-relay.env.example and /etc/wol-relay.env.example
 #     IF the runtime files don't exist yet (does NOT overwrite)
 #   - Creates /tmp/wol-relay-staging/ (also created by dispatch.sh on
@@ -81,10 +85,11 @@ RELAY_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 DISPATCH_SRC="$SCRIPT_DIR/dispatch.sh"
 SUDOERS_SRC="$SCRIPT_DIR/sudoers.deploy"
 CADDY_DROPIN_SRC="$RELAY_DIR/systemd/caddy.service.d/wol-relay.conf"
+UNIT_SRCS=("$RELAY_DIR/wol-relay.service" "$RELAY_DIR/systemd/home-watch.service" "$RELAY_DIR/systemd/home-watch.timer")
 CADDY_ENV_SRC="$RELAY_DIR/caddy.env.example"
 WOL_ENV_SRC="$RELAY_DIR/wol-relay.env.example"
 
-for f in "$PUBKEY_PATH" "$DISPATCH_SRC" "$SUDOERS_SRC" "$CADDY_DROPIN_SRC" "$CADDY_ENV_SRC" "$WOL_ENV_SRC"; do
+for f in "$PUBKEY_PATH" "$DISPATCH_SRC" "$SUDOERS_SRC" "$CADDY_DROPIN_SRC" "$CADDY_ENV_SRC" "$WOL_ENV_SRC" "${UNIT_SRCS[@]}"; do
   [[ -f "$f" ]] || { echo "ERR: required file missing: $f" >&2; exit 1; }
 done
 
@@ -143,11 +148,33 @@ else
   echo "[bootstrap] authorized_keys installed with forced-command"
 fi
 
-# --- 5. Caddy systemd drop-in ---------------------------------------------
+# --- 5. Caddy systemd drop-in + relay units --------------------------------
 install -d -m 0755 -o root -g root /etc/systemd/system/caddy.service.d
 install -m 0644 -o root -g root "$CADDY_DROPIN_SRC" /etc/systemd/system/caddy.service.d/wol-relay.conf
+echo "[bootstrap] caddy.service.d/wol-relay.conf installed"
+# Units live here, not in the deploy channel: whoever writes a unit runs
+# anything as root (ExecStart, User=, ExecStartPre=+…). Only a unit whose
+# content changed is rewritten and try-restarted, so a rerun is a no-op.
+# (pock-sync.service is installed by the pock repo's bootstrap-pock-sync.sh.)
+CHANGED_UNITS=()
+for src in "${UNIT_SRCS[@]}"; do
+  unit="$(basename "$src")"
+  if cmp -s "$src" "/etc/systemd/system/$unit"; then
+    echo "[bootstrap] $unit unchanged (skip)"
+  else
+    install -m 0644 -o root -g root "$src" "/etc/systemd/system/$unit"
+    CHANGED_UNITS+=("$unit")
+    echo "[bootstrap] $unit installed"
+  fi
+done
 systemctl daemon-reload
-echo "[bootstrap] caddy.service.d/wol-relay.conf installed + daemon-reload done"
+echo "[bootstrap] daemon-reload done"
+# try-restart = only if already running: a first provisioning starts nothing
+# before its env files are filled in.
+for unit in "${CHANGED_UNITS[@]}"; do
+  systemctl try-restart "$unit" && echo "[bootstrap] $unit try-restarted" \
+    || echo "[bootstrap] WARN try-restart $unit failed — check: systemctl status $unit" >&2
+done
 
 # --- 6. Env file templates (seed only if runtime file is missing) ---------
 # FRESH_ENV / FRESH_TUNNEL decide whether the one-shot "Next steps" are printed
@@ -278,10 +305,10 @@ else
 fi
 
 # --- 9. home-watch external monitor prerequisites -------------------------
-# External homelab monitor (content deployed via the dispatch.sh channel from
-# the private knowledge-base repo). This only provisions the runtime context;
-# the script/units + the two secret files (/etc/msmtprc, /etc/home-watch.env)
-# are pushed/edited separately. Idempotent.
+# External homelab monitor (script deployed via the dispatch.sh channel from
+# the private knowledge-base repo; its units are installed in section 5).
+# This only provisions the runtime context; the script + the two secret files
+# (/etc/msmtprc, /etc/home-watch.env) are pushed/edited separately. Idempotent.
 if ! id -u homewatch &>/dev/null; then
   useradd -r -s /usr/sbin/nologin homewatch
   echo "[bootstrap] user 'homewatch' created (system, nologin)"

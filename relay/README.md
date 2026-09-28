@@ -371,11 +371,12 @@ no-port-forwarding).
 ### Re-running the bootstrap on a live VM
 
 Once provisioned, the VM needs **nothing from a workstation** to pick up a new
-`dispatch.sh`, `sudoers.deploy` or hardening drop-in: this repo is public, so it
-fetches its own sources, and both public keys are re-derivable from the
-`authorized_keys` already installed. The script is idempotent and restarts
-neither Caddy nor `wol-relay` (it only reloads sshd, so an admin session
-survives). Run it from an admin shell on the VM:
+`dispatch.sh`, `sudoers.deploy`, systemd unit or hardening drop-in: this repo is
+public, so it fetches its own sources, and both public keys are re-derivable
+from the `authorized_keys` already installed. The script is idempotent: it
+never restarts Caddy, reloads sshd (an admin session survives), and
+`try-restart`s only a unit whose content changed (`wol-relay.service`,
+`home-watch.*`) — an unchanged unit is skipped. Run it from an admin shell on the VM:
 
 ```bash
 ( set -e
@@ -392,6 +393,7 @@ survives). Run it from an admin shell on the VM:
   grep -q '^ssh-ed25519 AAAA' /tmp/t.pub || { echo "tunnel key not extracted — STOP"; exit 1; }
   sudo bash "$BS" /tmp/d.pub /tmp/t.pub
 )
+[ $? -eq 0 ] || echo "FAILED — see the output above; session intact"
 ```
 
 ⚠️ The two `grep -q` guards are **not** decoration. An empty extraction still

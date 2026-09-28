@@ -256,6 +256,7 @@ ssh wol-relay-deploy logs-caddy 3000   # ~35 h — the access log is dense
 ssh wol-relay-deploy log-footprint  # journald size + log dirs + df (read-only)
 ssh wol-relay-deploy tunnel-status  # reverse-SSH fallback: listener + sessions (read-only)
 ssh wol-relay-deploy tunnel-reap    # free a listener held by a stale session
+ssh wol-relay-deploy port-audit <name>.duckdns.org  # TCP ports of the home seen from the Internet (connect(), ~1 min, read-only)
 ssh wol-relay-deploy push-app < relay/app.py             # stage only
 ssh wol-relay-deploy push-caddyfile < relay/Caddyfile    # stage only
 ssh wol-relay-deploy apply          # install + restart (run push-* first)

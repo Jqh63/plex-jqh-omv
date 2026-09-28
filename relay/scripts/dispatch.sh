@@ -22,6 +22,7 @@
 #   ssh wol-relay-deploy upgrade-watch     # pending OS updates + who installs them (read-only)
 #   ssh wol-relay-deploy upgrade           # WRITE: apt update + dist-upgrade, detached, no reboot
 #   ssh wol-relay-deploy upgrade-log       # newest upgrade run log + running/finished (read-only)
+#   ssh wol-relay-deploy port-audit <host>.duckdns.org  # TCP ports of the home seen from the Internet (read-only)
 #
 # home-watch (external homelab monitor, content pushed in from the private
 # knowledge-base repo — never stored here):
@@ -227,6 +228,21 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
     fi
     tail -n 60 "$latest"
     ;;
+  "port-audit "*)
+    # External port inventory of the home server (knowledge-base BACKLOG
+    # "Test de pénétration", network side): this VM is the only observation
+    # point outside the home NAT. The target is the caller's argument because
+    # the home domain never lives in this public repo — so it is validated
+    # HERE, shape-only like push-window: a duckdns.org name made of lowercase
+    # labels, nothing else (no IP, no option, no shell metacharacter can pass).
+    # No sudo: plain connect() probes, see port-audit.sh.
+    target="${SSH_ORIGINAL_COMMAND#port-audit }"
+    if ! [[ "$target" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*\.duckdns\.org$ ]]; then
+      echo "[port-audit] FAIL — want <name>.duckdns.org, got: '$target'" >&2
+      exit 65
+    fi
+    exec /opt/wol-relay/scripts/port-audit.sh "$target"
+    ;;
   log-footprint)
     # Janitorial measurement (read-only): journald size + pinned log dirs +
     # disk headroom. Decides whether the e2-micro needs a journald cap
@@ -417,7 +433,7 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
     ;;
   *)
     echo "dispatch.sh: unknown command '${SSH_ORIGINAL_COMMAND:-}'" >&2
-    echo "Expected: push-app, push-caddyfile, apply, push-window, apply-window, status, health, logs-wol-relay [500|3000], logs-caddy [500|3000], log-footprint, upgrade-watch, upgrade, upgrade-log," >&2
+    echo "Expected: push-app, push-caddyfile, apply, push-window, apply-window, status, health, logs-wol-relay [500|3000], logs-caddy [500|3000], log-footprint, upgrade-watch, upgrade, upgrade-log, port-audit <host>.duckdns.org," >&2
     echo "          push-home-watch, apply-home-watch, home-watch-status, logs-home-watch," >&2
     echo "          push-pock-sync-app, apply-pock-sync, pock-sync-status, logs-pock-sync, pock-dump," >&2
     echo "          pat-receive {daily,weekly}, pat-list, pat-dump-latest," >&2

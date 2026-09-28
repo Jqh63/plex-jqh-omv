@@ -687,9 +687,15 @@ function readUrlParams(){
 // v8.59 — fades the only navigation this app has: out, swap, in. Stays INSTANT
 // on the boot paint and when the source screen is already hidden. `done` runs
 // once the target is up, so a caller can focus a field that is on screen.
-var SCREEN_FADE_MS=180,screensShown=false;
+var SCREEN_FADE_MS=180,screensShown=false,pendingSwitch=null;
 function switchScreen(fromId,toId,done){
   var from=document.getElementById(fromId),to=document.getElementById(toId);
+  // A newer switch cancels a fade still in flight. Without this, Save (fade to
+  // the main screen) followed within 180 ms by showSettings() showed the
+  // settings, then the stale timer fired and hid them again — a blank screen.
+  // Found 2026-09-28 by the overflow probe's positive control, which had been
+  // red since the save→settings sequence entered the bench.
+  if(pendingSwitch){clearTimeout(pendingSwitch);pendingSwitch=null;}
   var swap=function(){
     from.style.display='none';from.classList.remove('leaving');
     to.style.display='flex';
@@ -699,7 +705,8 @@ function switchScreen(fromId,toId,done){
     screensShown=true;swap();to.classList.remove('leaving');if(done)done();return;
   }
   from.classList.add('leaving');
-  setTimeout(function(){
+  pendingSwitch=setTimeout(function(){
+    pendingSwitch=null;
     swap();
     // The reflow between the add and the remove is load-bearing (verified by
     // removing it: the pin goes red at opacity 1) — without it both collapse

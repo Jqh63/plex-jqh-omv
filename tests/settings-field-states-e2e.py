@@ -179,7 +179,8 @@ def run(engine, port):
           const over=[...document.querySelectorAll('.field input,.field label,.hint,button')]
             .filter(e=>e.getBoundingClientRect().right>window.innerWidth+0.5)
             .map(e=>e.id||e.tagName);
-          return {page:document.documentElement.scrollWidth, vw:window.innerWidth, over:over};}"""
+          return {page:document.documentElement.scrollWidth, vw:window.innerWidth, over:over,
+                  shown:document.getElementById('cfgHost').getBoundingClientRect().width>0};}"""
         for w in (256, 280, 300, 320, 360, 412, 1280):
             pg.set_viewport_size({"width": w, "height": 800})
             pg.evaluate(
@@ -187,6 +188,10 @@ def run(engine, port):
                 "relay:'https://wol.exemple.com',winSrc:'relay',window:'13h50-00h10',"
                 "mac:'AABBCCDDEEFF',apps:'seerr,plexweb'};showSettings();}")
             r = pg.evaluate(PROBE)
+            # Guard against a vacuous pass: nothing rendered = nothing overflows.
+            # Until 2026-09-28 a stale screen-switch timer hid the settings here,
+            # and all 7 widths "fit" on an empty screen.
+            check(r["shown"], f"F{w}v settings are actually on screen at {w}px")
             check(r["page"] <= r["vw"] + 0.5 and not r["over"],
                   f"F{w} settings fit at {w}px (page={r['page']} vw={r['vw']} over={r['over']})")
 

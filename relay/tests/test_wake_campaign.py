@@ -27,6 +27,11 @@ def clean_state(monkeypatch):
     relay._campaign_task = None
     relay._wake_failed_at = 0.0
     relay._last_wol_at = 0.0
+    # Reset with _last_wol_at, never without it: a leftover _wake_pending=True
+    # keeps /wol from re-anchoring _last_wol_at unless monotonic() > the 150 s
+    # TTL — true on a long-running box, FALSE on a CI runner booted < 150 s ago
+    # (seconds since boot). The first CI run failed exactly there (2026-09-28).
+    relay._wake_pending = False
     relay._hb_last_at, relay._hb_up, relay._hb_declared_down = 0.0, False, False
     relay._status_cache = relay._StatusCache()
     relay._status_cache.last_state = False

@@ -1,0 +1,58 @@
+name: Relay tests
+
+# The relay's tests (relay/tests/) and the pre-push hook's own bench used to
+# run only when someone remembered to: nothing executed them on a PR. They
+# guard security properties (deploy key not root-equivalent, token redaction
+# in Caddy's error log, port-audit input validation), so a silent regression
+# would ship straight to the VM on the next deploy.sh.
+#
+# Reports, does not block: branch protection is not available on this plan.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  relay:
+    runs-on: ubuntu-latest
+    env:
+      # Same version as the VM (checked 2026-09-27). SHA-512 pinned here, not
+      # fetched from the same release at run time.
+      CADDY_VERSION: 2.11.4
+      CADDY_SHA512: 8220d1f013b6f27510247b2360c9e0ca9f018feebd82515f07635318b34ff9777ccc8fd0b6e6f2486ce3a33fe389fbb7db12d05baa474f4587509fb4f5ebf1c9
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Python deps
+        run: python3 -m pip install --quiet 'fastapi==0.139.2' 'httpx==0.28.1' 'h2==4.3.0' 'pytest==9.0.3'
+
+      - name: Caddy (for the log-redaction bench)
+        run: |
+          f="caddy_${CADDY_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/$f" "https://github.com/caddyserver/caddy/releases/download/v${CADDY_VERSION}/$f"
+          echo "$CADDY_SHA512  $RUNNER_TEMP/$f" | sha512sum -c -
+          tar xzf "$RUNNER_TEMP/$f" -C "$RUNNER_TEMP" caddy
+          echo "CADDY=$RUNNER_TEMP/caddy" >> "$GITHUB_ENV"
+
+      - name: pytest relay/tests
+        run: python3 -m pytest -q relay/tests
+
+      - name: Shell benches
+        run: |
+          rc=0
+          for t in relay/tests/test_*.sh .githooks/test-pre-push.sh; do
+            echo "::group::$t"
+            out="$(bash "$t" 2>&1)"; trc=$?
+            printf '%s\n' "$out"
+            echo "::endgroup::"
+            # A SKIP proves nothing: here every precondition is provided, so
+            # a skipping bench is a failure of this workflow, not a pass.
+            if [ "$trc" -ne 0 ] || grep -q '^SKIP' <<<"$out"; then
+              echo "::error::$t failed or skipped (rc=$trc)"; rc=1
+            fi
+          done
+          exit "$rc"

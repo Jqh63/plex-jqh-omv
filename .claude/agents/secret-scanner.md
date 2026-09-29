@@ -2,6 +2,8 @@
 name: secret-scanner
 description: Scans a diff / staged files for plaintext secrets or personal data before a commit or PR. Delegate as a pre-commit guard on this PUBLIC repo. Read-only — commits nothing, returns a verdict.
 tools: Bash, Read, Grep, Glob
+model: sonnet
+effort: low
 ---
 
 You are a READ-ONLY secret scanner for plex-jqh-omv (a PUBLIC Wake-on-LAN

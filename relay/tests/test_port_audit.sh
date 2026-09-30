@@ -31,7 +31,7 @@ out="$(PORT_AUDIT_ALLOW_PRIVATE=1 PORT_AUDIT_PORTS="$p1 $p2 $p3" bash "$PA" 127.
 grep -qx "OPEN $p1/tcp" <<<"$out" && grep -qx "OPEN $p2/tcp" <<<"$out" && ok "both listeners OPEN" || ko "listeners not OPEN: $out"
 grep -q "OPEN $p3/" <<<"$out" && ko "free port reported OPEN" || ok "free port not OPEN"
 grep -qx "SUMMARY open=2 closed=1 filtered=0 total=3/3" <<<"$out" && ok "summary adds up (2/1/0 of 3)" || ko "summary: $(grep SUMMARY <<<"$out")"
-grep -q -- '-> 127.0.0.x ' <<<"$out" && ! tail -n +2 <<<"$out" | grep -q '127.0.0.1' && ok "target IP masked" || ko "IP not masked"
+grep -q -- '-> 127.0.0.x ' <<<"$out" && ! tail -n +2 <<<"$out" | grep '127.0.0.1' >/dev/null && ok "target IP masked" || ko "IP not masked"
 grep -q '^NOTE UDP' <<<"$out" && ok "UDP blind spot stated" || ko "UDP note missing"
 
 # Filtered = no answer at all. Needs an address that blackholes here; if this

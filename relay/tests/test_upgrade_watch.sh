@@ -11,8 +11,8 @@ SCRIPT="$HERE/../scripts/upgrade-watch.sh"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 fail=0
 ok()  { if [ "$1" = "$2" ]; then echo "  ok   $3"; else echo "  FAIL $3 (want=$1 got=$2)"; fail=1; fi }
-has() { if printf '%s' "$2" | grep -q -- "$1"; then echo "  ok   $3"; else echo "  FAIL $3"; fail=1; fi }
-no()  { if printf '%s' "$2" | grep -q -- "$1"; then echo "  FAIL $3"; fail=1; else echo "  ok   $3"; fi }
+has() { if printf '%s' "$2" | grep -- "$1" >/dev/null; then echo "  ok   $3"; else echo "  FAIL $3"; fail=1; fi }
+no()  { if printf '%s' "$2" | grep -- "$1" >/dev/null; then echo "  FAIL $3"; fail=1; else echo "  ok   $3"; fi }
 
 NOW=1789000000
 

@@ -9,7 +9,7 @@ SCRIPT="$HERE/../scripts/upgrade-run.sh"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 fail=0
 ok()  { if [ "$1" = "$2" ]; then echo "  ok   $3"; else echo "  FAIL $3 (want=$1 got=$2)"; fail=1; fi }
-has() { if printf '%s' "$2" | grep -q -- "$1"; then echo "  ok   $3"; else echo "  FAIL $3"; fail=1; fi }
+has() { if printf '%s' "$2" | grep -- "$1" >/dev/null; then echo "  ok   $3"; else echo "  FAIL $3"; fail=1; fi }
 
 # Fake sudo: records the exact argv, fails on demand per verb.
 cat > "$TMP/fake-sudo" <<'EOF'

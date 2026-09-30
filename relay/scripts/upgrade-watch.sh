@@ -38,7 +38,7 @@ if [ -d "$APT_CONF_DIR" ]; then
   # that glob misses — the bench caught exactly this, reporting a correctly
   # armed VM as unarmed.
   conf="$(cat "$APT_CONF_DIR"/* 2>/dev/null)"
-  if printf '%s' "$conf" | grep -qE 'APT::Periodic::Unattended-Upgrade[^0-9]*1'; then
+  if printf '%s' "$conf" | grep -E 'APT::Periodic::Unattended-Upgrade[^0-9]*1' >/dev/null; then
     armed="yes"
     # Origins are read from apt's RESOLVED configuration, never grepped from
     # the files. Two lessons, both from the live VM: (1) 2026-09-17, a raw grep
@@ -87,7 +87,7 @@ echo
 # A simulated dist-upgrade is the only view that accounts for held packages and
 # dependency resolution. `apt list --upgradable` would over-report.
 sim="$($SIM_CMD 2>/dev/null)"
-if [ -z "$sim" ] || ! printf '%s' "$sim" | grep -q 'upgraded,'; then
+if [ -z "$sim" ] || ! printf '%s' "$sim" | grep 'upgraded,' >/dev/null; then
   echo "COULD NOT MEASURE — '$SIM_CMD' returned nothing usable."
   echo "  → this is NOT 'nothing pending': the measurement itself failed."
   exit 3
@@ -115,8 +115,8 @@ auto="" ; manual="" ; with_origin=0
 while IFS= read -r pkg; do
   [ -z "$pkg" ] && continue
   line="$(printf '%s\n' "$sim" | grep -m1 "^Inst $pkg ")"
-  printf '%s' "$line" | grep -q '(.*:.*)' && with_origin=$((with_origin + 1))
-  if [ "$armed" = "yes" ] && printf '%s' "$line" | grep -qE "$SECURITY_PATTERN"; then
+  printf '%s' "$line" | grep '(.*:.*)' >/dev/null && with_origin=$((with_origin + 1))
+  if [ "$armed" = "yes" ] && printf '%s' "$line" | grep -E "$SECURITY_PATTERN" >/dev/null; then
     auto="$auto $pkg"
   else
     manual="$manual $pkg"

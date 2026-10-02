@@ -22,6 +22,15 @@
 # 2026-06-05-fallback-ssh-out-of-band-reverse-autossh. Omit the 2nd arg to
 # skip it entirely (backward compatible with the deploy-only bootstrap).
 #
+# Optional "jobs" key (3rd argument, knowledge-base BACKLOG finding F7,
+# 2026-10-02): the home server's ROOT backup jobs get their own key, whose
+# forced command is `dispatch.sh jobs` — only pock-dump, pat-receive and
+# secrets-receive. It shares the `deploy` user (same blob directories, so the
+# restore routes keep working) but not the key: the deploy key also lives in
+# the less trusted code-server sandbox, which must not be able to overwrite
+# the off-site backups. Omitted on a re-run, an already installed jobs key is
+# KEPT (re-read from authorized_keys), never silently dropped.
+#
 # Prerequisites: this script and the following files must live in the
 # SAME directory when invoked (the helper resolves them relative to
 # itself):
@@ -64,19 +73,59 @@
 
 set -euo pipefail
 
+# --- authorized_keys rendering (pure functions: sourced by the test bench) ---
+DEPLOY_OPTS='no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty'
+DEPLOY_CMD='/opt/wol-relay/scripts/dispatch.sh'
+
+# Prints the single ed25519 key of a .pub file, or fails. A file holding zero
+# keys (empty extraction) or several (a grep over a multi-line authorized_keys)
+# would otherwise end up in an options line with no key, or two keys glued
+# together — locking the channel out on the VM that must stay reachable.
+read_one_pubkey() { # <path>
+  local keys n
+  keys="$(grep -oE '^(ssh-ed25519|ecdsa-sha2-nistp256|ssh-rsa) [A-Za-z0-9+/=]+' "$1" || true)"
+  n="$(printf '%s' "$keys" | awk 'NF' | wc -l)"
+  if [[ "$n" -ne 1 ]]; then
+    echo "ERR: $1 must hold exactly one public key, found $n" >&2
+    return 1
+  fi
+  printf '%s\n' "$keys"
+}
+
+# Prints the jobs key already installed in <authorized_keys>, if any.
+existing_jobs_key() { # <authorized_keys>
+  [[ -f "$1" ]] || return 0
+  awk -v c="command=\"$DEPLOY_CMD jobs\"," 'index($0, c) == 1' "$1" \
+    | grep -oE '(ssh-ed25519|ecdsa-sha2-nistp256|ssh-rsa) [A-Za-z0-9+/=]+' || true
+}
+
+# Prints the desired ~deploy/.ssh/authorized_keys: the deploy line (full
+# dispatch), then the jobs line when a jobs key is known.
+render_deploy_auth() { # <deploy key> <jobs key or empty>
+  [[ -n "$1" ]] || { echo "ERR: empty deploy key" >&2; return 1; }
+  [[ "$1" != "$2" ]] || { echo "ERR: deploy and jobs keys are identical" >&2; return 1; }
+  printf 'command="%s",%s %s\n' "$DEPLOY_CMD" "$DEPLOY_OPTS" "$1"
+  [[ -z "$2" ]] || printf 'command="%s jobs",%s %s\n' "$DEPLOY_CMD" "$DEPLOY_OPTS" "$2"
+}
+
+[[ -z "${BOOTSTRAP_LIB_ONLY:-}" ]] || return 0 2>/dev/null || exit 0
+
 if [[ $EUID -ne 0 ]]; then
   echo "ERR: this script must run as root (sudo bash ...)." >&2
   exit 1
 fi
 
 if [[ $# -lt 1 ]]; then
-  echo "Usage: sudo bash $0 <path-to-deploy-public-key> [<path-to-omvtunnel-public-key>]" >&2
+  echo "Usage: sudo bash $0 <path-to-deploy-public-key> [<path-to-omvtunnel-public-key> [<path-to-jobs-public-key>]]" >&2
+  echo "       (pass '' as the 2nd argument to set a jobs key without an omvtunnel endpoint)" >&2
   exit 64
 fi
 
 PUBKEY_PATH="$1"
 # Optional 2nd arg: enables the reverse-SSH fallback endpoint (omvtunnel user).
 OMVTUNNEL_PUBKEY_PATH="${2:-}"
+# Optional 3rd arg: the home server's root-jobs key (F7, see header).
+JOBS_PUBKEY_PATH="${3:-}"
 
 # Reverse-tunnel listener exposed on the VM loopback ONLY (jamais 0.0.0.0).
 # Must match the OMV-side `ssh -R 127.0.0.1:2222:127.0.0.1:2222` and the OMV
@@ -103,6 +152,17 @@ if [[ -n "$OMVTUNNEL_PUBKEY_PATH" && ! -f "$OMVTUNNEL_PUBKEY_PATH" ]]; then
   echo "ERR: omvtunnel pubkey path given but not found: $OMVTUNNEL_PUBKEY_PATH" >&2
   exit 1
 fi
+
+if [[ -n "$JOBS_PUBKEY_PATH" && ! -f "$JOBS_PUBKEY_PATH" ]]; then
+  echo "ERR: jobs pubkey path given but not found: $JOBS_PUBKEY_PATH" >&2
+  exit 1
+fi
+
+# Validate every key BEFORE touching the system: a bad key file must abort
+# the run, not leave half a bootstrap behind.
+PUBKEY="$(read_one_pubkey "$PUBKEY_PATH")"
+JOBS_PUBKEY=""
+[[ -z "$JOBS_PUBKEY_PATH" ]] || JOBS_PUBKEY="$(read_one_pubkey "$JOBS_PUBKEY_PATH")"
 
 # --- 1. deploy user --------------------------------------------------------
 if ! id -u deploy >/dev/null 2>&1; then
@@ -142,19 +202,26 @@ echo "[bootstrap] /opt/wol-relay/scripts/port-audit.sh installed"
 
 # --- 4. ~deploy/.ssh/authorized_keys --------------------------------------
 install -d -m 0700 -o deploy -g deploy /home/deploy/.ssh
-PUBKEY=$(cat "$PUBKEY_PATH")
-AUTH_LINE='command="/opt/wol-relay/scripts/dispatch.sh",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty '"$PUBKEY"
 AUTH_FILE=/home/deploy/.ssh/authorized_keys
 
-# Idempotence: if the key is already present with the correct
-# forced-command, skip.
-if [[ -f "$AUTH_FILE" ]] && grep -qF "$PUBKEY" "$AUTH_FILE"; then
+# A jobs key not passed on this run but already installed is kept: dropping it
+# would silently stop every off-site backup of the home server.
+if [[ -z "$JOBS_PUBKEY" ]]; then
+  JOBS_PUBKEY="$(existing_jobs_key "$AUTH_FILE")"
+  [[ -z "$JOBS_PUBKEY" ]] || echo "[bootstrap] jobs key not given — keeping the installed one"
+fi
+AUTH_WANT="$(render_deploy_auth "$PUBKEY" "$JOBS_PUBKEY")"
+
+# Idempotence on the WHOLE content (keys AND options): a changed forced
+# command or a new jobs line is rewritten, an identical file is left alone.
+if [[ -f "$AUTH_FILE" ]] && [[ "$(cat "$AUTH_FILE")" == "$AUTH_WANT" ]]; then
   echo "[bootstrap] authorized_keys already up to date (skip)"
 else
-  echo "$AUTH_LINE" > "$AUTH_FILE"
-  chmod 0600 "$AUTH_FILE"
-  chown deploy:deploy "$AUTH_FILE"
-  echo "[bootstrap] authorized_keys installed with forced-command"
+  printf '%s\n' "$AUTH_WANT" > "$AUTH_FILE.tmp"
+  chmod 0600 "$AUTH_FILE.tmp"
+  chown deploy:deploy "$AUTH_FILE.tmp"
+  mv "$AUTH_FILE.tmp" "$AUTH_FILE"
+  echo "[bootstrap] authorized_keys installed ($(wc -l < "$AUTH_FILE") key(s), forced-command)"
 fi
 
 # --- 5. Caddy systemd drop-in + relay units --------------------------------
@@ -235,7 +302,7 @@ if [[ -n "$OMVTUNNEL_PUBKEY_PATH" ]]; then
   fi
 
   install -d -m 0700 -o omvtunnel -g omvtunnel /home/omvtunnel/.ssh
-  OMVTUNNEL_PUBKEY=$(cat "$OMVTUNNEL_PUBKEY_PATH")
+  OMVTUNNEL_PUBKEY="$(read_one_pubkey "$OMVTUNNEL_PUBKEY_PATH")"
   OMVTUNNEL_LINE='command="/usr/sbin/nologin",no-pty,no-agent-forwarding,no-x11-forwarding,no-user-rc,permitlisten="'"$TUNNEL_LISTEN"'" '"$OMVTUNNEL_PUBKEY"
   OMVTUNNEL_AUTH=/home/omvtunnel/.ssh/authorized_keys
 

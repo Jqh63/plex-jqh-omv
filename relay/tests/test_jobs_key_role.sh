@@ -10,7 +10,8 @@
 # A. dispatch.sh role gate, run for real against a stub sudo:
 #    jobs role admits pock-dump / pat-receive / secrets-receive, refuses
 #    everything else BEFORE any side effect; deploy role unchanged; an unknown
-#    role is refused.
+#    role is refused; the deploy key no longer has the 3 backup verbs (step 3)
+#    but keeps the restore verbs.
 # B. bootstrap rendering (functions sourced with BOOTSTRAP_LIB_ONLY=1):
 #    deploy line unchanged, jobs line carries the role and the same
 #    restrictions, an installed jobs key survives a re-run without the 3rd
@@ -69,9 +70,18 @@ echo 'print(1)' > "$tmp/app.py"
 if run "" push-app < "$tmp/app.py" && grep -q 'push-app\] OK' "$tmp/out"; then
   ok "deploy: push-app still accepted"
 else ko "deploy: push-app refused: $(cat "$tmp/out")"; fi
-if blob | run "" "pat-receive weekly" && ls "$tmp/home/pat-offsite"/pat-weekly-*.age >/dev/null 2>&1; then
-  ok "deploy: pat-receive still accepted (removed only at step 3)"
-else ko "deploy: pat-receive refused: $(cat "$tmp/out")"; fi
+for c in pock-dump "pat-receive daily" "pat-receive weekly" "secrets-receive daily" "secrets-receive weekly"; do
+  blob | run "" "$c"; rc=$?
+  if [ "$rc" -eq 64 ] && [ -z "$(side_effects)" ]; then
+    ok "deploy: '$c' reserved to the jobs key (64), no side effect"
+  else
+    ko "deploy: '$c' rc=$rc side effects: $(side_effects | tr '\n' ' ')"
+  fi
+done
+mkdir -p "$tmp/keep/pat-offsite"; head -c 900 /dev/zero > "$tmp/keep/pat-offsite/pat-daily-x.age"
+if SSH_ORIGINAL_COMMAND=pat-dump-latest HOME="$tmp/keep" PATH="$tmp/bin:$PATH" bash "$tmp/dispatch.sh" >/dev/null 2>&1; then
+  ok "deploy: pat-dump-latest (restore) still accepted"
+else ko "deploy: restore path refused"; fi
 
 run admin status </dev/null; rc=$?
 if [ "$rc" -eq 64 ] && [ -z "$(side_effects)" ]; then ok "unknown role refused (64)"; else ko "unknown role: rc=$rc"; fi

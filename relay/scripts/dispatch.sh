@@ -74,7 +74,8 @@
 #
 # Key roles (knowledge-base BACKLOG finding F7, 2026-10-02). The forced
 # command in authorized_keys passes the role as $1, never the client:
-#   (none)  the deploy key — every route below.
+#   (none)  the deploy key — every route below EXCEPT pock-dump, pat-receive
+#           and secrets-receive (refused since step 3, 2026-10-02).
 #   jobs    the home server's ROOT backup jobs — only pock-dump, pat-receive
 #           and secrets-receive. Same unix user, distinct key: the deploy key
 #           also sits in the home server's code-server sandbox, which must not
@@ -92,7 +93,16 @@ set -euo pipefail
 
 # Role gate — runs before anything else, staging dir included.
 case "${1:-}" in
-  "") ;;
+  "")
+    # Step 3 of F7: the backup verbs belong to the jobs key alone. The restore
+    # verbs (*-dump-latest, *-list) stay here: they only read.
+    case "${SSH_ORIGINAL_COMMAND:-}" in
+      pock-dump|"pat-receive "*|"secrets-receive "*)
+        echo "dispatch.sh: '${SSH_ORIGINAL_COMMAND}' is reserved to the jobs key" >&2
+        exit 64
+        ;;
+    esac
+    ;;
   jobs)
     case "${SSH_ORIGINAL_COMMAND:-}" in
       pock-dump|"pat-receive daily"|"pat-receive weekly"|"secrets-receive daily"|"secrets-receive weekly") ;;

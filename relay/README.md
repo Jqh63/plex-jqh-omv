@@ -312,10 +312,11 @@ ssh wol-relay-deploy push-pock-sync-{app,service}  # stage (stdin)
 ssh wol-relay-deploy apply-pock-sync               # install + restart
 ssh wol-relay-deploy pock-sync-status              # is-active + /pock/health
 ssh wol-relay-deploy logs-pock-sync                # journalctl -n 100
-ssh wol-relay-deploy pock-dump                     # tar of the blobs → stdout
+ssh -i <jobs key> deploy@<vm> pock-dump          # tar of the blobs → stdout (jobs key only)
 ```
 
-`pock-dump` is read-only and pulled daily by the home server, which
+`pock-dump` is read-only and pulled daily by the home server (jobs key, see
+*Jobs key* below), which
 feeds the blobs to its regular backup — the VM is never the sole holder
 of the data. Deploy is driven from the Pock repo's `sync/deploy.sh`.
 
@@ -428,10 +429,11 @@ sudo grep -c 'dispatch.sh jobs"' /home/deploy/.ssh/authorized_keys   # → 1
 ```
 
 Pass `''` as the second argument if the VM has no reverse-SSH endpoint. The
-deploy key keeps every route until the home side has switched its jobs to the
-new key **and** a run of each job has succeeded with it; only then remove the
-three verbs from the deploy role. In the other order, every off-site backup
-stops.
+deploy key no longer carries these three verbs (it keeps the restore verbs
+`*-dump-latest` and `*-list`). Rollout order, if you adopt this on another
+deployment: install the jobs key, switch the home jobs to it, see a run of
+each succeed — and only then deploy this `dispatch.sh`. In the other order,
+every off-site backup stops.
 
 **4. Fill in the real env values on the VM**
 

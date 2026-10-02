@@ -387,7 +387,8 @@ never restarts Caddy, reloads sshd (an admin session survives), and
   curl -fsSL "$URL" | tar xz -C "$SRC"
   BS="$SRC/plex-jqh-omv-main/relay/scripts/bootstrap-wol-relay.sh"
   [ -f "$BS" ] || { echo "bootstrap not found — STOP"; exit 1; }
-  sudo grep -o 'ssh-ed25519 [A-Za-z0-9+/=]*' /home/deploy/.ssh/authorized_keys > /tmp/d.pub
+  AK=/home/deploy/.ssh/authorized_keys
+  sudo grep -v 'dispatch.sh jobs"' "$AK" | grep -o 'ssh-ed25519 [A-Za-z0-9+/=]*' > /tmp/d.pub
   sudo grep -o 'ssh-ed25519 [A-Za-z0-9+/=]*' /home/omvtunnel/.ssh/authorized_keys > /tmp/t.pub
   grep -q '^ssh-ed25519 AAAA' /tmp/d.pub || { echo "deploy key not extracted — STOP"; exit 1; }
   grep -q '^ssh-ed25519 AAAA' /tmp/t.pub || { echo "tunnel key not extracted — STOP"; exit 1; }
@@ -403,6 +404,34 @@ write an `authorized_keys` carrying options but **no key** — locking out the
 job is to be reachable when the home server is not. Never drop them.
 
 Omit the second argument only if this VM has no reverse-SSH endpoint.
+
+The `grep -v 'dispatch.sh jobs"'` keeps the deploy key alone once a jobs key
+(below) is installed — a plain grep would return both keys, which the bootstrap
+now refuses (a key file must hold exactly one key). The jobs key needs no
+argument on a re-run: the bootstrap re-reads it from `authorized_keys` and
+keeps it.
+
+### Jobs key: the home server's root backup jobs (optional, operator-specific)
+
+The deploy key may also sit somewhere less trusted than the jobs that push
+backups (here: a code-server sandbox on the home server). Sharing one key lets
+that place push fake blobs through `pat-receive`/`secrets-receive` and rotate
+the real backups away. A third bootstrap argument installs a **second key** on
+the same `deploy` user, whose forced command is `dispatch.sh jobs`: it admits
+only `pock-dump`, `pat-receive {daily,weekly}` and `secrets-receive
+{daily,weekly}`, and refuses everything else before any side effect.
+
+```bash
+# On the VM, with the jobs public key dropped in /tmp/j.pub (one key):
+sudo bash "$BS" /tmp/d.pub /tmp/t.pub /tmp/j.pub
+sudo grep -c 'dispatch.sh jobs"' /home/deploy/.ssh/authorized_keys   # → 1
+```
+
+Pass `''` as the second argument if the VM has no reverse-SSH endpoint. The
+deploy key keeps every route until the home side has switched its jobs to the
+new key **and** a run of each job has succeeded with it; only then remove the
+three verbs from the deploy role. In the other order, every off-site backup
+stops.
 
 **4. Fill in the real env values on the VM**
 

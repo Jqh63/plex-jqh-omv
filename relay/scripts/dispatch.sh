@@ -72,6 +72,14 @@
 # bootstrap-pock-sync.sh. The former push-*-service routes are kept as no-ops
 # that drain stdin, so a client not yet updated keeps deploying its code.
 #
+# Key roles (knowledge-base BACKLOG finding F7, 2026-10-02). The forced
+# command in authorized_keys passes the role as $1, never the client:
+#   (none)  the deploy key — every route below.
+#   jobs    the home server's ROOT backup jobs — only pock-dump, pat-receive
+#           and secrets-receive. Same unix user, distinct key: the deploy key
+#           also sits in the home server's code-server sandbox, which must not
+#           be able to push fake blobs and rotate the real backups away.
+#
 # Security by construction:
 #   - Static enum whitelist (no regex, no glob, no free args).
 #   - To extend, edit this file in a reviewed PR.
@@ -81,6 +89,25 @@
 #     and nothing received on stdin ever runs as root (see sudoers.deploy).
 
 set -euo pipefail
+
+# Role gate — runs before anything else, staging dir included.
+case "${1:-}" in
+  "") ;;
+  jobs)
+    case "${SSH_ORIGINAL_COMMAND:-}" in
+      pock-dump|"pat-receive daily"|"pat-receive weekly"|"secrets-receive daily"|"secrets-receive weekly") ;;
+      *)
+        echo "dispatch.sh[jobs]: command not allowed for this key: '${SSH_ORIGINAL_COMMAND:-}'" >&2
+        echo "Expected: pock-dump, pat-receive {daily,weekly}, secrets-receive {daily,weekly}." >&2
+        exit 64
+        ;;
+    esac
+    ;;
+  *)
+    echo "dispatch.sh: unknown key role '$1'" >&2
+    exit 64
+    ;;
+esac
 
 STAGING_DIR="/tmp/wol-relay-staging"
 mkdir -p "$STAGING_DIR"

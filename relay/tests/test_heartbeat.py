@@ -18,6 +18,7 @@ def clean_state(monkeypatch):
     relay._bg_refresh_task = None
     relay._consecutive_poll_failures = 0
     relay._hb_times.clear()
+    getattr(relay, "_hb_auth_state", {}).clear()
     relay._campaign_task = None
     relay._wake_pending = False
     relay._last_wol_at = 0.0
@@ -248,3 +249,42 @@ def test_a_missed_beat_on_a_live_home_stays_green(client, monkeypatch):
         body = client.get("/status", headers=ST).json()
         assert body["up"] is True, "a live home must never be painted off"
         time.sleep(0.02)
+
+
+def test_a_single_failed_pull_never_demotes_the_beat(client, monkeypatch):
+    """Negative control for the demotion's `confirmed` claim. Pulls are rare
+    while beats are fresh, so the cache is cold (or its last success is past
+    the stale ceiling) and ONE failed pull already commits last_state=False.
+    That is a single flaky probe, not a confirmed down: the beat must hold."""
+    polls = {"n": 0}
+
+    async def pull_fail_once(background=False):
+        polls["n"] += 1
+        return (polls["n"] > 1), False
+
+    client.post("/heartbeat", json={"up": True}, headers=HB)
+    monkeypatch.setattr(relay, "_poll_home", pull_fail_once)
+    relay._hb_last_at = time.monotonic() - relay.HEARTBEAT_MISS_PROBE_S - 1
+
+    # First read triggers the background pull; the second sees its result.
+    for _ in range(2):
+        body = client.get("/status", headers=ST).json()
+        assert body["up"] is True, "one failed pull is not a confirmed DOWN"
+        time.sleep(0.05)
+    assert polls["n"] == 1
+
+
+def test_rejected_beats_are_capped_and_stop_logging(client, caplog):
+    """The heartbeat token mutes "home down" for everyone: it must not be
+    guessable without limit, and a flood must not write a line per attempt."""
+    import logging
+    bad = {"X-Token": "wrong"}
+    with caplog.at_level(logging.WARNING, logger=relay.logger.name):
+        codes = [client.post("/heartbeat", json={"up": True}, headers=bad).status_code
+                 for _ in range(relay.STATUS_AUTH_MAX_FAILS + 5)]
+    assert codes[: relay.STATUS_AUTH_MAX_FAILS] == [401] * relay.STATUS_AUTH_MAX_FAILS
+    assert set(codes[relay.STATUS_AUTH_MAX_FAILS:]) == {429}
+    lines = [r for r in caplog.records if "heartbeat ip=" in r.getMessage()]
+    assert len(lines) == relay.STATUS_AUTH_MAX_FAILS
+    # Positive control: the legitimate home is not locked out by the flood.
+    assert client.post("/heartbeat", json={"up": True}, headers=HB).status_code == 200

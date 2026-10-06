@@ -121,6 +121,13 @@ esac
 
 STAGING_DIR="/tmp/wol-relay-staging"
 mkdir -p "$STAGING_DIR"
+# /tmp is shared: root installs whatever sits here (sudoers pins the paths), so
+# a directory squatted by another local user would let them swap the files
+# between push and apply. Refuse unless it is ours and not a symlink.
+if [[ -L "$STAGING_DIR" || ! -O "$STAGING_DIR" ]]; then
+  echo "dispatch.sh: $STAGING_DIR is not a directory owned by $(id -un) — refusing" >&2
+  exit 70
+fi
 
 # This VM runs on UTC; the home server it watches — and the admin reading
 # these logs — live in Europe/Paris. journalctl stamps lines in the VM's

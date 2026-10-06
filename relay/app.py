@@ -353,6 +353,8 @@ _rate_state: dict[str, deque] = defaultdict(deque)
 # the flood we are capping would defeat half the purpose.
 STATUS_AUTH_MAX_FAILS = int(os.environ.get("STATUS_AUTH_MAX_FAILS", "10"))
 _status_auth_state: dict[str, deque] = defaultdict(deque)
+# /heartbeat rejections, same budget (a legitimate home never sends a bad token).
+_hb_auth_state: dict[str, deque] = defaultdict(deque)
 
 # Wake-state shared between POST /wol (writer) and GET /status (reader).
 # uvicorn runs a single worker (see wol-relay.service) so a module global is
@@ -577,6 +579,9 @@ def health_deep():
 # the home server).
 _http_client: httpx.AsyncClient | None = None
 _campaign_task: "asyncio.Task | None" = None
+# True once the running campaign has fired all its bursts and is only sitting
+# out the grace period before declaring the wake failed (see _arm_campaign).
+_campaign_in_grace: bool = False
 # Event loop captured at startup: /wol runs sync in a threadpool worker, so
 # arming the campaign task requires call_soon_threadsafe onto this loop.
 _loop: "asyncio.AbstractEventLoop | None" = None
@@ -881,7 +886,13 @@ def heartbeat(req: HeartbeatReq, request: Request,
     if not HEARTBEAT_TOKEN:
         raise HTTPException(status_code=503, detail="heartbeat not configured")
     if not token_ok(x_token, HEARTBEAT_TOKEN):
-        logger.warning("heartbeat ip=%s status=401 reason=bad_token", client_ip(request))
+        # Same treatment as /status: this token mutes the "home down" verdict
+        # for everyone, so it must not be guessable without limit, and an
+        # anonymous flood must not write one journal line per attempt.
+        ip = client_ip(request)
+        if _sliding_window_limited(_hb_auth_state, ip, STATUS_AUTH_MAX_FAILS):
+            raise HTTPException(status_code=429, detail="too many rejected attempts")
+        logger.warning("heartbeat ip=%s status=401 reason=bad_token", ip)
         raise HTTPException(status_code=401, detail="bad token")
     now = time.monotonic()
     # Burst-tolerant global limiter (beats come from ONE home): reject with 429
@@ -1026,7 +1037,12 @@ async def status(request: Request, x_token: str | None = Header(None)):
         # nothing: the beat keeps the floor.
         if _hb_up and (now - _hb_last_at) > HEARTBEAT_MISS_PROBE_S:
             _maybe_background_refresh()
+            # `_consecutive_poll_failures` is the actual confirmation: the
+            # cache can hold False after ONE failure (bootstrap of a cold
+            # cache, or a last success already past the stale ceiling — the
+            # normal case here, since pulls are rare while beats are fresh).
             if (_status_cache.last_state is False
+                    and _consecutive_poll_failures >= STATUS_DOWN_CONFIRM_POLLS
                     and _status_cache.last_poll_at > _hb_last_at
                     and (now - _status_cache.last_poll_at) <= STATUS_CACHE_STALE_S):
                 logger.info(
@@ -1212,6 +1228,8 @@ async def _wake_campaign() -> None:
             logger.warning("wake campaign: dns resolution failed (t+%ds) — burst skipped", t)
     logger.info("wake campaign: exhausted after %d bursts, home still not seen up",
                 len(WOL_CAMPAIGN_DELAYS_S))
+    global _campaign_in_grace
+    _campaign_in_grace = True
     # Exhausting the bursts is NOT yet a failure: the last one fires at +90 s and
     # a J5005 takes ~80 s to serve, so the home may well answer just after. Give
     # it until the wake signal itself expires before saying the wake failed —
@@ -1241,9 +1259,16 @@ async def _wake_campaign() -> None:
 
 def _arm_campaign() -> None:
     # Runs on the event loop (via call_soon_threadsafe from the /wol thread).
-    global _campaign_task
+    global _campaign_task, _campaign_in_grace
     if _campaign_task is not None and not _campaign_task.done():
-        return  # single campaign — concurrent triggers attach to it
+        if not _campaign_in_grace:
+            return  # single campaign — concurrent triggers attach to it
+        # The running campaign has no bursts left and is only waiting to call
+        # the wake failed. Attaching a NEW tap to it would give that tap no
+        # re-sends at all, and let the old deadline re-raise wake_failed a few
+        # seconds after /wol retracted it. Replace it with a fresh campaign.
+        _campaign_task.cancel()
+    _campaign_in_grace = False
     if _home_up_fresh():
         return  # waking an up home arms nothing (packets already sent are a no-op)
     _campaign_task = asyncio.create_task(_wake_campaign())

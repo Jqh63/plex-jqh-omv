@@ -24,6 +24,13 @@
 <!-- MUST stay in <head>: it decides before the first paint whether the install
      banner is part of the centred column (v8.72). -->
 <script src="install-hint.js"></script>
+<!-- preconnect.js MUST run before app.js — it reads the relay URL from
+     ?relay= or localStorage and adds <link rel="preconnect"> so the
+     TCP+TLS handshake starts in parallel with app.js download/parse.
+     Cuts cold-radio first-fetch by ~500-1500 ms (v7.1, 2026-05-27).
+     In <head> (2026-10-06): at the end of <body> it only ran once the
+     parser reached app.js, so the handshake no longer overlapped anything. -->
+<script src="preconnect.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
@@ -404,12 +411,7 @@
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-<!-- preconnect.js MUST run before app.js — it reads the relay URL from
-     ?relay= or localStorage and adds <link rel="preconnect"> so the
-     TCP+TLS handshake starts in parallel with app.js download/parse.
-     Cuts cold-radio first-fetch by ~500-1500 ms (v7.1, 2026-05-27). -->
 <script src="version.js"></script>
-<script src="preconnect.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

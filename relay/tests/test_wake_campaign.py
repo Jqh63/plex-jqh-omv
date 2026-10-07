@@ -187,3 +187,25 @@ def test_failure_signal_expires(clean_state, monkeypatch):
         body = client.get("/status", headers={"X-Token": os.environ["WOL_TOKEN"]}).json()
     # Past the TTL the claim is no longer news about now: the home is just off.
     assert "wake_failed" not in body
+
+
+def test_a_new_tap_during_the_grace_gets_its_own_campaign(clean_state):
+    """A /wol landing after the bursts are exhausted must not attach to the
+    dying campaign: it would get no re-sends, and that campaign's deadline
+    would re-raise wake_failed seconds after the new /wol retracted it."""
+    async def run():
+        relay._arm_campaign()
+        first = relay._campaign_task
+        await asyncio.sleep(relay.WOL_CAMPAIGN_DELAYS_S[-1] + 0.05)  # in the grace
+        assert not first.done()
+        sent_before = len(clean_state)
+        relay._wake_failed_at = 0.0          # what /wol does on a new tap
+        relay._arm_campaign()
+        second = relay._campaign_task
+        assert second is not first, "a tap in the grace must arm a fresh campaign"
+        await asyncio.sleep(0.01)
+        assert first.cancelled()
+        assert relay._wake_failed_at == 0, "the old deadline must not fail the new tap"
+        await second
+        assert len(clean_state) - sent_before == len(relay.WOL_CAMPAIGN_DELAYS_S)
+    asyncio.run(run())

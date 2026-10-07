@@ -16,6 +16,7 @@ BAD = {"X-Token": "t\xe9st-token".encode("latin-1"), "X-Client-Id": b"cid-test"}
 def client():
     from fastapi.testclient import TestClient
     getattr(relay, "_status_auth_state", {}).clear()
+    getattr(relay, "_hb_auth_state", {}).clear()
     relay._rate_state.clear()
     return TestClient(relay.app, raise_server_exceptions=False)
 

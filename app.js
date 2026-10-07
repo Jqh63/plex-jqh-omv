@@ -22,6 +22,7 @@ var relayReachable=true;
 // fail? A server that is off is just off — the button below the card is the
 // answer, whatever the reason. Escalating to "contacte l'administrateur" is
 // warranted exactly when that button has been pressed and did not work.
+var wakeFailed=false;
 // v8.2 — N-consecutive-miss debounce on the relay-DOWN cosmetic only. A relay
 // /status transport failure is most often a slow-but-alive e2-micro (cold
 // burstable CPU spanning more than one 15 s tick) or a last-mile blip, NOT a
@@ -1984,7 +1985,7 @@ function startCountdown(elapsedMs){
   // slower than usual — gives the user information without crying wolf.
   var tick=function(){
     var diff=Math.round((countdownEndsAt-Date.now())/1000);
-    if(isOnline||(!wolSent&&!remoteWaking)){stopCountdown();return;}
+    if(isOnline||(!wolSent&&!remoteWaking)){stopCountdown();return false;}
     var txt;
     // v8.77 — past the "longer than usual" threshold the label used to be a
     // FROZEN string, so a device that adopted a late wake had a widget that
@@ -2002,20 +2003,24 @@ function startCountdown(elapsedMs){
     // ticking label into the status-card subtitle for those devices.
     if(document.getElementById('powerSection').style.display==='none')
       document.getElementById('statusSub').textContent='réveil en cours · '+txt.replace('Réveil… ','').toLowerCase();
+    return true;
   };
-  tick();
   // v8.51 — ticks aligned on countdownEndsAt's whole-second boundaries
   // instead of a free-running 1 s interval: two devices sharing the same
   // anchor now repaint the same remaining-seconds number at the same wall
   // instant (a free-running interval phase added up to ~1 s of perceived
   // cross-device offset). stopCountdown's clearInterval also clears timeouts
   // (shared handle pool), so the existing teardown keeps working.
+  // 2026-10-06 — reschedule only while tick() keeps running: a tick that
+  // stopped the countdown itself (wake state cleared without stopCountdown,
+  // e.g. startApp) used to re-arm anyway, leaving a zombie countdownTimer that
+  // made enterRemoteWaking skip starting the next remote wake's countdown.
   var schedule=function(){
     var d=(countdownEndsAt-Date.now())%1000;
     if(d<=0)d+=1000;
-    countdownTimer=setTimeout(function(){tick();schedule();},d);
+    countdownTimer=setTimeout(function(){if(tick())schedule();},d);
   };
-  schedule();
+  if(tick())schedule();
 }
 function stopCountdown(){
   if(countdownTimer){clearInterval(countdownTimer);countdownTimer=null;}

@@ -159,7 +159,12 @@ echo "  NEEDS A MANUAL GESTURE:         $n_manual${manual:+ —$manual}"
 echo
 
 if [ "$n_manual" -gt 0 ]; then
-  echo "Gesture (admin, from Cloud Shell or IAP SSH on the VM):"
+  # The route comes first: it existed for weeks while this line still sent
+  # the admin through an IAP session for the very same dist-upgrade.
+  echo "Gesture (from the deploy host, no IAP session needed):"
+  echo "  ssh wol-relay-deploy upgrade"
+  echo "  then read the outcome: ssh wol-relay-deploy upgrade-log"
+  echo "Fallback if the deploy channel is down (IAP SSH on the VM):"
   echo "  sudo apt-get update && sudo apt-get dist-upgrade"
   echo
   echo "VERDICT: $n_manual package(s) awaiting a manual gesture"

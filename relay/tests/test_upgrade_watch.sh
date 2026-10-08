@@ -123,4 +123,20 @@ run "$TMP/merged" "$TMP/lists" "sim_none"
 no "label=Debian " "$OUT" "stable origin cancelled by the bootstrap config"
 has "label=Debian-Security" "$OUT" "security origin still active"
 
+echo "case J — REGRESSION: a COMMENTED switch is not an armed VM (2026-10-06 review)"
+mkdir -p "$TMP/commented"
+printf '// APT::Periodic::Unattended-Upgrade "1";\nAPT::Periodic::Update-Package-Lists "1";\n' \
+  > "$TMP/commented/20auto-upgrades"
+run "$TMP/commented" "$TMP/lists" "sim_none"
+has "unattended-upgrades: no" "$OUT" "commented switch read as unarmed"
+
+echo "case K — a later file switching it OFF wins (apt merges, last value counts)"
+mkdir -p "$TMP/offlater"
+printf 'APT::Periodic::Unattended-Upgrade "1";\n' > "$TMP/offlater/20auto-upgrades"
+printf 'APT::Periodic::Unattended-Upgrade "0";\n' > "$TMP/offlater/99off"
+run "$TMP/offlater" "$TMP/lists" "sim_none"
+has "unattended-upgrades: no" "$OUT" "switched off by a later file"
+run "$TMP/armed" "$TMP/lists" "sim_none"
+has "unattended-upgrades: yes" "$OUT" "POSITIVE CONTROL: a plain armed dir is still armed"
+
 [ "$fail" -eq 0 ] && { echo "ALL CASES OK"; exit 0; } || { echo "FAILURES"; exit 1; }

@@ -505,6 +505,27 @@ def rate_limited(ip: str) -> bool:
     return _sliding_window_limited(_rate_state, ip, RATE_LIMIT_MAX_REQ)
 
 
+# /wol 429 log throttle: last logged time per IP (monotonic) + lines dropped since.
+_wol_429_logged: dict[str, float] = {}
+_wol_429_suppressed: dict[str, int] = defaultdict(int)
+
+
+def _note_429(ip: str) -> bool:
+    """True => log this 429 (first for this IP in the current window)."""
+    now = time.monotonic()
+    with _rate_lock:
+        last = _wol_429_logged.get(ip)
+        if last is not None and now - last < RATE_LIMIT_WINDOW_S:
+            _wol_429_suppressed[ip] += 1
+            return False
+        if len(_wol_429_logged) > MAX_TRACKED_IPS:
+            for k in [k for k, t in _wol_429_logged.items() if now - t >= RATE_LIMIT_WINDOW_S]:
+                _wol_429_logged.pop(k, None)
+                _wol_429_suppressed.pop(k, None)
+        _wol_429_logged[ip] = now
+        return True
+
+
 def status_auth_limited(ip: str) -> bool:
     # /status: counts REJECTED attempts only — an authenticated family device
     # polling every 8 s must never be throttled.
@@ -999,15 +1020,16 @@ async def status(request: Request, x_token: str | None = Header(None)):
     # anonymous "is the home up?" info disclosure: before this, anyone who
     # knew the relay domain could read the home's up/down state. Checked
     # BEFORE the config-state branch so an unauthenticated caller learns
-    # nothing (not even whether STATUS_TARGET_URL is configured). Clients
-    # without a token fall back to their direct-home probe (the 401 is an
-    # "answered" rejection on the PWA side — relay alive, oracle denied).
+    # nothing (not even whether STATUS_TARGET_URL is configured). A client
+    # without a valid token gets an "answered" rejection on the PWA side (relay
+    # alive, oracle denied): since v8.65 the card shows "Statut inconnu" — the
+    # former direct-home fallback no longer produces a verdict.
     if not token_ok(x_token, SHARED_TOKEN):
         ip = client_ip(request)
         # Over budget => 429 and NO log line (2026-08-23 audit). The PWA treats
-        # any non-ok status the same way (`answered('HTTP '+r.status)` →
-        # direct-home fallback), so a family device left on a stale token
-        # degrades exactly as it did on 401 — verified in app.js before shipping.
+        # any non-ok status the same way (`answered('HTTP '+r.status)` → unknown
+        # card since v8.65), so a family device left on a stale token degrades
+        # exactly as it did on 401.
         if status_auth_limited(ip):
             raise HTTPException(status_code=429, detail="too many rejected attempts")
         logger.warning("status ip=%s status=401 reason=bad_token", ip)
@@ -1280,7 +1302,12 @@ def _arm_campaign() -> None:
 def wol(req: WolReq, request: Request, x_token: str = Header(...)):
     ip = client_ip(request)
     if rate_limited(ip):
-        logger.warning("wol ip=%s status=429 reason=rate_limit", ip)
+        # One line per IP and window, not per request: a flood we are capping
+        # must not fill the journal it is capped to protect (same reasoning as
+        # /status, 2026-08-23). The count of dropped lines rides on the next one.
+        if _note_429(ip):
+            logger.warning("wol ip=%s status=429 reason=rate_limit suppressed=%d",
+                           ip, _wol_429_suppressed.pop(ip, 0))
         raise HTTPException(status_code=429, detail="rate limited")
     # Constant-time comparison defeats timing-based brute-force on the
     # token (a regular `!=` short-circuits on the first byte mismatch
@@ -1318,4 +1345,7 @@ def wol(req: WolReq, request: Request, x_token: str = Header(...)):
     logger.info("wol ip=%s device=%s cid=%s status=200", ip,
                 device_class(request.headers.get("user-agent")),
                 clean_cid(request.headers.get("x-client-id")))
-    return {"sent": True, "to": target_ip, "port": TARGET_PORT, "repeats": PACKET_REPEATS}
+    # No "to": the resolved target is the home's public IP. No client reads it,
+    # and a reply to a family PWA (or a leaked token) has no reason to carry it
+    # (2026-10-06 review).
+    return {"sent": True, "port": TARGET_PORT, "repeats": PACKET_REPEATS}

@@ -117,5 +117,17 @@ if [ "$(read_one_pubkey "$tmp/one.pub")" = "$KD" ]; then ok "read_one_pubkey: on
 if read_one_pubkey "$tmp/zero.pub" >/dev/null 2>&1; then ko "empty key file accepted (lockout)"; else ok "empty key file refused"; fi
 if read_one_pubkey "$tmp/two.pub" >/dev/null 2>&1; then ko "2-key file accepted (glued keys)"; else ok "2-key file refused (naive grep over a 2-line authorized_keys)"; fi
 
+# omvtunnel line: a stale line holding the SAME key must not count as current.
+af="$(mktemp)"; key='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOmvtunnelTestKey'
+printf 'no-pty %s\n' "$key" > "$af"
+if auth_file_is "$af" "command=\"/usr/sbin/nologin\",no-pty $key"; then
+  ko "omvtunnel: stale options with the same key read as up to date"
+else ok "omvtunnel: stale options are rewritten"; fi
+printf 'command="/usr/sbin/nologin",no-pty %s\n' "$key" > "$af"
+if auth_file_is "$af" "command=\"/usr/sbin/nologin\",no-pty $key"; then
+  ok "omvtunnel: identical line is left alone"
+else ko "omvtunnel: identical line rewritten"; fi
+rm -f "$af"
+
 echo "== $pass ok, $fail fail"
 [ "$fail" -eq 0 ]

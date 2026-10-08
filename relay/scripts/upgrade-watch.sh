@@ -37,8 +37,28 @@ if [ -d "$APT_CONF_DIR" ]; then
   # `APT::Periodic::*` directives live in a file named `20auto-upgrades`, which
   # that glob misses — the bench caught exactly this, reporting a correctly
   # armed VM as unarmed.
-  conf="$(cat "$APT_CONF_DIR"/* 2>/dev/null)"
-  if printf '%s' "$conf" | grep -E 'APT::Periodic::Unattended-Upgrade[^0-9]*1' >/dev/null; then
+  #
+  # The switch itself is resolved like the origins below (2026-10-06 review): a
+  # raw grep read `// APT::Periodic::Unattended-Upgrade "1";` — commented out —
+  # as armed, and `"10"` or a later file setting "0" fooled it too. Without
+  # apt-config, the fallback still skips comment lines and keeps the LAST value.
+  periodic=""
+  if command -v apt-config >/dev/null 2>&1; then
+    aptcfg="$(mktemp)"
+    printf 'Dir::Etc::main "%s";\nDir::Etc::Parts "%s";\n' \
+      "$APT_CONF_DIR/.none" "$APT_CONF_DIR" > "$aptcfg"
+    periodic="$(APT_CONFIG="$aptcfg" apt-config dump 2>/dev/null \
+                | sed -n 's/^APT::Periodic::Unattended-Upgrade "\(.*\)";$/\1/p' | tail -n 1)"
+    rm -f "$aptcfg"
+  else
+    periodic="$(cat "$APT_CONF_DIR"/* 2>/dev/null | grep -vE '^[[:space:]]*(//|#)' \
+                | sed -n 's/.*APT::Periodic::Unattended-Upgrade[[:space:]]*"\([^"]*\)".*/\1/p' | tail -n 1)"
+  fi
+  case "$periodic" in
+    always|[1-9]|[1-9][0-9]*) is_armed=1 ;;
+    *) is_armed=0 ;;
+  esac
+  if [ "$is_armed" = 1 ]; then
     armed="yes"
     # Origins are read from apt's RESOLVED configuration, never grepped from
     # the files. Two lessons, both from the live VM: (1) 2026-09-17, a raw grep

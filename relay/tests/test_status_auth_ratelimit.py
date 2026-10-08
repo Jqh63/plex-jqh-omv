@@ -93,3 +93,19 @@ def test_wol_budget_is_untouched(client):
         client.get("/status", headers=BAD)
     r = client.post("/wol", headers={"X-Token": "wrong"}, json={})
     assert r.status_code != 429
+
+
+def test_wol_429_flood_logs_once_per_window(client, caplog):
+    # /wol counted every request but logged EVERY 429 (2026-10-06 review): a
+    # flood we cap was still written line by line into the journal. One line
+    # per IP and window now, carrying the count of the lines it stands for.
+    getattr(relay, "_wol_429_logged", {}).clear()
+    getattr(relay, "_wol_429_suppressed", {}).clear()
+    hdr = {"X-Token": "wrong-token", "X-Real-IP": "198.51.100.77"}
+    n = relay.RATE_LIMIT_MAX_REQ
+    with caplog.at_level(logging.WARNING, logger=relay.logger.name):
+        codes = [client.post("/wol", json={"mac": "AA:BB:CC:DD:EE:FF"}, headers=hdr).status_code
+                 for _ in range(n + 20)]
+    assert codes[n:] == [429] * 20
+    lines = [r.getMessage() for r in caplog.records if "status=429" in r.getMessage()]
+    assert len(lines) == 1, lines

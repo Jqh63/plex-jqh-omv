@@ -92,6 +92,14 @@ read_one_pubkey() { # <path>
   printf '%s\n' "$keys"
 }
 
+# True when <authorized_keys> holds exactly <line> and nothing else. Matching
+# on the bare key (the former test) kept a stale line forever: a bootstrap
+# that tightens the options (permitlisten, no-user-rc…) never rewrote it
+# (2026-10-06 review).
+auth_file_is() { # <authorized_keys> <expected line>
+  [[ -f "$1" ]] && [[ "$(cat "$1")" == "$2" ]]
+}
+
 # Prints the jobs key already installed in <authorized_keys>, if any.
 existing_jobs_key() { # <authorized_keys>
   [[ -f "$1" ]] || return 0
@@ -306,7 +314,7 @@ if [[ -n "$OMVTUNNEL_PUBKEY_PATH" ]]; then
   OMVTUNNEL_LINE='command="/usr/sbin/nologin",no-pty,no-agent-forwarding,no-x11-forwarding,no-user-rc,permitlisten="'"$TUNNEL_LISTEN"'" '"$OMVTUNNEL_PUBKEY"
   OMVTUNNEL_AUTH=/home/omvtunnel/.ssh/authorized_keys
 
-  if [[ -f "$OMVTUNNEL_AUTH" ]] && grep -qF "$OMVTUNNEL_PUBKEY" "$OMVTUNNEL_AUTH"; then
+  if auth_file_is "$OMVTUNNEL_AUTH" "$OMVTUNNEL_LINE"; then
     echo "[bootstrap] omvtunnel authorized_keys already up to date (skip)"
   else
     echo "$OMVTUNNEL_LINE" > "$OMVTUNNEL_AUTH"

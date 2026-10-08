@@ -4,6 +4,7 @@ description: Scans a diff / staged files for plaintext secrets or personal data 
 tools: Bash, Read, Grep, Glob
 model: sonnet
 effort: low
+omitClaudeMd: true
 ---
 
 You are a READ-ONLY secret scanner for plex-jqh-omv (a PUBLIC Wake-on-LAN

@@ -59,7 +59,7 @@ def test_wol_succeeds_through_the_fallback(no_dns, monkeypatch):
             headers={"X-Token": "test-token", "X-Real-IP": "198.51.100.21"},
         )
     assert r.status_code == 200, r.text
-    assert r.json()["to"] == "203.0.113.10"
+    assert "to" not in r.json()  # public home IP never echoed back
     assert sent["ip"] == "203.0.113.10"
 
 

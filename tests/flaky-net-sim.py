@@ -31,7 +31,7 @@ in mind before trusting any number it prints:
 
   LATENCIES=9.5,0.3,0.3 RUN_S=45 python3 flaky-net-sim.py
 """
-import asyncio, json, os, sys, time
+import asyncio, json, os, re, sys, time
 from datetime import datetime, timedelta
 from urllib.parse import urlparse
 
@@ -47,13 +47,26 @@ CONFIG_HOST, RELAY_HOST = "test.example.com", "r.example.com"
 BASE = "file://" + os.path.abspath(
     os.path.join(os.path.dirname(__file__), os.pardir, "index.html"))
 BASE = os.environ.get("PWA_BASE", BASE)
-ENGINE = os.environ.get("PWA_ENGINES", "chromium")
+ENGINES = [e.strip() for e in os.environ.get("PWA_ENGINES", "chromium").split(",")
+           if e.strip()]
 PAINT_LOG_KEY = "plex-jqh-omv-paints"
 UNKNOWN_LABEL = "Statut inconnu"
 
-# A latency above PROBE_TIMEOUT_MS (8 s) + HOME_FALLBACK_TIMEOUT_MS (5 s) is a
-# MISS from the app's point of view: both legs expire before the body lands.
-MISS, FAST = 14.0, 0.3
+# A MISS must outlast the LARGEST probe budget the app can apply, which is the
+# cold one (COLD_PROBE_TIMEOUT_MS, v8.77). Read from app.js, never hardcoded: a
+# hardcoded 14 s silently stopped being a miss when v8.77 widened the cold
+# budget to 15 s — the positive control went red and, worse, the one-miss pin
+# went green without playing any miss at all.
+def _app_ms(name):
+    src = open(os.path.join(os.path.dirname(__file__), os.pardir, "app.js")).read()
+    m = re.search(r"^var %s=(\d+);" % name, src, re.M)
+    if not m:
+        sys.exit(f"flaky-net-sim: {name} not found in app.js — update the bench")
+    return int(m.group(1)) / 1000
+
+
+PROBE_S, COLD_PROBE_S = _app_ms("PROBE_TIMEOUT_MS"), _app_ms("COLD_PROBE_TIMEOUT_MS")
+MISS, FAST = COLD_PROBE_S + 1.0, 0.3
 
 # name -> (latency tape, run seconds, max seconds of "Statut inconnu" tolerated)
 # The tape repeats. `None` = exploratory, no verdict.
@@ -77,13 +90,13 @@ def window_open():
             f"{(now + timedelta(hours=1)).strftime('%Hh%M')}")
 
 
-async def run(latencies, run_s):
+async def run(engine, latencies, run_s):
     """Play one latency tape and return (served, screen timeline, paint ring)."""
     served, n, t0 = [], [0], [time.time()]
     LATENCIES, RUN_S = latencies, run_s
 
     async with async_playwright() as p:
-        b = await getattr(p, ENGINE).launch()
+        b = await getattr(p, engine).launch()
         ctx = await b.new_context(viewport={"width": 390, "height": 844})
         page = await ctx.new_page()
 
@@ -137,7 +150,8 @@ def report(name, served, seen, ring, run_s):
     print(f"\n=== PROFIL RESEAU JOUE ({len(served)} requetes /status) ===")
     for t, lat in served:
         print(f"  t+{t:>6.1f}s  latence {lat:>5.1f}s" +
-              ("   <-- DEPASSE le budget client 8 s" if lat > 8 else ""))
+              ("   <-- DEPASSE tout budget client (raté)" if lat > COLD_PROBE_S else
+               f"   <-- depasse le budget chaud {PROBE_S:g} s" if lat > PROBE_S else ""))
 
     print(f"\n=== CE QUE L'ECRAN A MONTRE ({len(seen)} etat(s) en {run_s}s) ===")
     tot = {}
@@ -162,33 +176,35 @@ async def main():
     if os.environ.get("LATENCIES"):
         lat = [float(x) for x in os.environ["LATENCIES"].split(",")]
         run_s = int(os.environ.get("RUN_S", "150"))
-        report("exploration", *(await run(lat, run_s)), run_s)
+        for engine in ENGINES:
+            report(f"exploration [{engine}]", *(await run(engine, lat, run_s)), run_s)
         return 0
 
     fails = []
-    for name, lat, run_s, max_unknown_s in SCENARIOS:
-        print(f"\n{'='*72}\n### {name}\n{'='*72}")
-        served, seen, ring = await run(lat, run_s)
-        tot = report(name, served, seen, ring, run_s)
-        unknown_s = tot.get(UNKNOWN_LABEL, 0.0)
-        if max_unknown_s is None:
-            # Positive control: this one MUST reach unknown, or the pins above
-            # are satisfied by an app that never says "I don't know".
-            ok = unknown_s > 0
-            print(f"\n  [{'PASS' if ok else 'FAIL'}] controle positif — "
-                  f"{UNKNOWN_LABEL!r} attendu, vu {unknown_s:.1f}s")
-        else:
-            ok = unknown_s <= max_unknown_s
-            print(f"\n  [{'PASS' if ok else 'FAIL'}] {UNKNOWN_LABEL!r} "
-                  f"{unknown_s:.1f}s (budget {max_unknown_s:.1f}s)")
-        if not ok:
-            fails.append(name)
+    for engine in ENGINES:
+        for name, lat, run_s, max_unknown_s in SCENARIOS:
+            print(f"\n{'='*72}\n### {name} [{engine}]\n{'='*72}")
+            served, seen, ring = await run(engine, lat, run_s)
+            tot = report(name, served, seen, ring, run_s)
+            unknown_s = tot.get(UNKNOWN_LABEL, 0.0)
+            if max_unknown_s is None:
+                # Positive control: this one MUST reach unknown, or the pins above
+                # are satisfied by an app that never says "I don't know".
+                ok = unknown_s > 0
+                print(f"\n  [{'PASS' if ok else 'FAIL'}] controle positif — "
+                      f"{UNKNOWN_LABEL!r} attendu, vu {unknown_s:.1f}s")
+            else:
+                ok = unknown_s <= max_unknown_s
+                print(f"\n  [{'PASS' if ok else 'FAIL'}] {UNKNOWN_LABEL!r} "
+                      f"{unknown_s:.1f}s (budget {max_unknown_s:.1f}s)")
+            if not ok:
+                fails.append(f"{name} [{engine}]")
 
     print(f"\n{'='*72}")
     if fails:
-        print(f"FAIL ({len(fails)}/{len(SCENARIOS)}) : " + ", ".join(fails))
+        print(f"FAIL ({len(fails)}/{len(SCENARIOS) * len(ENGINES)}) : " + ", ".join(fails))
         return 1
-    print(f"ALL PASS ({len(SCENARIOS)} scenarios)")
+    print(f"ALL PASS ({len(SCENARIOS)} scenarios x {len(ENGINES)} engine(s))")
     return 0
 
 

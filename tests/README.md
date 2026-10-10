@@ -165,7 +165,7 @@ for t in layout-stability tile-crossfade screen-fade a11y; do
 done
 python3 tests/mobile-text-shots.py
 python3 tests/fallback-e2e.py
-python3 tests/flaky-net-sim.py   # latency-only tape; LATENCIES=9.5,0.3 RUN_S=45 to explore
+python3 tests/flaky-net-sim.py   # latency-only tape (PWA_ENGINES=chromium,webkit OK); LATENCIES=9.5,0.3 RUN_S=45 to explore
 ( cd relay && python3 -m pytest -q )
 ```
 

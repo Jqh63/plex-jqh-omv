@@ -107,7 +107,8 @@ upgrade_one() {  # prints its own lines; returns 0 DONE / 1 FAILED / 2 ROLLED BA
   # pip tooling first (not a dependency of the requirements, so eager never
   # moves it: pip 23 left in pock-sync, 2026-10-31). Non-fatal: the freeze
   # excludes it, a failure here leaves the old tooling and goes on.
-  pip_as "$v" install --upgrade --only-binary=:all: pip setuptools wheel \
+  pip_as "$v" install --upgrade --upgrade-strategy eager --only-binary=:all: \
+    pip setuptools wheel \
     || echo "WARN: pip tooling upgrade failed — kept the installed one"
   # eager: transitive deps too — the default (only-if-needed) left them behind
   # for good (starlette 1.1 vs 1.10 right after an upgrade, 2026-10-31).

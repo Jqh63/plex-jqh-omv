@@ -104,7 +104,10 @@ upgrade_one() {  # prints its own lines; returns 0 DONE / 1 FAILED / 2 ROLLED BA
   $CHOWN "$(owner "$v"):$(owner "$v")" "$(venv_dir "$v")" || { echo "FAILED: chown"; return 1; }
   pip_as "$v" freeze > "$freeze" || { echo "FAILED: freeze"; return 1; }
   echo "before: $(tr '\n' ' ' < "$freeze")"
-  if ! pip_as "$v" install --upgrade --only-binary=:all: -r /dev/stdin < "$req"; then
+  # eager: transitive deps too — the default (only-if-needed) left them behind
+  # for good (starlette 1.1 vs 1.10 right after an upgrade, 2026-10-31).
+  if ! pip_as "$v" install --upgrade --upgrade-strategy eager --only-binary=:all: \
+      -r /dev/stdin < "$req"; then
     echo "pip install failed — restoring the freeze"
     pip_as "$v" install --only-binary=:all: -r /dev/stdin < "$freeze" \
       || echo "WARN: freeze reinstall failed too"

@@ -42,7 +42,8 @@ case "\$*" in
     echo "WARNING: The directory '/home/x/.cache/pip' is not owned by the current user" >&2
     [ -s "\$S/outdated" ] && printf 'Package Version Latest Type\n------- ------- ------ -----\n'
     cat "\$S/outdated" ;;
-  "install --upgrade --only-binary=:all: -r /dev/stdin")
+  # eager: transitive deps too (only-if-needed left starlette 1.1 vs 1.10).
+  "install --upgrade --upgrade-strategy eager --only-binary=:all: -r /dev/stdin")
     cat > "\$S/asked"; [ -e "\$S/pip-fails" ] && exit 1; cp "\$S/new" "\$S/installed" ;;
   "install --only-binary=:all: -r /dev/stdin") cat > "\$S/installed" ;;
   *) echo "unexpected pip argv: \$*" >&2; exit 99 ;;

@@ -42,6 +42,8 @@ case "\$*" in
     echo "WARNING: The directory '/home/x/.cache/pip' is not owned by the current user" >&2
     [ -s "\$S/outdated" ] && printf 'Package Version Latest Type\n------- ------- ------ -----\n'
     cat "\$S/outdated" ;;
+  "install --upgrade --only-binary=:all: pip setuptools wheel")
+    [ -e "\$S/tooling-fails" ] && exit 1; echo tooling >> "\$S/tooling" ;;
   # eager: transitive deps too (only-if-needed left starlette 1.1 vs 1.10).
   "install --upgrade --upgrade-strategy eager --only-binary=:all: -r /dev/stdin")
     cat > "\$S/asked"; [ -e "\$S/pip-fails" ] && exit 1; cp "\$S/new" "\$S/installed" ;;
@@ -95,6 +97,15 @@ has "^as wol$" "$CALLS" "pip runs as wol"
 has "^as pock$" "$CALLS" "pip runs as pock"
 hasnt "^as root$" "$CALLS" "pip never runs as root"
 hasnt "unexpected pip argv" "$(cat "$TMP/a/stdout")" "every pip argv is an expected one"
+
+first="$(grep -n -E '^install --upgrade (--only-binary=:all: pip|--upgrade-strategy)' "$TMP/a/calls" | head -1)"
+has "pip setuptools wheel" "$first" "pip tooling upgraded, before the requirements"
+
+echo "case A2 — tooling upgrade fails: WARN, venvs still DONE"
+setup "$TMP/a2"; touch "$TMP/a2/st/wol-relay/tooling-fails"; run "$TMP/a2" upgrade
+ok 0 "$RC" "exit 0"
+has "WARN: pip tooling upgrade failed" "$OUT" "warns"
+has "venvs: wol-relay=DONE pock-sync=DONE" "$OUT" "both venvs DONE"
 
 echo "case B — pip install fails: freeze restored, FAILED, other venv still upgraded"
 setup "$TMP/b"; touch "$TMP/b/st/wol-relay/pip-fails"; run "$TMP/b" upgrade

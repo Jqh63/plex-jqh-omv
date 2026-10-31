@@ -13,8 +13,13 @@
 <style>
   :root {
     --bg:#0c0e14; --surface:#161a25; --surface-hover:#1c2130;
-    --border:#252a3a; --text:#e4e6ef; --text-dim:#6b7194;
+    --border:#252a3a; --text:#e4e6ef; --text-dim:#8388a5;
     --accent:#7c6aef; --accent-glow:rgba(124,106,239,.25);
+    /* 2026-10-31 — WCAG AA (tests/contrast-e2e.py): --text-dim was #6b7194
+       (3.6:1 on surface); --accent is kept for fills and rings, text uses
+       --accent-text (>= 4.6:1 on bg, surface and surface-hover). */
+    --accent-text:#8a7af2; --accent-fill:#6b58e0;
+    color-scheme:dark;
     --green:#34d399; --orange:#fbbf24;
   }
   *{margin:0;padding:0;box-sizing:border-box}
@@ -38,7 +43,7 @@
   header p{font-size:14px;color:var(--text-dim);max-width:42ch;margin:0 auto}
 
   .params{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:16px}
-  .params h2{font-size:14px;font-weight:600;color:var(--accent);margin-bottom:10px;display:flex;align-items:center;gap:8px}
+  .params h2{font-size:14px;font-weight:600;color:var(--accent-text);margin-bottom:10px;display:flex;align-items:center;gap:8px}
   .params h2::before{content:'';width:6px;height:6px;border-radius:50%;background:var(--accent);box-shadow:0 0 8px var(--accent)}
   .params .params-hint{font-size:12px;color:var(--text-dim);margin-bottom:12px}
   .params-list{display:flex;flex-direction:column;gap:8px}
@@ -91,10 +96,9 @@
   details code:not(pre code){background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:1px 6px;font-size:12px;font-family:'JetBrains Mono',monospace}
 
   footer{margin-top:8px;display:flex;align-items:center;justify-content:space-between;font-size:12px;color:var(--text-dim);font-family:'JetBrains Mono',monospace}
-  footer a{color:var(--accent);text-decoration:none;display:inline-flex;align-items:center;gap:6px}
+  footer a{color:var(--accent-text);text-decoration:none;display:inline-flex;align-items:center;gap:6px}
   footer a:active{opacity:.7}
-  footer .version{opacity:.5}
-
+  
   .note{font-size:12px;color:var(--text-dim);padding:12px 14px;background:rgba(124,106,239,.06);border:1px solid rgba(124,106,239,.2);border-radius:10px}
 </style>
 </head>

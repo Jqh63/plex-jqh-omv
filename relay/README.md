@@ -543,6 +543,31 @@ Bench: `bash relay/tests/test_upgrade_watch.sh` — healthy states first (armed
 and idle, pending but fully covered), because this detector will spend its life
 on a VM where nothing is pending, and that is where a wrong verdict slips in.
 
+### Python venvs — `venv-versions` / `venv-upgrade`
+
+`/opt/wol-relay/venv` and `/opt/pock-sync/venv` were installed once, unpinned,
+and never revisited: `unattended-upgrades` does not touch pip, and no route
+showed their versions. Three routes, backed by `scripts/venv-run.sh`:
+
+- **`venv-versions`** (read-only) — Python version, installed packages and what
+  PyPI has newer, per venv. `0` up to date · `2` updates available · `3` could
+  not measure (PyPI unreachable, venv missing).
+- **`venv-upgrade`** (write, detached) — per venv: freeze, install
+  `scripts/requirements-<venv>.txt` to the latest wheels, restart the service,
+  health check; a KO rolls back to the freeze and restarts again. Read the
+  outcome with **`venv-upgrade-log`** (before/after versions, per-venv verdict).
+
+**Privilege**: `venv-run.sh` is root-owned and reached through two argvs pinned
+in `sudoers.deploy` (`report`, `upgrade`), no free argument. Root only chowns
+each venv to its service user, restarts the two services and writes
+`/var/log/venv-run/`. **pip always runs as the service user** (`wol`, `pock`)
+that already executes that venv — a poisoned package gains nothing the service
+did not have — and `--only-binary=:all:` means no `setup.py` ever runs. Its
+inputs (the requirements files) are installed root-owned by the bootstrap,
+never staged by the deploy key.
+
+Bench: `bash relay/tests/test_venv_run.sh`.
+
 ## Initial VM provisioning (recovery from zero)
 
 This section covers building a fresh VM from scratch. Skip it if you

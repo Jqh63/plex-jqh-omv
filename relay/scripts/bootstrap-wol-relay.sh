@@ -50,6 +50,7 @@
 #   - Creates user `deploy` (login shell /bin/bash, home /home/deploy)
 #   - Installs /etc/sudoers.d/deploy (mode 0440, validated by visudo)
 #   - Installs /opt/wol-relay/scripts/dispatch.sh (mode 0755, owner root)
+#   - Installs venv-run.sh + requirements-*.txt (root-owned; routes venv-*)
 #   - Installs ~deploy/.ssh/authorized_keys with forced-command pointing
 #     to dispatch.sh + hardening flags (no-pty, no-X11-forwarding,
 #     no-agent-forwarding, no-port-forwarding)
@@ -207,6 +208,15 @@ echo "[bootstrap] /opt/wol-relay/scripts/upgrade-run.sh installed"
 # no sudoers entry, nothing to install (bash /dev/tcp + coreutils timeout).
 install -m 0755 -o root -g root "$SCRIPT_DIR/port-audit.sh" /opt/wol-relay/scripts/port-audit.sh
 echo "[bootstrap] /opt/wol-relay/scripts/port-audit.sh installed"
+
+# venv-run.sh backs venv-versions/venv-upgrade (pinned VENV_RUN alias). Its
+# requirements files are inputs of a root script: root-owned, never staged.
+install -m 0755 -o root -g root "$SCRIPT_DIR/venv-run.sh" /opt/wol-relay/scripts/venv-run.sh
+install -m 0644 -o root -g root "$SCRIPT_DIR/requirements-wol-relay.txt" /opt/wol-relay/scripts/requirements-wol-relay.txt
+install -m 0644 -o root -g root "$SCRIPT_DIR/requirements-pock-sync.txt" /opt/wol-relay/scripts/requirements-pock-sync.txt
+install -d -m 0755 -o root -g root /var/log/venv-run
+install -d -m 0700 -o root -g root /var/lib/venv-run
+echo "[bootstrap] /opt/wol-relay/scripts/venv-run.sh + requirements installed"
 
 # --- 4. ~deploy/.ssh/authorized_keys --------------------------------------
 install -d -m 0700 -o deploy -g deploy /home/deploy/.ssh

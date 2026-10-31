@@ -155,7 +155,7 @@ def main():
                }""")
         results.append(check("the promotion still reads as an alarm",
                              style["fs"] >= 13 and style["op"] > 0.95
-                             and style["col"] != "rgb(107, 113, 148)",
+                             and style["col"] != "rgb(131, 136, 165)",
                              f"style={style}"))
 
         # --- pin 5: the controls still fit a small phone ------------------

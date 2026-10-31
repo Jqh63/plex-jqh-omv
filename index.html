@@ -36,8 +36,13 @@
 <style>
   :root {
     --bg:#0c0e14; --surface:#161a25; --surface-hover:#1c2130;
-    --border:#252a3a; --text:#e4e6ef; --text-dim:#6b7194;
+    --border:#252a3a; --text:#e4e6ef; --text-dim:#8388a5;
     --accent:#7c6aef; --accent-glow:rgba(124,106,239,.25);
+    /* 2026-10-31 — WCAG AA (tests/contrast-e2e.py): --text-dim was #6b7194
+       (3.6:1 on surface); --accent is kept for fills and rings, text uses
+       --accent-text (>= 4.6:1 on bg, surface and surface-hover). */
+    --accent-text:#8a7af2; --accent-fill:#6b58e0;
+    color-scheme:dark;
     --green:#34d399; --green-glow:rgba(52,211,153,.25);
     --red:#f87171; --red-glow:rgba(248,113,113,.2); --orange:#fbbf24;
     --sleep:#7c9fd4; --sleep-glow:rgba(124,159,212,.18);
@@ -90,13 +95,13 @@
      colours poorly. States where the app knows something and a tap helps are
      solid, glowing cards; the one state where it knows nothing and no tap can
      help is a hollow one — dashed, unlit, dimmed, and its button is hidden. */
-  .status-card.nonet{border-color:var(--border);border-style:dashed;box-shadow:none;opacity:.6}
+  .status-card.nonet{border-color:var(--border);border-style:dashed;box-shadow:none}
   /* v8.65 — "Statut inconnu": the relay (our only authenticable oracle) went
      silent. Same unlit/dashed FORM as .nonet on purpose — a card that claims
      nothing must not read as a colour verdict — but its own class, so the
      tests (and the next reader) can tell "the phone has no network" apart from
      "we could not ask". */
-  .status-card.unknown{border-color:var(--border);border-style:dashed;box-shadow:none;opacity:.6}
+  .status-card.unknown{border-color:var(--border);border-style:dashed;box-shadow:none}
   .status-left{display:flex;align-items:center;gap:14px;flex:1;min-width:0}
   .status-dot{width:12px;height:12px;border-radius:50%;background:var(--text-dim);transition:background .4s,box-shadow .4s;flex-shrink:0}
   .status-dot.online{background:var(--green);box-shadow:0 0 8px var(--green)}
@@ -148,7 +153,7 @@
   .status-text.swapping{opacity:0}
   .status-label{font-size:15px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .status-sub{font-size:12px;color:var(--text-dim);font-family:'JetBrains Mono',monospace;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .status-age{font-size:10px;color:var(--text-dim);opacity:.55;font-family:'JetBrains Mono',monospace;margin-top:2px;white-space:nowrap}
+  .status-age{font-size:10px;color:var(--text-dim);font-family:'JetBrains Mono',monospace;margin-top:2px;white-space:nowrap}
 
   /* Very narrow viewports (2026-07-28). Android's *display size* setting divides
      the CSS width (~/1.3 on "très grand"), so a 360 px phone renders at ~277 px —
@@ -213,8 +218,8 @@
      failed wake) used to grow it by 6,5 px — bigger font AND a margin flip from
      -4 to 6 — shifting the whole list of app links below it. The box now
      reserves the promoted height at all times; only the type and colour change. */
-  .fallback-link{font-size:11px;color:var(--text-dim);text-align:center;margin-top:2px;min-height:20px;line-height:20px;opacity:.55;font-family:'JetBrains Mono',monospace;transition:opacity .3s,font-size .3s}
-  .fallback-link a{color:var(--text-dim);text-decoration:underline;text-decoration-color:rgba(107,113,148,.4);text-underline-offset:3px}
+  .fallback-link{font-size:11px;color:var(--text-dim);text-align:center;margin-top:2px;min-height:20px;line-height:20px;font-family:'JetBrains Mono',monospace;transition:opacity .3s,font-size .3s}
+  .fallback-link a{color:var(--text-dim);text-decoration:underline;text-decoration-color:rgba(131,136,165,.4);text-underline-offset:3px}
   .fallback-link a:active{opacity:1}
   .fallback-link.promoted{font-size:13px;opacity:1;font-family:'DM Sans',sans-serif}
   .fallback-link.promoted a{color:var(--red);text-decoration-color:rgba(248,113,113,.6);font-weight:500}
@@ -227,16 +232,16 @@
   .link-btn.server-dependent.offline{opacity:.5}
   .link-btn.server-dependent.offline .link-icon{filter:grayscale(.6)}
   .link-icon{width:36px;height:36px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0}
-  .link-icon.seerr{background:rgba(124,106,239,.15);color:var(--accent)}
+  .link-icon.seerr{background:rgba(124,106,239,.15);color:var(--accent-text)}
   .link-icon.plex{background:rgba(229,167,58,.15);color:#e5a73a}
-  .link-icon.cfg{background:rgba(107,113,148,.15);color:var(--text-dim)}
+  .link-icon.cfg{background:rgba(131,136,165,.15);color:var(--text-dim)}
   .link-text{line-height:1.3}
   .link-sub{font-size:11px;color:var(--text-dim);font-family:'JetBrains Mono',monospace}
 
   .toast{position:fixed;bottom:max(24px,env(safe-area-inset-bottom,24px));left:50%;transform:translateX(-50%) translateY(80px);background:var(--surface);border:1px solid var(--green);border-radius:12px;padding:12px 20px;font-size:13px;color:var(--green);box-shadow:0 8px 32px rgba(0,0,0,.5);opacity:0;transition:all .4s cubic-bezier(.16,1,.3,1);z-index:10;pointer-events:none;max-width:min(340px,calc(100vw - 32px));text-align:center;line-height:1.35}
   .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
   .toast.warn{border-color:var(--orange);color:var(--orange)}
-  .footer{font-size:10px;color:var(--text-dim);font-family:'JetBrains Mono',monospace;opacity:.3}
+  .footer{font-size:10px;color:var(--text-dim);font-family:'JetBrains Mono',monospace}
   .header h1{cursor:help;user-select:none;-webkit-touch-callout:none}
   /* v8.72 — the banner is in the layout from the first paint or not at all.
      install-hint.js (loaded in <head>) sets both classes before the body is
@@ -249,10 +254,11 @@
   .install-hint strong{color:var(--text)}
 
   .section{display:flex;flex-direction:column;gap:16px;width:100%}
-  .section-title{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--text-dim);opacity:.75;border-bottom:1px solid var(--border);padding-bottom:7px}
+  .section-title{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--text-dim);border-bottom:1px solid var(--border);padding-bottom:7px}
   .field{display:flex;flex-direction:column;gap:6px;width:100%}
   .field label{font-size:13px;font-weight:500;color:var(--text-dim)}
-  .field label .req{font-size:11px;font-weight:600;color:var(--accent)}
+  .field label .opt{font-size:11px;font-weight:400}
+  .field label .req{font-size:11px;font-weight:600;color:var(--accent-text)}
   /* 16px is NOT a taste choice: iOS Safari auto-zooms on focus for any text
      control under 16px, and does not zoom back out -- the family lands on a
      magnified, horizontally scrolled settings screen after tapping a field.
@@ -264,7 +270,7 @@
   .field input{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px 16px;color:var(--text);font-family:'JetBrains Mono',monospace;font-size:16px;outline:none;transition:border-color .2s;-webkit-user-select:text;user-select:text;width:100%}
   .field input:focus{border-color:var(--accent)}
   .field input::placeholder{color:var(--text-dim);opacity:.5}
-  .field .hint{font-size:11px;color:var(--text-dim);opacity:.6}
+  .field .hint{font-size:11px;color:var(--text-dim)}
   /* Field states. Derived from the vocabulary already in this sheet, never a new
      value: .4 + not-allowed = inert control (.test-btn:disabled); .6 + dashed =
      present but not actionable (.status-card.nonet/.unknown). Without these, a
@@ -273,7 +279,7 @@
      Order matters: a disabled input also matches :read-only, so :disabled last. */
   .field input:read-only{opacity:.6;background:transparent;border-style:dashed;cursor:default}
   .field input:disabled{opacity:.4;border-style:dashed;cursor:not-allowed}
-  .save-btn{width:100%;padding:14px;background:var(--accent);border:none;border-radius:12px;color:white;font-family:'DM Sans',sans-serif;font-size:15px;font-weight:600;cursor:pointer;transition:opacity .2s;margin-top:8px}
+  .save-btn{width:100%;padding:14px;background:var(--accent-fill);border:none;border-radius:12px;color:white;font-family:'DM Sans',sans-serif;font-size:15px;font-weight:600;cursor:pointer;transition:opacity .2s;margin-top:8px}
   .save-btn:active{opacity:.8}
   .button-row{display:flex;gap:8px;width:100%;margin-top:8px}
   .button-row .save-btn{margin-top:0;flex:2}
@@ -302,7 +308,7 @@
   <div class="section">
     <div class="section-title">Serveur</div>
     <div class="field">
-      <label for="cfgTitle">Titre <span style="font-size:11px;font-weight:400;opacity:.6">(optionnel)</span></label>
+      <label for="cfgTitle">Titre <span class="opt">(optionnel)</span></label>
       <input type="text" id="cfgTitle" placeholder="Mon serveur" autocomplete="off">
     </div>
     <div class="field">
@@ -313,7 +319,7 @@
   <div class="section">
     <div class="section-title">Réveil (Wake-on-LAN)</div>
     <div class="field">
-      <label for="cfgMac">Adresse MAC <span style="font-size:11px;font-weight:400;opacity:.6">(optionnel — WoL)</span></label>
+      <label for="cfgMac">Adresse MAC <span class="opt">(optionnel — WoL)</span></label>
       <input type="text" id="cfgMac" placeholder="AABBCCDDEEFF" autocomplete="off" autocapitalize="off">
     </div>
     <div class="field">
@@ -321,17 +327,17 @@
       <input type="number" id="cfgPort" placeholder="9" autocomplete="off">
     </div>
     <div class="field">
-      <label for="cfgIp">IP du serveur <span style="font-size:11px;font-weight:400;opacity:.6">(optionnel — utilisée en cas de panne DNS sur le domaine)</span></label>
+      <label for="cfgIp">IP du serveur <span class="opt">(optionnel — utilisée en cas de panne DNS sur le domaine)</span></label>
       <input type="text" id="cfgIp" placeholder="192.0.2.1" autocomplete="off" autocapitalize="off" inputmode="numeric">
       <span class="hint">Affichée sur la page de réveil manuel comme alternative au domaine</span>
     </div>
     <div class="field">
-      <label for="cfgRelay">Relais WoL <span style="font-size:11px;font-weight:400;opacity:.6">(optionnel — URL HTTPS)</span></label>
+      <label for="cfgRelay">Relais WoL <span class="opt">(optionnel — URL HTTPS)</span></label>
       <input type="url" id="cfgRelay" placeholder="https://wol.exemple.com" autocomplete="off" autocapitalize="off">
       <span class="hint">URL du relais self-hosted qui envoie le magic packet (laisser vide si pas de WoL)</span>
     </div>
     <div class="field">
-      <label for="cfgToken">Token relais <span style="font-size:11px;font-weight:400;opacity:.6">(optionnel)</span></label>
+      <label for="cfgToken">Token relais <span class="opt">(optionnel)</span></label>
       <input type="password" id="cfgToken" placeholder="" autocomplete="off">
       <span class="hint" id="cfgTokenHint">Secret partagé envoyé au relais (header X-Token)</span>
     </div>
@@ -343,12 +349,12 @@
   <div class="section">
     <div class="section-title">Apps &amp; affichage</div>
     <div class="field">
-      <label for="cfgApps">Applications <span style="font-size:11px;font-weight:400;opacity:.6">(optionnel)</span></label>
+      <label for="cfgApps">Applications <span class="opt">(optionnel)</span></label>
       <input type="text" id="cfgApps" placeholder="seerr,plexweb" autocomplete="off" autocapitalize="off">
       <span class="hint">Mots-clés séparés par virgule : seerr, plexweb</span>
     </div>
     <div class="field">
-      <label for="cfgWindow">Plage d'activité <span style="font-size:11px;font-weight:400;opacity:.6">(optionnel)</span></label>
+      <label for="cfgWindow">Plage d'activité <span class="opt">(optionnel)</span></label>
       <input type="text" id="cfgWindow" placeholder="13h50-00h10" autocomplete="off" autocapitalize="off">
       <span class="hint" id="cfgWindowHint">Si le serveur s'éteint volontairement la nuit : hors plage, l'arrêt s'affiche « Éteint » en bleu avec l'heure de réveil auto</span>
     </div>

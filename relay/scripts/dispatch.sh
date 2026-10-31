@@ -22,6 +22,9 @@
 #   ssh wol-relay-deploy upgrade-watch     # pending OS updates + who installs them (read-only)
 #   ssh wol-relay-deploy upgrade           # WRITE: apt update + dist-upgrade, detached, no reboot
 #   ssh wol-relay-deploy upgrade-log       # newest upgrade run log + running/finished (read-only)
+#   ssh wol-relay-deploy venv-versions     # Python venv versions + outdated vs PyPI (read-only)
+#   ssh wol-relay-deploy venv-upgrade      # WRITE: upgrade both venvs, health check, rollback; detached
+#   ssh wol-relay-deploy venv-upgrade-log  # newest venv upgrade log + running/finished (read-only)
 #   ssh wol-relay-deploy port-audit <host>.duckdns.org  # TCP ports of the home seen from the Internet (read-only)
 #
 # home-watch (external homelab monitor, content pushed in from the private
@@ -271,6 +274,27 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
       echo "[upgrade-log] state: RUNNING"
     fi
     tail -n 60 "$latest"
+    ;;
+  venv-versions)
+    # Read-only: installed vs latest versions of the two Python venvs
+    # (wol-relay, pock-sync). Root script pinned in sudoers, pip itself runs as
+    # the service user. Exit 0 up to date / 2 updates available / 3 unmeasured.
+    exec sudo /opt/wol-relay/scripts/venv-run.sh report
+    ;;
+  venv-upgrade)
+    # WRITE: upgrade both venvs to the latest wheels, restart each service,
+    # health check, roll back to the previous freeze on KO. Detached so an SSH
+    # drop never leaves a venv half-installed. Read: venv-upgrade-log.
+    setsid nohup sudo -n /opt/wol-relay/scripts/venv-run.sh upgrade </dev/null >/dev/null 2>&1 &
+    echo "[venv-upgrade] started detached (pid=$!). Read the outcome: ssh wol-relay-deploy venv-upgrade-log"
+    ;;
+  venv-upgrade-log)
+    # Read-only: newest venv upgrade log (root-owned dir, world-readable).
+    latest="$(ls -1t /var/log/venv-run/*.log 2>/dev/null | head -1 || true)"
+    if [ -z "$latest" ]; then echo "[venv-upgrade-log] no venv upgrade recorded yet"; exit 0; fi
+    echo "[venv-upgrade-log] $latest"
+    if grep -q '^VERDICT:' "$latest"; then echo "[venv-upgrade-log] state: finished"; else echo "[venv-upgrade-log] state: RUNNING (or interrupted)"; fi
+    tail -n 80 "$latest"
     ;;
   "port-audit "*)
     # External port inventory of the home server (knowledge-base BACKLOG

@@ -506,6 +506,7 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
     echo "          push-pock-sync-app, apply-pock-sync, pock-sync-status, logs-pock-sync, pock-dump," >&2
     echo "          pat-receive {daily,weekly}, pat-list, pat-dump-latest," >&2
     echo "          secrets-receive {daily,weekly}, secrets-list, secrets-dump-latest," >&2
+    echo "          venv-versions, venv-upgrade, venv-upgrade-log," >&2
     echo "          tunnel-status, tunnel-reap." >&2
     exit 64
     ;;

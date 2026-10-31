@@ -73,13 +73,17 @@ report() {
     $AS_USER "$(owner "$v")" -- "$(venv_dir "$v")/bin/python" --version 2>&1
     echo "installed:"
     pip_as "$v" list --format=freeze 2>&1 | sed 's/^/  /'
-    if ! out="$(pip_as "$v" list --outdated --format=freeze 2>&1)"; then
-      echo "OUTDATED: could not query PyPI"; printf '%s\n' "$out" | tail -3 | sed 's/^/  /'
+    # `--outdated` refuses `--format=freeze` (pip error, seen live 2026-10-31):
+    # columns, and only rows "<pkg> <version> <latest> ..." count — pip
+    # warnings share the captured stream.
+    if ! out="$(pip_as "$v" list --outdated --format=columns 2>&1)"; then
+      echo "OUTDATED: pip list --outdated failed"; printf '%s\n' "$out" | tail -3 | sed 's/^/  /'
       rc=3; continue
     fi
-    n=$(printf '%s\n' "$out" | grep -c '==' || true)
+    out="$(printf '%s\n' "$out" | awk 'NF >= 3 && $2 ~ /^[0-9]/ && $3 ~ /^[0-9]/')"
+    n=$(printf '%s\n' "$out" | awk 'NF' | wc -l)
     echo "outdated: $n"
-    [ "$n" -gt 0 ] && printf '%s\n' "$out" | grep '==' | sed 's/^/  /'
+    [ "$n" -gt 0 ] && printf '%s\n' "$out" | sed 's/^/  /'
     [ "$n" -gt 0 ] && [ "$rc" -eq 0 ] && rc=2
   done
   echo

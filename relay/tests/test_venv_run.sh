@@ -25,7 +25,8 @@ setup() {  # $1 = case dir
     mkdir -p "$c/opt/$v/venv/bin" "$c/st/$v"
     printf 'fastapi==0.110.0\nuvicorn==0.29.0\n' > "$c/st/$v/installed"
     printf 'fastapi==0.139.2\nuvicorn==0.38.0\n' > "$c/st/$v/new"
-    printf 'fastapi==0.110.0\nuvicorn==0.29.0\n' > "$c/st/$v/outdated"
+    # Rows as real pip prints them (`list --outdated --format=columns`).
+    printf 'fastapi 0.110.0 0.139.2 wheel\nuvicorn 0.29.0  0.38.0  wheel\n' > "$c/st/$v/outdated"
     printf '#!/bin/sh\necho "Python 3.13.5"\n' > "$c/opt/$v/venv/bin/python"
     cat > "$c/opt/$v/venv/bin/pip" <<EOF
 #!/usr/bin/env bash
@@ -33,7 +34,14 @@ S="$c/st/$v"
 echo "\$*" >> "$c/calls"
 case "\$*" in
   "list --format=freeze"|freeze) cat "\$S/installed" ;;
-  "list --outdated --format=freeze") [ -e "\$S/pypi-down" ] && { echo "ConnectionError" >&2; exit 1; }; cat "\$S/outdated" ;;
+  # Real pip refuses this combination (seen live on the VM, 2026-10-31).
+  "list --outdated --format=freeze")
+    echo "ERROR: List format 'freeze' cannot be used with the --outdated option." >&2; exit 1 ;;
+  "list --outdated --format=columns")
+    [ -e "\$S/pypi-down" ] && { echo "ConnectionError" >&2; exit 1; }
+    echo "WARNING: The directory '/home/x/.cache/pip' is not owned by the current user" >&2
+    [ -s "\$S/outdated" ] && printf 'Package Version Latest Type\n------- ------- ------ -----\n'
+    cat "\$S/outdated" ;;
   "install --upgrade --only-binary=:all: -r /dev/stdin")
     cat > "\$S/asked"; [ -e "\$S/pip-fails" ] && exit 1; cp "\$S/new" "\$S/installed" ;;
   "install --only-binary=:all: -r /dev/stdin") cat > "\$S/installed" ;;
@@ -106,6 +114,8 @@ echo "case D — report: updates available ⇒ exit 2"
 setup "$TMP/d"; run "$TMP/d" report
 ok 2 "$RC" "exit 2"
 has "outdated: 2" "$OUT" "counts outdated packages"
+has "fastapi 0.110.0 0.139.2" "$OUT" "lists outdated package and latest version"
+hasnt "WARNING" "$OUT" "pip warnings are not counted nor shown as packages"
 has "Python 3.13.5" "$OUT" "shows the python version"
 has "VERDICT: updates available" "$OUT" "verdict"
 

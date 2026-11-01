@@ -33,10 +33,14 @@ ALLOWED_DEST='
 /etc/caddy/Caddyfile
 /opt/home-watch/home-watch.sh
 /opt/pock-sync/app.py
+/opt/wol-relay/locks/requirements-wol-relay.lock
+/opt/wol-relay/locks/requirements-pock-sync.lock
 '
 # app.py/window: read by uvicorn as `wol`. Caddyfile: interpreted by caddy
 # running as `caddy` (no exec directive in the stock build). home-watch.sh: run
-# as `homewatch` (unit User=). pock-sync app.py: run as `pock`.
+# as `homewatch` (unit User=). pock-sync app.py: run as `pock`. Locks: read
+# by venv-run.sh as root, but only after its grammar check (pins + sha256, no
+# pip option) and only fed to pip running as `wol`/`pock` (test_venv_run.sh).
 
 # Prints every install destination found in a sudoers file, one per line.
 install_dests() {
@@ -88,7 +92,8 @@ cat > "$tmp/bin/sudo" <<EOF
 printf '%s\n' "\$*" >> "$tmp/sudo.log"
 EOF
 chmod +x "$tmp/bin/sudo"
-sed "s#^STAGING_DIR=.*#STAGING_DIR=\"$tmp/staging\"#" "$DISPATCH" > "$tmp/dispatch.sh"
+sed -e "s#^STAGING_DIR=.*#STAGING_DIR=\"$tmp/staging\"#" \
+    -e "s#/opt/wol-relay/scripts/venv-run.sh lint#$HERE/../scripts/venv-run.sh lint#" "$DISPATCH" > "$tmp/dispatch.sh"
 run() { : > "$tmp/sudo.log"; SSH_ORIGINAL_COMMAND="$1" PATH="$tmp/bin:$PATH" bash "$tmp/dispatch.sh" >"$tmp/out" 2>&1; }
 
 rm -f "$tmp/staging"/*
@@ -103,6 +108,19 @@ if grep -qE 'systemd/system|daemon-reload' "$tmp/sudo.log"; then ko "apply-home-
 rm -f "$tmp/staging"/*; echo 'x=1' > "$tmp/staging/pock-sync-app.py"
 if run apply-pock-sync; then ok "apply-pock-sync succeeds with app.py only"; else ko "apply-pock-sync refused: $(cat "$tmp/out")"; fi
 if grep -qE 'systemd/system|daemon-reload' "$tmp/sudo.log"; then ko "apply-pock-sync touched units"; else ok "apply-pock-sync never touches /etc/systemd"; fi
+
+rm -f "$tmp/staging"/*
+if run push-lock-wol-relay < "$HERE/../scripts/requirements-wol-relay.lock" && [ -s "$tmp/staging/requirements-wol-relay.lock" ]; then
+  ok "push-lock-wol-relay stages the versioned lock"
+else ko "push-lock-wol-relay refused the versioned lock: $(cat "$tmp/out")"; fi
+if printf -- '--index-url https://x\n' | run push-lock-pock-sync; then ko "push-lock-pock-sync accepted a pip option"
+elif [ -e "$tmp/staging/requirements-pock-sync.lock" ] || [ -e "$tmp/staging/requirements-pock-sync.lock.new" ]; then ko "a refused lock was left staged"
+else ok "push-lock-pock-sync refuses a pip option, stages nothing"; fi
+if run apply-locks && grep -qx '/usr/bin/install -m 0644 '"$tmp"'/staging/requirements-wol-relay.lock /opt/wol-relay/locks/requirements-wol-relay.lock' "$tmp/sudo.log" \
+   && ! grep -q pock-sync "$tmp/sudo.log"; then ok "apply-locks installs only the staged lock"
+else ko "apply-locks: $(cat "$tmp/out" "$tmp/sudo.log")"; fi
+rm -f "$tmp/staging"/*
+if run apply-locks; then ko "apply-locks succeeded with nothing staged"; else ok "apply-locks refuses with nothing staged"; fi
 
 for r in push-service push-home-watch-service push-home-watch-timer push-pock-sync-service; do
   rm -f "$tmp/staging"/*

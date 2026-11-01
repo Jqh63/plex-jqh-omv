@@ -1,0 +1,8 @@
+# Direct deps of /opt/wol-relay/venv — the INPUT of the lock, never installed
+# as is. Compile with `bash relay/scripts/lock.sh` → requirements-wol-relay.lock
+# (exact versions + hashes), which venv-run.sh installs on the VM.
+# pip is listed so the lock pins the venv's own tooling too.
+fastapi
+uvicorn[standard]
+httpx[http2]
+pip

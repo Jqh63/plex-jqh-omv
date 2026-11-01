@@ -95,6 +95,13 @@ Cmnd_Alias OMVTUNNEL_REAP = \
   /usr/bin/pkill -u omvtunnel -f sshd
 # Python venvs: root-owned script, no free argument. It runs pip as the
 # service user (wol/pock), never as root — see venv-run.sh header.
+# The locks are DATA read by venv-run.sh (grammar-checked: pins + sha256 only)
+# and only ever fed to pip running as wol/pock: installing one grants what
+# push-app already grants. Root-owned so no service user can rewrite its own.
+Cmnd_Alias VENV_LOCK_INSTALL = \
+  /usr/bin/install -m 0644 /tmp/wol-relay-staging/requirements-wol-relay.lock /opt/wol-relay/locks/requirements-wol-relay.lock, \
+  /usr/bin/install -m 0644 /tmp/wol-relay-staging/requirements-pock-sync.lock /opt/wol-relay/locks/requirements-pock-sync.lock
+
 Cmnd_Alias VENV_RUN = \
   /opt/wol-relay/scripts/venv-run.sh report, \
   /opt/wol-relay/scripts/venv-run.sh upgrade
@@ -102,4 +109,4 @@ Cmnd_Alias VENV_RUN = \
 deploy ALL=(root) NOPASSWD: WOL_RELAY_INSTALL, WOL_RELAY_SYSTEMCTL, WOL_RELAY_LOGS, WOL_RELAY_LOG_FOOTPRINT, \
                             HOME_WATCH_INSTALL, HOME_WATCH_SYSTEMCTL, HOME_WATCH_LOGS, \
                             POCK_SYNC_INSTALL, POCK_SYNC_SYSTEMCTL, POCK_SYNC_LOGS, POCK_SYNC_DUMP, \
-                            OS_UPGRADE, OMVTUNNEL_REAP, VENV_RUN
+                            OS_UPGRADE, OMVTUNNEL_REAP, VENV_LOCK_INSTALL, VENV_RUN

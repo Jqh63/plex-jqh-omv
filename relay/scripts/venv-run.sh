@@ -1,30 +1,35 @@
 #!/usr/bin/env bash
-# venv-run.sh — Python venvs of the relay VM: report versions, or upgrade them.
-# Routed by `ssh wol-relay-deploy venv-versions` (report) and `venv-upgrade`
-# (upgrade, detached; read with `venv-upgrade-log`).
+# venv-run.sh — Python venvs of the relay VM: compare them to their lock, or
+# sync them to it. Routed by `ssh wol-relay-deploy venv-versions` (report) and
+# `venv-upgrade` (sync, detached; read with `venv-upgrade-log`).
 #
-# Why it exists: /opt/wol-relay/venv and /opt/pock-sync/venv were installed
-# once, unpinned, and never looked at again — on the most exposed machine of
-# the ecosystem. OS updates had a route (upgrade-watch/upgrade); these did not.
+# Model (knowledge-base ADR 2026-11-01): the versions live in a hashed lock
+# file per venv, versioned in relay/scripts/requirements-<venv>.lock and
+# compiled by relay/scripts/lock.sh. The VM never resolves anything: it
+# installs exactly the lock, wheels only, every file checked against its hash.
+# Updating = a reviewed PR that recompiles the lock, then deploy.sh.
 #
 # PRIVILEGE: runs as root through two argvs pinned in sudoers.deploy
-# (`venv-run.sh report`, `venv-run.sh upgrade`), no other argument accepted.
-# Root only chowns the two venvs to their service user, restarts the two
-# services and writes its own logs. pip ALWAYS runs as the service user that
-# already executes that venv (`wol`, `pock`): a poisoned PyPI package gains
-# nothing that service did not already have. Wheels only (--only-binary), so
-# installing never runs a setup.py. Inputs are root-owned files only.
+# (`venv-run.sh report`, `venv-run.sh upgrade`). Root only chowns the venvs to
+# their service user, restarts the two services and writes its own logs. pip
+# ALWAYS runs as the service user that already executes that venv (`wol`,
+# `pock`). The locks reach the VM through the deploy key (push-lock-*), so they
+# are untrusted input here: each one must pass lint_lock (pins + sha256 hashes
+# + comments, nothing else — no pip option, no index, no include) before pip
+# sees it, and pip only ever reads it as that service user. A hostile lock
+# therefore gains what push-app already grants: code running as wol/pock.
 #
-# upgrade: freeze → install the requirements file → restart → health check;
-# health KO ⇒ reinstall the freeze, restart again, verdict ROLLED BACK.
-# Exit: report 0 up to date / 2 updates available / 3 could not measure;
-# upgrade 0 DONE / 1 FAILED or ROLLED BACK.
+# upgrade: freeze → install the lock (--require-hashes --no-deps) → uninstall
+# what the lock does not list → restart → health check; health KO ⇒ reinstall
+# the freeze, restart again, verdict ROLLED BACK.
+# Exit: report 0 in sync / 2 drift from the lock / 3 could not measure;
+# upgrade 0 DONE / 1 FAILED or ROLLED BACK; lint 0 valid / 1 invalid.
 
 set -uo pipefail
 
 # Test seams — real runs take every default.
 PREFIX="${VR_PREFIX:-}"
-SCRIPTS="${VR_SCRIPTS:-/opt/wol-relay/scripts}"
+LOCKS="${VR_LOCKS:-/opt/wol-relay/locks}"
 LOG_DIR="${VR_LOG_DIR:-/var/log/venv-run}"
 STATE_DIR="${VR_STATE_DIR:-/var/lib/venv-run}"
 AS_USER="${VR_AS_USER:-runuser -u}"
@@ -37,6 +42,7 @@ KEEP=10
 VENVS="wol-relay pock-sync"
 
 venv_dir() { echo "$PREFIX/opt/$1/venv"; }
+lock_of()  { echo "$LOCKS/requirements-$1.lock"; }
 owner()    { case "$1" in wol-relay) echo wol ;; pock-sync) echo pock ;; esac; }
 health_url() {
   case "$1" in
@@ -62,70 +68,111 @@ healthy() {
 }
 ts() { date '+%F %T %Z'; }
 
+# The lock grammar, and nothing more: `name==version \`, then its
+# `    --hash=sha256:<64 hex>` lines (the last one without `\`), comments and
+# blank lines. Every pin carries at least one hash. Prints the offending lines.
+lint_lock() {  # <file>
+  awk '
+    function bad(why) { printf "  line %d: %s: %s\n", NR, why, $0; err = 1 }
+    /^[[:space:]]*$/ || /^[[:space:]]*#/ { if (cont) bad("pin without hash"); cont = 0; next }
+    /^[A-Za-z0-9][A-Za-z0-9._-]*==[A-Za-z0-9.+!_-]+ \\$/ {
+      if (cont) bad("pin without hash")
+      cont = 1; n++; next }
+    # No {64}: the default awk of Debian is mawk (no interval expressions).
+    /^    --hash=sha256:/ {
+      h = substr($0, 19); more = sub(/ \\$/, "", h)
+      if (h !~ /^[0-9a-f]+$/ || length(h) != 64) { bad("malformed hash"); next }
+      if (!cont) bad("hash outside a pin")
+      cont = more; next }
+    { bad("not a pin, hash or comment") }
+    END {
+      if (cont) { print "  end of file: pin or hash left open"; err = 1 }
+      if (n == 0) { print "  no pin at all"; err = 1 }
+      exit err
+    }' "$1"
+}
+
+# `name==version` per line, names normalised (PEP 503), sorted.
+norm() { awk -F'==' 'NF == 2 { n = tolower($1); gsub(/[-_.]+/, "-", n); print n "==" $2 }' | sort; }
+lock_pins() { grep -E '^[A-Za-z0-9][A-Za-z0-9._-]*==' "$1" | sed 's/ \\$//' | norm; }
+installed()  { pip_as "$1" list --format=freeze 2>/dev/null | norm; }
+
+# Lines "  <name>: installed X, lock Y" for every difference. Empty = in sync.
+drift() {  # <installed file> <lock pins file>
+  awk -F'==' '
+    NR == FNR { inst[$1] = $2; next }
+    { lock[$1] = $2 }
+    END {
+      for (n in lock) if (!(n in inst)) print "  " n ": missing, lock " lock[n]
+                      else if (inst[n] != lock[n]) print "  " n ": installed " inst[n] ", lock " lock[n]
+      for (n in inst) if (!(n in lock)) print "  " n ": installed " inst[n] ", not in the lock"
+    }' "$1" "$2" | sort
+}
+
 report() {
-  local v rc=0 out n
+  local v rc=0 d tmp; tmp="$(mktemp -d)"
   echo "=== RELAY VM VENVS — $(ts) ==="
   for v in $VENVS; do
-    echo; echo "--- $v ($(venv_dir "$v"), user $(owner "$v"))"
-    if [ ! -x "$(venv_dir "$v")/bin/pip" ]; then
-      echo "MISSING: no pip in this venv"; rc=3; continue
-    fi
+    echo; echo "--- $v ($(venv_dir "$v"), user $(owner "$v"), lock $(lock_of "$v"))"
+    if [ ! -x "$(venv_dir "$v")/bin/pip" ]; then echo "MISSING: no pip in this venv"; rc=3; continue; fi
+    if [ ! -f "$(lock_of "$v")" ]; then echo "MISSING: no lock"; rc=3; continue; fi
+    if ! lint_lock "$(lock_of "$v")" > "$tmp/lint"; then echo "INVALID LOCK:"; cat "$tmp/lint"; rc=3; continue; fi
     $AS_USER "$(owner "$v")" -- "$(venv_dir "$v")/bin/python" --version 2>&1
-    echo "installed:"
-    pip_as "$v" list --format=freeze 2>&1 | sed 's/^/  /'
-    # `--outdated` refuses `--format=freeze` (pip error, seen live 2026-10-31):
-    # columns, and only rows "<pkg> <version> <latest> ..." count — pip
-    # warnings share the captured stream.
-    if ! out="$(pip_as "$v" list --outdated --format=columns 2>&1)"; then
-      echo "OUTDATED: pip list --outdated failed"; printf '%s\n' "$out" | tail -3 | sed 's/^/  /'
-      rc=3; continue
-    fi
-    out="$(printf '%s\n' "$out" | awk 'NF >= 3 && $2 ~ /^[0-9]/ && $3 ~ /^[0-9]/')"
-    n=$(printf '%s\n' "$out" | awk 'NF' | wc -l)
-    echo "outdated: $n"
-    [ "$n" -gt 0 ] && printf '%s\n' "$out" | sed 's/^/  /'
-    [ "$n" -gt 0 ] && [ "$rc" -eq 0 ] && rc=2
+    installed "$v" > "$tmp/inst"
+    if [ ! -s "$tmp/inst" ]; then echo "UNMEASURED: pip list returned nothing"; rc=3; continue; fi
+    lock_pins "$(lock_of "$v")" > "$tmp/lock"
+    echo "installed: $(wc -l < "$tmp/inst") packages, lock: $(wc -l < "$tmp/lock") pins"
+    d="$(drift "$tmp/inst" "$tmp/lock")"
+    if [ -z "$d" ]; then echo "drift: 0"
+    else echo "drift: $(printf '%s\n' "$d" | wc -l)"; printf '%s\n' "$d"; [ "$rc" -eq 0 ] && rc=2; fi
   done
+  rm -rf "$tmp"
   echo
   case "$rc" in
-    0) echo "VERDICT: up to date" ;;
-    2) echo "VERDICT: updates available — ssh wol-relay-deploy venv-upgrade" ;;
+    0) echo "VERDICT: in sync with the lock" ;;
+    2) echo "VERDICT: drift from the lock — ssh wol-relay-deploy venv-upgrade" ;;
     *) echo "VERDICT: could not measure — never a green light" ;;
   esac
   return "$rc"
 }
 
+restore_freeze() {  # <venv> <freeze>
+  pip_as "$1" install --no-deps --only-binary=:all: -r /dev/stdin < "$2"
+}
+
 upgrade_one() {  # prints its own lines; returns 0 DONE / 1 FAILED / 2 ROLLED BACK
-  local v="$1" req="$SCRIPTS/requirements-$1.txt" freeze="$STATE_DIR/$1.freeze"
+  local v="$1" lock freeze="$STATE_DIR/$1.freeze" extra
+  lock="$(lock_of "$v")"
   echo; echo "--- $v"
-  [ -f "$req" ] || { echo "FAILED: missing $req"; return 1; }
+  [ -f "$lock" ] || { echo "FAILED: missing $lock"; return 1; }
+  if ! lint_lock "$lock"; then echo "FAILED: invalid lock, nothing installed"; return 1; fi
   [ -x "$(venv_dir "$v")/bin/pip" ] || { echo "FAILED: no pip in $(venv_dir "$v")"; return 1; }
   # The venv belongs to the user that runs it — pip never runs as root.
   $CHOWN "$(owner "$v"):$(owner "$v")" "$(venv_dir "$v")" || { echo "FAILED: chown"; return 1; }
-  pip_as "$v" freeze > "$freeze" || { echo "FAILED: freeze"; return 1; }
+  # `list --format=freeze` and not `freeze`: it keeps pip/setuptools/wheel, so
+  # a rollback restores the tooling too.
+  pip_as "$v" list --format=freeze > "$freeze" || { echo "FAILED: freeze"; return 1; }
   echo "before: $(tr '\n' ' ' < "$freeze")"
-  # pip tooling first (not a dependency of the requirements, so eager never
-  # moves it: pip 23 left in pock-sync, 2026-10-31). Non-fatal: the freeze
-  # excludes it, a failure here leaves the old tooling and goes on.
-  pip_as "$v" install --upgrade --upgrade-strategy eager --only-binary=:all: \
-    pip setuptools wheel \
-    || echo "WARN: pip tooling upgrade failed — kept the installed one"
-  # eager: transitive deps too — the default (only-if-needed) left them behind
-  # for good (starlette 1.1 vs 1.10 right after an upgrade, 2026-10-31).
-  if ! pip_as "$v" install --upgrade --upgrade-strategy eager --only-binary=:all: \
-      -r /dev/stdin < "$req"; then
+  # --no-deps: the lock IS the full closure; pip resolves nothing.
+  if ! pip_as "$v" install --require-hashes --no-deps --only-binary=:all: -r /dev/stdin < "$lock"; then
     echo "pip install failed — restoring the freeze"
-    pip_as "$v" install --only-binary=:all: -r /dev/stdin < "$freeze" \
-      || echo "WARN: freeze reinstall failed too"
+    restore_freeze "$v" "$freeze" || echo "WARN: freeze reinstall failed too"
     $SYSTEMCTL restart "$v"; healthy "$v" && echo "health after restore: OK" || echo "health after restore: KO"
     return 1
   fi
-  echo "after : $(pip_as "$v" freeze | tr '\n' ' ')"
+  # What the lock does not list goes (old tooling, deps dropped upstream).
+  # Names come from pip's own list, normalised; never from the caller.
+  extra="$(comm -23 <(installed "$v" | cut -d= -f1) <(lock_pins "$lock" | cut -d= -f1) | tr '\n' ' ')"
+  if [ -n "${extra// /}" ]; then
+    echo "removing (not in the lock): $extra"
+    # shellcheck disable=SC2086  # word splitting wanted: one name per word
+    pip_as "$v" uninstall -y $extra || echo "WARN: uninstall failed — extras left in place"
+  fi
+  echo "after : $(pip_as "$v" list --format=freeze | tr '\n' ' ')"
   $SYSTEMCTL restart "$v"
   if healthy "$v"; then echo "health: OK"; return 0; fi
   echo "health: KO after upgrade — ROLLING BACK to the freeze"
-  pip_as "$v" install --only-binary=:all: -r /dev/stdin < "$freeze" \
-    || echo "WARN: freeze reinstall failed"
+  restore_freeze "$v" "$freeze" || echo "WARN: freeze reinstall failed"
   $SYSTEMCTL restart "$v"
   if healthy "$v"; then echo "health after rollback: OK"; else echo "health after rollback: KO — service DOWN, act now"; fi
   return 2
@@ -138,7 +185,7 @@ upgrade() {
   flock -n 9 || { echo "venv-run: an upgrade is already running — see venv-upgrade-log" >&2; exit 75; }
   local log; log="$LOG_DIR/$(date +%Y%m%d-%H%M%S).log"
   exec >>"$log" 2>&1
-  echo "=== RELAY VM VENV UPGRADE — start $(ts) ==="
+  echo "=== RELAY VM VENV UPGRADE (sync to lock) — start $(ts) ==="
   renice -n 19 -p $$ >/dev/null 2>&1 || true   # e2-micro: Caddy/sshd first
   for v in $VENVS; do
     upgrade_one "$v"; rc=$?
@@ -154,5 +201,9 @@ upgrade() {
 case "${1:-}" in
   report)  report ;;
   upgrade) upgrade ;;
-  *) echo "usage: venv-run.sh report|upgrade" >&2; exit 64 ;;
+  # Not reachable as root (sudoers pins report/upgrade only): the bench and
+  # lock.sh use it, so the grammar the VM enforces is the one tested.
+  lint)    [ -f "${2:-}" ] || { echo "usage: venv-run.sh lint <lock>" >&2; exit 64; }
+           lint_lock "$2" ;;
+  *) echo "usage: venv-run.sh report|upgrade|lint <lock>" >&2; exit 64 ;;
 esac

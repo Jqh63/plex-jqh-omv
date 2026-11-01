@@ -1,0 +1,7 @@
+# Direct deps of /opt/pock-sync/venv (created by Jqh63/pock
+# sync/bootstrap-pock-sync.sh) — the INPUT of the lock, never installed as is.
+# Compile with `bash relay/scripts/lock.sh` → requirements-pock-sync.lock.
+# pip is listed so the lock pins the venv's own tooling too.
+fastapi
+uvicorn[standard]
+pip

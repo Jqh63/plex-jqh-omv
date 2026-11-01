@@ -27,8 +27,17 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - name: Python deps
-        run: python3 -m pip install --quiet 'fastapi==0.139.2' 'httpx==0.28.1' 'h2==4.3.0' 'pytest==9.0.3'
+      # Same CPython minor as the VM (Debian 12), and the VM's exact packages:
+      # the hashed lock venv-run.sh installs there. pytest is test-only.
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.11'
+
+      - name: Python deps (the VM lock)
+        run: |
+          python -m pip install --quiet --require-hashes --no-deps --only-binary=:all: \
+            -r relay/scripts/requirements-wol-relay.lock
+          python -m pip install --quiet 'pytest==9.0.3'
 
       - name: Caddy (for the log-redaction bench)
         run: |
@@ -39,7 +48,7 @@ jobs:
           echo "CADDY=$RUNNER_TEMP/caddy" >> "$GITHUB_ENV"
 
       - name: pytest relay/tests
-        run: python3 -m pytest -q relay/tests
+        run: python -m pytest -q relay/tests
 
       - name: Shell benches
         run: |

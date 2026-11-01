@@ -45,7 +45,7 @@ vrc=0; ssh "$ALIAS" venv-versions > /dev/null || vrc=$?
 case "$vrc" in
   0) echo "[deploy]   venvs in sync with their lock" ;;
   2)
-    before="$(ssh "$ALIAS" venv-upgrade-log | head -1)"
+    before="$(ssh "$ALIAS" venv-upgrade-log | sed -n 1p)"   # sed, not head: no SIGPIPE under pipefail
     ssh "$ALIAS" venv-upgrade
     # e2-micro: a full sync takes minutes. Wait for a NEW log that is finished.
     for _ in $(seq 1 90); do

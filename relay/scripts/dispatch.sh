@@ -22,8 +22,11 @@
 #   ssh wol-relay-deploy upgrade-watch     # pending OS updates + who installs them (read-only)
 #   ssh wol-relay-deploy upgrade           # WRITE: apt update + dist-upgrade, detached, no reboot
 #   ssh wol-relay-deploy upgrade-log       # newest upgrade run log + running/finished (read-only)
-#   ssh wol-relay-deploy venv-versions     # Python venv versions + outdated vs PyPI (read-only)
-#   ssh wol-relay-deploy venv-upgrade      # WRITE: upgrade both venvs, health check, rollback; detached
+#   ssh wol-relay-deploy push-lock-wol-relay  # stdin (hashed lock) → staging, grammar-checked
+#   ssh wol-relay-deploy push-lock-pock-sync  # idem for the pock-sync venv
+#   ssh wol-relay-deploy apply-locks       # install the staged lock(s) to /opt/wol-relay/locks
+#   ssh wol-relay-deploy venv-versions     # Python venvs vs their lock: drift (read-only)
+#   ssh wol-relay-deploy venv-upgrade      # WRITE: sync both venvs to their lock, health check, rollback; detached
 #   ssh wol-relay-deploy venv-upgrade-log  # newest venv upgrade log + running/finished (read-only)
 #   ssh wol-relay-deploy port-audit <host>.duckdns.org  # TCP ports of the home seen from the Internet (read-only)
 #
@@ -275,15 +278,45 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
     fi
     tail -n 60 "$latest"
     ;;
+  push-lock-wol-relay|push-lock-pock-sync)
+    # Hashed lock of a venv (relay/scripts/requirements-<venv>.lock). Checked
+    # against the grammar venv-run.sh enforces BEFORE staging — pins + sha256
+    # hashes only, no pip option — and checked again by root before pip reads
+    # it. Not root-equivalent: pip installs it as the venv's service user.
+    v="${SSH_ORIGINAL_COMMAND#push-lock-}"
+    cat > "$STAGING_DIR/requirements-$v.lock.new"
+    if ! bash /opt/wol-relay/scripts/venv-run.sh lint "$STAGING_DIR/requirements-$v.lock.new" >&2; then
+      rm -f "$STAGING_DIR/requirements-$v.lock.new"
+      echo "[push-lock-$v] FAIL — not a hashed lock (see lines above), nothing staged" >&2
+      exit 65
+    fi
+    mv "$STAGING_DIR/requirements-$v.lock.new" "$STAGING_DIR/requirements-$v.lock"
+    echo "[push-lock-$v] OK ($(grep -cE '^[A-Za-z0-9].*==' "$STAGING_DIR/requirements-$v.lock") pins)"
+    ;;
+  apply-locks)
+    # Installs whatever lock is staged (one or both). The venvs only move on
+    # venv-upgrade: deploy.sh chains it when venv-versions reports a drift.
+    n=0
+    if [[ -s "$STAGING_DIR/requirements-wol-relay.lock" ]]; then
+      sudo /usr/bin/install -m 0644 "$STAGING_DIR/requirements-wol-relay.lock" /opt/wol-relay/locks/requirements-wol-relay.lock
+      n=$((n + 1))
+    fi
+    if [[ -s "$STAGING_DIR/requirements-pock-sync.lock" ]]; then
+      sudo /usr/bin/install -m 0644 "$STAGING_DIR/requirements-pock-sync.lock" /opt/wol-relay/locks/requirements-pock-sync.lock
+      n=$((n + 1))
+    fi
+    if [ "$n" -eq 0 ]; then echo "[apply-locks] FAIL — no staged lock. Run push-lock-* first." >&2; exit 1; fi
+    echo "[apply-locks] OK — $n lock(s) installed; venvs move on venv-upgrade"
+    ;;
   venv-versions)
-    # Read-only: installed vs latest versions of the two Python venvs
-    # (wol-relay, pock-sync). Root script pinned in sudoers, pip itself runs as
-    # the service user. Exit 0 up to date / 2 updates available / 3 unmeasured.
+    # Read-only: installed packages of the two Python venvs (wol-relay,
+    # pock-sync) against their lock. Root script pinned in sudoers, pip itself
+    # runs as the service user. Exit 0 in sync / 2 drift / 3 unmeasured.
     exec sudo /opt/wol-relay/scripts/venv-run.sh report
     ;;
   venv-upgrade)
-    # WRITE: upgrade both venvs to the latest wheels, restart each service,
-    # health check, roll back to the previous freeze on KO. Detached so an SSH
+    # WRITE: sync both venvs to their lock (hashes required, no resolution),
+    # restart each service, health check, roll back to the previous freeze on KO. Detached so an SSH
     # drop never leaves a venv half-installed. Read: venv-upgrade-log.
     setsid nohup sudo -n /opt/wol-relay/scripts/venv-run.sh upgrade </dev/null >/dev/null 2>&1 &
     echo "[venv-upgrade] started detached (pid=$!). Read the outcome: ssh wol-relay-deploy venv-upgrade-log"
@@ -506,7 +539,7 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
     echo "          push-pock-sync-app, apply-pock-sync, pock-sync-status, logs-pock-sync, pock-dump," >&2
     echo "          pat-receive {daily,weekly}, pat-list, pat-dump-latest," >&2
     echo "          secrets-receive {daily,weekly}, secrets-list, secrets-dump-latest," >&2
-    echo "          venv-versions, venv-upgrade, venv-upgrade-log," >&2
+    echo "          push-lock-wol-relay, push-lock-pock-sync, apply-locks, venv-versions, venv-upgrade, venv-upgrade-log," >&2
     echo "          tunnel-status, tunnel-reap." >&2
     exit 64
     ;;

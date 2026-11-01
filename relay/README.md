@@ -543,28 +543,44 @@ Bench: `bash relay/tests/test_upgrade_watch.sh` — healthy states first (armed
 and idle, pending but fully covered), because this detector will spend its life
 on a VM where nothing is pending, and that is where a wrong verdict slips in.
 
-### Python venvs — `venv-versions` / `venv-upgrade`
+### Python venvs — hashed lock, `venv-versions` / `venv-upgrade`
 
-`/opt/wol-relay/venv` and `/opt/pock-sync/venv` were installed once, unpinned,
-and never revisited: `unattended-upgrades` does not touch pip, and no route
-showed their versions. Three routes, backed by `scripts/venv-run.sh`:
+`/opt/wol-relay/venv` and `/opt/pock-sync/venv` install **exactly** a hashed
+lock versioned here, never "the latest" (knowledge-base ADR of 2026-11-01):
 
-- **`venv-versions`** (read-only) — Python version, installed packages and what
-  PyPI has newer, per venv. `0` up to date · `2` updates available · `3` could
-  not measure (PyPI unreachable, venv missing).
-- **`venv-upgrade`** (write, detached) — per venv: freeze, install
-  `scripts/requirements-<venv>.txt` to the latest wheels, restart the service,
-  health check; a KO rolls back to the freeze and restarts again. Read the
-  outcome with **`venv-upgrade-log`** (before/after versions, per-venv verdict).
+- `scripts/requirements-<venv>.in` — direct deps, the input.
+- `scripts/lock.sh` — compiles each `.in` with `uv` **for the VM's target**
+  (CPython 3.11, `x86_64-manylinux_2_36`, pinned in the script: change them
+  with the VM's OS) into `scripts/requirements-<venv>.lock`: the full closure,
+  exact versions, sha256 of every wheel. `--upgrade` moves every pin.
+- Updating = a PR that recompiles the lock (CI installs the very same lock),
+  then `deploy.sh`.
+
+`deploy.sh` pushes both locks (`push-lock-wol-relay`, `push-lock-pock-sync`,
+grammar-checked on arrival), installs them (`apply-locks`), and when a venv
+drifts from its lock, runs `venv-upgrade` and waits for it — **before** the
+app, which may need the new deps. A sync that fails or rolls back stops the
+deploy (exit 3, app not pushed).
+
+- **`venv-versions`** (read-only) — per venv, installed packages against the
+  lock. `0` in sync · `2` drift (listed) · `3` could not measure (venv or lock
+  missing, invalid lock).
+- **`venv-upgrade`** (write, detached) — per venv: freeze, install the lock
+  (`--require-hashes --no-deps --only-binary=:all:`, pip resolves nothing),
+  uninstall what the lock does not list, restart the service, health check; a
+  KO rolls back to the freeze and restarts again. Read the outcome with
+  **`venv-upgrade-log`** (before/after, per-venv verdict).
 
 **Privilege**: `venv-run.sh` is root-owned and reached through two argvs pinned
 in `sudoers.deploy` (`report`, `upgrade`), no free argument. Root only chowns
 each venv to its service user, restarts the two services and writes
 `/var/log/venv-run/`. **pip always runs as the service user** (`wol`, `pock`)
-that already executes that venv — a poisoned package gains nothing the service
-did not have — and `--only-binary=:all:` means no `setup.py` ever runs. Its
-inputs (the requirements files) are installed root-owned by the bootstrap,
-never staged by the deploy key.
+that already executes that venv, and `--only-binary=:all:` means no `setup.py`
+ever runs. The locks come through the deploy key, so they are untrusted
+**data**: `venv-run.sh lint` admits pins, sha256 hashes and comments only (no
+pip option, no index, no include), on push and again before pip reads them;
+they live root-owned in `/opt/wol-relay/locks/` (seeded by the bootstrap). A
+hostile lock gains what `push-app` already grants: code running as `wol`/`pock`.
 
 Bench: `bash relay/tests/test_venv_run.sh`.
 
@@ -627,8 +643,8 @@ sudo systemctl stop caddy && sudo systemctl disable caddy
 sudo useradd -r -s /usr/sbin/nologin -d /opt/wol-relay -m wol || true
 sudo chown -R wol:wol /opt/wol-relay
 sudo -u wol python3 -m venv /opt/wol-relay/venv
-sudo -u wol /opt/wol-relay/venv/bin/pip install --upgrade pip wheel
-sudo -u wol /opt/wol-relay/venv/bin/pip install fastapi 'uvicorn[standard]' 'httpx[http2]'
+# Empty venv on purpose: the first deploy.sh syncs it to the hashed lock
+# (relay/scripts/requirements-wol-relay.lock) before pushing the app.
 
 # Optional UFW (defense in depth; cloud firewall is primary)
 sudo ufw default deny incoming && sudo ufw default allow outgoing

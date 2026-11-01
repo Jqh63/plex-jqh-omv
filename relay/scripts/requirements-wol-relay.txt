@@ -1,6 +1,0 @@
-# Top-level deps of /opt/wol-relay/venv, upgraded to latest by `venv-upgrade`
-# (venv-run.sh). Unpinned on purpose: the route records before/after versions
-# and rolls back on a failed health check. Keep in sync with README § install.
-fastapi
-uvicorn[standard]
-httpx[http2]

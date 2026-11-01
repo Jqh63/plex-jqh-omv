@@ -1,5 +1,0 @@
-# Top-level deps of /opt/pock-sync/venv (created by Jqh63/pock
-# sync/bootstrap-pock-sync.sh), upgraded to latest by `venv-upgrade`.
-# Keep in sync with that bootstrap.
-fastapi
-uvicorn[standard]

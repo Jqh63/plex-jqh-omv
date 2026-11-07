@@ -129,6 +129,15 @@ var CACHE = 'plex-jqh-omv-v8-2026-07-29a';
   the shared parser in `version.js`, so there is no second marker to sync.
   Pinned by `tests/version-footer-e2e.py` (parser cases + the rendered footer
   over http, since a service worker needs a real origin).
+- **Marks next to the version** (2026-11-07, same rule as pock and dash-pat):
+  **✓** = latest published (`sw.js` re-read `no-store` on open, on return to
+  the app and every 5 min; no verdict ⇒ no ✓), **⟳** = a newer one is
+  published and loading, **✦** = this device took a new version < 24 h ago.
+  A tap on a mark shows its detail; nothing else is visible (family phones).
+  ⚠️ `sw.js` must **never** be served from or written to the SW cache — the
+  fetch handler returns early for it. Otherwise the miss-refill caches it on
+  the first check and ✓ shows after a deploy (pock#68). Pinned by layer F of
+  `tests/version-footer-e2e.py` (real server, `sw.js` rewritten mid-flight).
 
 > **Why not a rising minor** (the pre-2026-07-29 `vX.Y`). It did two
 > incompatible jobs: cache-buster, which must change on *every* deploy, and

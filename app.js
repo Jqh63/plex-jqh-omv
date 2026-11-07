@@ -2512,12 +2512,8 @@ document.getElementById('powerBtn').addEventListener('click',sendWol);
 // same parser serves the debug and manual-wake pages; it used to be copied into
 // all three). Leaves the placeholder alone when no cache of ours exists, rather
 // than claiming a version we cannot read.
-if(window.withCacheLabel){
-  withCacheLabel(function(label){
-    var el=document.getElementById('footerVersion');
-    if(el)el.textContent=label;
-  });
-}
+// 2026-11-07 — plus the discreet ✓ ⟳ ✦ marks (version.js § paintVersion).
+if(window.paintVersion)paintVersion(document.getElementById('footerVersion'));
 
 // Init: URL params > localStorage > settings screen
 if(!readUrlParams())config=loadConfig();

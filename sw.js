@@ -2,7 +2,7 @@
 // jour>. La generation ne bouge que sur une refonte de fond adossee a un ADR ;
 // la date bouge a chaque deploiement. Parse par version.js, affiche en pied de
 // page. Convention detaillee : CLAUDE.md § Versioning and propagation.
-var CACHE = 'plex-jqh-omv-v8-2026-11-07c';
+var CACHE = 'plex-jqh-omv-v8-2026-11-07d';
 var FILES = ['./', './app.js', './version.js', './preconnect.js', './install-hint.js', './fallback.html', './fallback.js', './debug.html', './debug.js', './manifest.json', './icon-192-v4.png', './icon-512-v4.png', './icon-maskable-v3.png', './icon-monochrome-v3.png'];
 
 // Two non-obvious requirements stacked here:
@@ -52,6 +52,11 @@ self.addEventListener('fetch', function(e) {
   // Only cache our own files on same origin, let everything else pass through
   var url = new URL(e.request.url);
   if (url.origin !== self.location.origin) return;
+  // 2026-11-07 — sw.js is never served from nor written to the cache: the ✓
+  // mark (version.js) re-reads it from the network to tell "latest published".
+  // Without this the miss-refill below cached it on the first check and every
+  // later check read the RUNNING name back — ✓ after a deploy (pock#68).
+  if (url.pathname.endsWith('/sw.js')) return;
   e.respondWith(
     caches.match(e.request, {ignoreSearch: true}).then(function(r) {
       // On cache miss (e.g. a file that failed to precache during install),

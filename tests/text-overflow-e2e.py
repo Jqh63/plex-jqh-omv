@@ -56,7 +56,7 @@ TOASTS = [
     '⚠ Serveur éteint — allume-le',
     '⚡ Demande de réveil envoyée',
     '⚠ Pas démarré — réessaie',
-    '⚠ Relais injoignable',
+    '⚠ Pas transmis — réessaie',
     '⚠ Relais : serveur introuvable',
     '⚠ Trop d\'essais — patiente',
     '⚠ Relais : accès refusé (config)',

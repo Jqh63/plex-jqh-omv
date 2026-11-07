@@ -776,6 +776,188 @@ def scenario_wake_lock_reacquired_after_background(p):
     return ok
 
 
+# --------------------------------------------------------------------------
+# 2026-11-07 — wake-failure honesty + the no-network card. Found by reading the
+# code, then reproduced in a browser before any fix: none of the four had been
+# seen IRL. They share one fixture whose behaviour is switched mid-scenario
+# (`state`), because each story is "the relay did X, THEN Y".
+def _switchable_handler(state, counters):
+    def handle(route: Route):
+        parsed = urlparse(route.request.url)
+        host, path = parsed.netloc, parsed.path
+        if host == RELAY_HOST and path == "/wol":
+            counters["wol"] += 1
+            if state["wol"] == "abort":
+                route.abort()
+                return
+            route.fulfill(status=state["wol"], headers=JSON_H, body='{}')
+            return
+        if host == RELAY_HOST and path == "/status":
+            counters["relay"] += 1
+            v = state["status"]
+            if v == "fail":
+                route.abort()
+                return
+            if v == "wake-failed":
+                body = ('{"up": false, "stale": false, "age_s": null, "eta_s": 80, '
+                        f'"wake_failed": true, "served_at": {_served_at()}}}')
+            else:
+                body = _status_body(v)
+            route.fulfill(status=200, headers=JSON_H, body=body)
+            return
+        if host == CONFIG_HOST or host.endswith("." + CONFIG_HOST):
+            route.abort()
+            return
+        route.continue_()
+    return handle
+
+
+def _open(p, state, counters):
+    b = getattr(p, ENGINE).launch()
+    ctx = b.new_context(viewport={"width": 390, "height": 844})
+    page = ctx.new_page()
+    page.route("**/*", _switchable_handler(state, counters))
+    page.goto(PWA_URL, wait_until="load")
+    page.wait_for_selector("#statusLabel", state="attached", timeout=10000)
+    page.wait_for_timeout(3000)
+    return b, ctx, page
+
+
+def _button_shown(page):
+    return page.evaluate(
+        "() => document.getElementById('powerSection').style.display") != "none"
+
+
+def _toast(page):
+    return page.evaluate(
+        "() => { var t = document.getElementById('toast');"
+        " return t.className.includes('show') ? t.textContent : ''; }")
+
+
+def scenario_radio_back_relay_silent_rearms_the_button(p):
+    """The "Pas de connexion" card is a fact about the PHONE, not a verdict about
+    the home — yet it was stored as one (cardKind 'verdict' + hasConfirmedState),
+    and that card hides the wake button. When the radio came back and the first
+    probes went unanswered, the res.unknown branch "kept the verdict": a phone
+    WITH network kept saying "Pas de connexion", button hidden, until the 60 s
+    staleness guard released it (measured: 55 s still hidden, 70 s unknown).
+
+    Positive control: the same return with a relay that answers settles at once,
+    or "the card changes after the radio returns" would pass on an app that
+    repaints anything at all."""
+    _reset_clock_skew()
+    print("\n## radio-back-relay-silent-rearms-the-button (2026-11-07)")
+    counters = {"relay": 0, "home": 0, "wol": 0}
+    state = {"wol": 200, "status": "down"}
+    b, ctx, page = _open(p, state, counters)
+    ctx.set_offline(True)
+    page.wait_for_timeout(1500)
+    s = card(page)
+    ok = check("radio lost → the no-network card, button hidden",
+               "connexion" in s["label"] and not _button_shown(page),
+               f"label={s['label']!r}")
+    state["status"] = "fail"
+    ctx.set_offline(False)
+    page.wait_for_timeout(15000)
+    s = card(page)
+    print(f"  radio back, relay silent, +15 s → {s['label']!r} button={_button_shown(page)}")
+    ok &= check("a phone with network no longer claims 'Pas de connexion'",
+                "connexion" not in s["label"], f"label={s['label']!r}")
+    ok &= check("and the wake button is back", _button_shown(page))
+    b.close()
+
+    state = {"wol": 200, "status": "down"}
+    b, ctx, page = _open(p, state, counters)
+    ctx.set_offline(True)
+    page.wait_for_timeout(1500)
+    ctx.set_offline(False)
+    page.wait_for_timeout(3000)
+    s = card(page)
+    ok &= check("control: relay answers on return → settles to the down card",
+                s["label"] == "Éteint" and _button_shown(page), f"label={s['label']!r}")
+    b.close()
+    return ok
+
+
+def scenario_unsent_wake_does_not_blame_the_admin(p):
+    """A wake POST that died in transit taught us nothing about the home, and its
+    most frequent cause is the phone's own last mile (v8.68's own reasoning for
+    setUnknown). It used to set wakeFailed → red "Hors ligne / contacte
+    l'administrateur" + toast "Relais injoignable": an alarm, and a culprit, on a
+    wake that was never even delivered. Same for 429, whose toast says "patiente"
+    while the card said "call the admin".
+
+    Expected instead: the card goes back to what was known before the tap (the
+    blue down), nothing names the admin, the toast says what happened. The
+    transport case still promotes the manual-wake page (the relay may really be
+    gone). Positive controls: a 401 still reds (failed-wake-says-contact-admin),
+    and a POST whose response was lost but which the relay DID receive is
+    adopted as a wake on the next poll."""
+    _reset_clock_skew()
+    print("\n## unsent-wake-does-not-blame-the-admin (2026-11-07)")
+    ok = True
+    for wol, label in (("abort", "transport failure"), (429, "429")):
+        counters = {"relay": 0, "home": 0, "wol": 0}
+        state = {"wol": wol, "status": "down"}
+        b, ctx, page = _open(p, state, counters)
+        page.click("#powerBtn")
+        page.wait_for_timeout(1200)
+        s = card(page)
+        t = _toast(page)
+        print(f"  {label} → {s['label']!r} / {s['sub']!r} toast={t!r} fb={s['fallbackText']!r}")
+        ok &= check(f"{label}: no red, no 'contacte l'administrateur'",
+                    not is_red(s) and "administrateur" not in s["sub"],
+                    f"card={s['card']!r} sub={s['sub']!r}")
+        ok &= check(f"{label}: back to the down card, button armed",
+                    s["label"] == "Éteint" and "Allumer" in s["power"],
+                    f"label={s['label']!r} power={s['power']!r}")
+        ok &= check(f"{label}: the toast does not name the relay",
+                    t and "Relais" not in t, f"toast={t!r}")
+        if wol == "abort":
+            ok &= check("transport: the manual-wake page is promoted",
+                        "comment faire" in s["fallbackText"],
+                        f"fb={s['fallbackText']!r}")
+        b.close()
+
+    counters = {"relay": 0, "home": 0, "wol": 0}
+    state = {"wol": "abort", "status": "down"}
+    b, ctx, page = _open(p, state, counters)
+    state["status"] = "waking:1"
+    page.click("#powerBtn")
+    page.wait_for_timeout(10000)
+    s = card(page)
+    ok &= check("control: response lost but relay received → wake adopted",
+                is_starting(s) and is_counting_down(s), f"label={s['label']!r}")
+    b.close()
+    return ok
+
+
+def scenario_relay_failure_signal_expiry_is_followed(p):
+    """v8.69 made the relay's `wake_failed` the shared input to the red, so that
+    every open device agrees ("two phones in the same room, one red one blue").
+    But the client latched it: once the relay stopped serving it
+    (WAKE_FAIL_SIGNAL_TTL_S), a device that had seen it stayed red until the home
+    came up, while any device opened since was blue — the very split v8.69 was
+    written to end. A failure the relay REPORTED is retracted when the relay
+    stops reporting it; a failure this device witnessed itself (401, timeout)
+    stays, which failed-wake-says-contact-admin keeps pinning."""
+    _reset_clock_skew()
+    print("\n## relay-failure-signal-expiry-is-followed (2026-11-07)")
+    counters = {"relay": 0, "home": 0, "wol": 0}
+    state = {"wol": 200, "status": "wake-failed"}
+    b, ctx, page = _open(p, state, counters)
+    s = card(page)
+    ok = check("relay serves wake_failed → red", is_red(s), f"card={s['card']!r}")
+    state["status"] = "down"
+    page.wait_for_timeout(12000)
+    s = card(page)
+    print(f"  signal expired, home still down, +12 s → {s['label']!r} / {s['sub']!r}")
+    ok &= check("the red follows the relay back to the calm down card",
+                not is_red(s) and s["label"] == "Éteint", f"label={s['label']!r}")
+    b.close()
+    return ok
+
+
 def main():
     print("=" * 72)
     print(f"WAKE-path E2E (v8.31 + v8.32) — engine={ENGINE} base={PWA_BASE}")
@@ -796,6 +978,9 @@ def main():
         ok &= scenario_wake_lock_reacquired_after_background(p)
         ok &= scenario_degraded_resume_does_not_go_green_early(p)
         ok &= scenario_late_adopted_wake_still_shows_a_timer(p)
+        ok &= scenario_radio_back_relay_silent_rearms_the_button(p)
+        ok &= scenario_unsent_wake_does_not_blame_the_admin(p)
+        ok &= scenario_relay_failure_signal_expiry_is_followed(p)
 
     print("\n" + "=" * 72)
     print("ALL PASS" if ok else "FAILURES — see above")

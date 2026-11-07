@@ -23,6 +23,11 @@ var relayReachable=true;
 // answer, whatever the reason. Escalating to "contacte l'administrateur" is
 // warranted exactly when that button has been pressed and did not work.
 var wakeFailed=false;
+// 2026-11-07 — true when wakeFailed came from the relay's `wake_failed` (shared,
+// expires with WAKE_FAIL_SIGNAL_TTL_S), false when this device witnessed the
+// failure itself (401/403/502, its own timeout). Only the former is retracted
+// when the relay stops reporting it — see checkStatus().
+var wakeFailedByRelay=false;
 // v8.2 — N-consecutive-miss debounce on the relay-DOWN cosmetic only. A relay
 // /status transport failure is most often a slow-but-alive e2-micro (cold
 // burstable CPU spanning more than one 15 s tick) or a last-mile blip, NOT a
@@ -1009,7 +1014,7 @@ function startApp(){
   buildLinks();
   clearWolPoll();
   releaseWakeLock();
-  isOnline=false;wolSent=false;remoteWaking=false;checking=false;checkStartedAt=0;relayReachable=true;relayMissStreak=0;hasConfirmedState=false;wakeFailed=false;cardKind='none';unknownGraceUsed=false;
+  isOnline=false;wolSent=false;remoteWaking=false;checking=false;checkStartedAt=0;relayReachable=true;relayMissStreak=0;hasConfirmedState=false;wakeFailed=false;wakeFailedByRelay=false;cardKind='none';unknownGraceUsed=false;
   // v8.28 — restore the persisted relay-served ETA so a wake fired right after an
   // offline open still seeds a shared-value countdown before the first poll lands.
   relayEtaMs=(config&&typeof config.eta==='number'&&config.eta*1000>=BOOT_MIN_MS&&config.eta*1000<=BOOT_MAX_MS)?config.eta*1000:0;
@@ -1559,11 +1564,18 @@ function checkStatus(){
         if(navigator.vibrate)navigator.vibrate(300);
         showToast('⚠ Pas démarré — réessaie',true,TOAST_LONG_MS);
       }
-      wakeFailed=true;
+      wakeFailed=true;wakeFailedByRelay=true;
       // No orange re-confirmation detour on the way to this red: the relay
       // watched the home ignore a full campaign, which is a stronger statement
       // than the two agreeing probes DOWN_CONFIRM asks for.
       downStreak=DOWN_CONFIRM;
+    }else if(wakeFailedByRelay&&!res.wakeFailedRemote){
+      // 2026-11-07 — the relay stopped reporting the failure it had reported
+      // (WAKE_FAIL_SIGNAL_TTL_S, a new wake, the home up). Follow it: latching
+      // kept this device red while every device opened since was blue — the
+      // exact split v8.69 was written to end. A failure this device witnessed
+      // itself (wakeFailedByRelay false) is not the relay's to retract.
+      wakeFailed=false;wakeFailedByRelay=false;
     }
     // v8.7 asymmetric verdict commit. UP commits green instantly and resets the
     // down streak. DOWN is held: the first live "down" paints orange and fires
@@ -1904,8 +1916,9 @@ function setStarting(){
 // local-wake "Démarrage…" view + boot countdown, but never touch the retry-POST
 // machinery (we didn't fire). Idempotent across polls: while waking persists each
 // poll re-enters here, but the countdown is only (re)armed when none is running.
-// The user can still tap the power button (sendWol re-fires harmlessly — extra
-// magic packets, idempotent). Cleared on the green/red settle.
+// The power button is NOT tappable meanwhile: `.power-btn.sent` is
+// pointer-events:none, as for a local wake — a second campaign would add
+// nothing. Cleared on the green/red settle.
 function enterRemoteWaking(wakeAgeS){
   hasConfirmedState=true;lastVerdictAtMs=Date.now();
   downStreak=0;if(downRecheckTimer){clearTimeout(downRecheckTimer);downRecheckTimer=null;}
@@ -2048,30 +2061,58 @@ function postWol(){
     body:JSON.stringify({mac:macToColon(config.mac)})
   }).then(function(r){
     if(r.ok)return;
-    wolSent=false;wolStartTime=0;wakeFailed=true;stopCountdown();clearWolPoll();releaseWakeLock();
+    wolSent=false;wolStartTime=0;stopCountdown();clearWolPoll();releaseWakeLock();
+    if(navigator.vibrate)navigator.vibrate(300);
+    // 2026-11-07 — 429 is not a failed wake: the relay is fine, it asks us to
+    // wait, and the toast says so. Painting the admin red under "patiente" told
+    // the family two opposite things at once.
+    if(r.status===429){
+      showToast('⚠ Trop d\'essais — patiente',true,TOAST_LONG_MS);
+      wakeNotSent();
+      return;
+    }
+    wakeFailed=true;wakeFailedByRelay=false;
     // v8.53 — name the case. These are genuinely different situations for the
     // reader: 401/403 and 502 are the admin's problem and retrying is pointless,
-    // 429 clears on its own, and only "réessaie" is honest for the rest.
+    // and only "réessaie" is honest for the rest.
     var msg;
     if(r.status===401||r.status===403)msg='Relais : accès refusé (config)';
-    else if(r.status===429)msg='Trop d\'essais — patiente';
     else if(r.status===502)msg='Relais : serveur introuvable';
     else msg='Erreur relais HTTP '+r.status;
-    if(navigator.vibrate)navigator.vibrate(300);
     showToast('⚠ '+msg,true,TOAST_LONG_MS);
     setOffline();
   }).catch(function(){
-    wolSent=false;wolStartTime=0;wakeFailed=true;stopCountdown();clearWolPoll();releaseWakeLock();
-    // Flip relayReachable manually — a checkStatus() right now would race
-    // the WoL POST, and we already know the relay just failed. This is a
-    // CONFIRMED failure (the user actually tried to wake), so bypass the
-    // miss-streak debounce and surface it immediately; pin the streak at the
-    // confirmed-down ceiling so a following miss keeps it down.
+    wolSent=false;wolStartTime=0;stopCountdown();clearWolPoll();releaseWakeLock();
+    // 2026-11-07 — a POST that died in transit is NOT a failed wake: nothing
+    // reached the home, so nothing was learned about it, and the most frequent
+    // cause is the phone's own last mile (v8.68's reasoning for setUnknown). It
+    // used to set wakeFailed — the admin red and "Relais injoignable", a culprit
+    // the app cannot identify. If the relay did receive it (only the response
+    // was lost), the next poll adopts the wake through `waking`.
+    // The relay is still the likeliest thing to be truly gone after a tap that
+    // failed outright, so relayReachable is flipped at once (bypassing the
+    // miss-streak debounce, streak pinned at the ceiling): that is what promotes
+    // the manual-wake page, the one useful next step.
     relayReachable=false;relayMissStreak=RELAY_DOWN_MISSES;
     if(navigator.vibrate)navigator.vibrate(300);
-    showToast('⚠ Relais injoignable',true,TOAST_LONG_MS);
-    setOffline();
+    showToast('⚠ Pas transmis — réessaie',true,TOAST_LONG_MS);
+    wakeNotSent();
   });
+}
+
+// 2026-11-07 — a wake that never left (transport failure, 429): put back what
+// was known BEFORE the tap, and claim nothing new. A settled down returns to its
+// card with its own age (setOffline would otherwise re-stamp lastVerdictAtMs and
+// show "vérifié" for a measurement nobody made); anything less than a verdict
+// becomes the honest unknown.
+function wakeNotSent(){
+  if(hasConfirmedState){
+    var t=lastVerdictAtMs;
+    setOffline();
+    lastVerdictAtMs=t;updateVerdictAge();
+  }else{
+    setUnknown();
+  }
 }
 
 function setOffline(){
@@ -2121,7 +2162,13 @@ function setOffline(){
   var noNet=!navigator.onLine;
   var sleeping=!noNet&&!wakeFailed;
   var paint=noNet?'nonet':(sleeping?'sleep':'offline');
-  cardKind='verdict';
+  // 2026-11-07 — the no-network card is a fact about the PHONE, not a verdict
+  // about the home, so it must not be kept like one: the res.unknown branch
+  // keeps a 'verdict' card when the relay is silent, and this card hides the
+  // wake button. Once the radio returned, a silent first probe left a phone WITH
+  // network on "Pas de connexion", button hidden, for up to STATUS_LOCAL_TTL_MS
+  // (pinned by wake-e2e radio-back-relay-silent-rearms-the-button).
+  cardKind=noNet?'nonet':'verdict';
   document.getElementById('statusDot').className='status-dot '+paint;
   document.getElementById('statusCard').className='status-card '+paint;
   // The wake button is hidden ONLY here: navigator.onLine=false is a fact, not
@@ -2214,7 +2261,7 @@ function sendWol(){
   wolPollTimer=setInterval(function(){
     if(!wolSent||isOnline){clearWolPoll();return;}
     if(Date.now()-wolStartTime>WOL_TIMEOUT_MS){
-      wolSent=false;wolStartTime=0;wakeFailed=true;clearWolPoll();stopCountdown();releaseWakeLock();checkStatus();
+      wolSent=false;wolStartTime=0;wakeFailed=true;wakeFailedByRelay=false;clearWolPoll();stopCountdown();releaseWakeLock();checkStatus();
       if(navigator.vibrate)navigator.vibrate(300);
       // Surface the timeout — silent failure (vibration + flip to red) used to
       // leave family members wondering whether the app was broken. Toast tells

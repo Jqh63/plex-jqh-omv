@@ -21,15 +21,13 @@ OUT.mkdir(exist_ok=True)
 CFG = ('?host=myserver.example.com&relay=https://wol.example.com'
        '&mac=AABBCCDDEEFF&token=demo&title=Plex+jqh+omv')
 
-# Longest toasts / labels we just shortened — render each in situ.
-TOASTS = [
-    ("toast-auth-refused", "⚠ Relais : accès refusé — réveil manuel ↓", True),
-    ("toast-not-started", "⚠ Pas démarré — réessaie ou réveil manuel ↓", True),
-    ("toast-relay-unreachable", "⚠ Relais injoignable — réveil manuel ↓", True),
-    ("toast-wake-progress", "⏳ Réveil en cours — patiente", True),
-    ("toast-server-off", "⚠ Serveur éteint — allume-le", True),
-    ("toast-started-ok", "✓ Serveur démarré avec succès", False),
-]
+# Every toast app.js can show, read from app.js by the regression bench's own
+# parser — the hand-copied list that lived here had drifted (2026-11-07: three
+# "réveil manuel ↓" tails the app dropped in v8.59). Warn = the ⚠/⏳ ones.
+import importlib.util as _ilu
+_spec = _ilu.spec_from_file_location('text_overflow', pathlib.Path(__file__).parent / 'text-overflow-e2e.py')
+_to = _ilu.module_from_spec(_spec); _spec.loader.exec_module(_to)
+TOASTS = [(f"toast-{i:02d}", t, t[0] in '⚠⏳') for i, t in enumerate(_to.TOASTS)]
 
 def main():
     with sync_playwright() as p:

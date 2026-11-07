@@ -209,3 +209,40 @@ def test_a_new_tap_during_the_grace_gets_its_own_campaign(clean_state):
         await second
         assert len(clean_state) - sent_before == len(relay.WOL_CAMPAIGN_DELAYS_S)
     asyncio.run(run())
+
+
+class _Running:
+    """Stands for a campaign task still in flight (bursts or grace)."""
+    def done(self):
+        return False
+
+
+@pytest.mark.parametrize("campaign, expect_waking", [
+    (_Running(), True),   # the case: a re-armed campaign outlives the first anchor
+    (None, False),        # control: anchor past the TTL, nothing running ⇒ no claim
+])
+def test_waking_lasts_as_long_as_the_campaign(clean_state, monkeypatch, campaign, expect_waking):
+    """A /wol in the grace re-arms a fresh campaign but keeps the boot anchor
+    (_last_wol_at, so the measured boot time — hence the shared ETA — stays
+    the real one). `waking` used to be timed on that anchor alone: it expired
+    at t+TTL while the new campaign still ran ~TTL more, and every PWA saw the
+    home 'down', no wake in progress, during it (2026-10-06 review, simulated
+    2026-11-07). The claim now holds while a campaign runs."""
+    from fastapi.testclient import TestClient
+
+    async def no_pull(background=False):
+        return False, False
+    monkeypatch.setattr(relay, "_poll_home", no_pull)
+    relay._wake_pending = True
+    relay._last_wol_at = time.monotonic() - relay.WAKE_SIGNAL_TTL_S - 5
+    with TestClient(relay.app) as client:
+        relay._campaign_task = campaign   # set inside: shutdown cancels a real task
+        try:
+            body = client.get("/status", headers={"X-Token": os.environ["WOL_TOKEN"]}).json()
+        finally:
+            relay._campaign_task = None
+    assert body["up"] is False
+    assert (body.get("waking") is True) is expect_waking, body
+    if expect_waking:
+        # Age stays the real one: the PWA shows a long wake, not a fresh one.
+        assert body["wake_age_s"] > relay.WAKE_SIGNAL_TTL_S

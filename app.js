@@ -788,16 +788,18 @@ function saveConfig(){
   var prevHost=(config&&config.host)||'';
   var prevEta=config&&config.eta;
   var sameHost=host===prevHost;
+  // Validation toasts stay <= 2 lines at 256 px (text-overflow-e2e measures
+  // every toast read from this file): the format IS the message, not a preamble.
   if(!host){showToast('⚠ Domaine requis',true);return}
   if(!validHost(host)){showToast('⚠ Domaine invalide',true);return}
   var cleaned='';
-  if(mac){cleaned=cleanMac(mac);if(!validMac(cleaned)){showToast('⚠ MAC invalide (12 caractères hex)',true);return}}
+  if(mac){cleaned=cleanMac(mac);if(!validMac(cleaned)){showToast('⚠ MAC : 12 caractères hex',true);return}}
   var portNum=parseInt(port,10);
   if(isNaN(portNum)||portNum<1||portNum>65535){showToast('⚠ Port invalide (1-65535)',true);return}
   var cleanedRelay='';
   if(relay){cleanedRelay=cleanRelay(relay);if(!validRelay(cleanedRelay)){showToast('⚠ Relais invalide (URL HTTPS)',true);return}}
   if(ip&&!validIp(ip)){showToast('⚠ IP invalide (format A.B.C.D)',true);return}
-  if(win&&!parseWindow(win)){showToast('⚠ Plage invalide (format 13h50-00h10)',true);return}
+  if(win&&!parseWindow(win)){showToast('⚠ Plage : ex. 13h50-00h10',true);return}
   config={host:host,port:String(portNum)};
   if(cleaned)config.mac=cleaned;
   if(ip)config.ip=ip;

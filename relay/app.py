@@ -1149,7 +1149,14 @@ async def status(request: Request, x_token: str | None = Header(None)):
         body["wake_failed"] = True
     elif not body["up"] and _last_wol_at:
         wake_age = time.monotonic() - _last_wol_at
-        if wake_age < WAKE_SIGNAL_TTL_S:
+        # Timed on the anchor, OR as long as a campaign still runs: a /wol in
+        # the grace re-arms a fresh campaign but keeps the anchor (it dates the
+        # boot, hence the shared ETA), so the anchor alone expired `waking` up
+        # to a TTL before that campaign ended — every PWA saw "down, nothing in
+        # progress" mid-wake (2026-10-06 review). A campaign stopped by the
+        # window or by exhaustion is done(), so this adds nothing there.
+        campaign_running = _campaign_task is not None and not _campaign_task.done()
+        if wake_age < WAKE_SIGNAL_TTL_S or campaign_running:
             body["waking"] = True
             # Sub-second precision matters here: int() truncation alone put up
             # to ~1 s of the observed ~3 s cross-device countdown offset (the

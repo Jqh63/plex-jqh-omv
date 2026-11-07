@@ -132,8 +132,9 @@ var CACHE = 'plex-jqh-omv-v8-2026-07-29a';
 - **Marks next to the version** (2026-11-07, same rule as pock and dash-pat):
   **✓** = latest published (`sw.js` re-read `no-store` on open, on return to
   the app and every 5 min; no verdict ⇒ no ✓), **⟳** = a newer one is
-  published and loading, **✦** = this device took a new version < 24 h ago.
-  A tap on a mark shows its detail; nothing else is visible (family phones).
+  published (the SW reloads on its own; **a tap on ⟳ reloads now**), **✦** =
+  this device took a new version < 24 h ago. A tap on ✓ or ✦ shows its detail;
+  nothing else is visible (family phones).
   ⚠️ `sw.js` must **never** be served from or written to the SW cache — the
   fetch handler returns early for it. Otherwise the miss-refill caches it on
   the first check and ✓ shows after a deploy (pock#68). Pinned by layer F of

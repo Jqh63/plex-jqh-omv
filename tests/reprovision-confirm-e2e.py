@@ -22,6 +22,13 @@ Rows:
   G. BARE SAME HOST       — `?host=<same>` alone: silent AND keeps relay/mac
      (F9: it used to wipe them, hiding the wake button).
   H. STATUS CHANGE        — same host, `?status=evil.example`: prompts (F9).
+  I. SETTINGS HOST CHANGE — saving another host in the settings drops the old
+     home's `status`/`rescue` (they kept aiming the direct probe and the rescue
+     link at the old home — simulated 2026-11-07).
+  J. SETTINGS SAME HOST   — positive control: a same-host save keeps them.
+  K. NO GREEN INHERITED   — after a host change (settings OR accepted link) the
+     old home's cached green is not pre-painted on the new one; a same-host
+     save still pre-paints it (positive control).
 
 Run: python3 tests/reprovision-confirm-e2e.py   (PWA_ENGINES=chromium to narrow)
 """
@@ -133,6 +140,57 @@ def run(engine, pw, base):
     seen, cfg, _ = scenario(HOME, EVIL_STATUS, answer=False)
     check(engine, "H status change prompts",
           len(seen) == 1 and not cfg.get("status"), f"dialogs={seen} cfg={cfg}")
+
+    # I-K: settings path + cached verdict. Probes are aborted (offline box), so
+    # any "online" paint can only come from the cache pre-paint.
+    FULL = HOME + "&status=seerr.home.example&rescue=https://relay.home.example/r/x"
+    UP = ("localStorage.setItem('plex-jqh-omv-status',"
+          "JSON.stringify({up:true,relayOk:true,degraded:false,t:Date.now()}))")
+
+    def paints(page):
+        raw = page.evaluate("localStorage.getItem('plex-jqh-omv-paints')") or "[]"
+        return [e.get("w") for e in json.loads(raw)]
+
+    def via_settings(new_host):
+        ctx = browser.new_context(service_workers="block")
+        ctx.route("**/*", lambda r: r.continue_() if r.request.url.startswith(base) else r.abort())
+        page = ctx.new_page()
+        page.goto(f"{base}/index.html?{FULL}", wait_until="load")
+        page.evaluate(UP)
+        page.evaluate("localStorage.removeItem('plex-jqh-omv-paints')")
+        page.evaluate("showSettings()")
+        page.wait_for_timeout(300)
+        page.fill("#cfgHost", new_host)
+        page.evaluate("saveConfig()")
+        page.wait_for_timeout(300)
+        cfg = json.loads(page.evaluate("localStorage.getItem('plex-jqh-omv-cfg')"))
+        w = paints(page)
+        ctx.close()
+        return cfg, w
+
+    cfg, w = via_settings("other.example")
+    check(engine, "I settings host change drops status/rescue",
+          not cfg.get("status") and not cfg.get("rescue"), f"cfg={cfg}")
+    check(engine, "K settings host change: no inherited green",
+          "cache-prepaint-open" not in w, f"paints={w}")
+    cfg, w = via_settings("home.example")
+    check(engine, "J settings same host keeps status/rescue",
+          cfg.get("status") == "seerr.home.example" and cfg.get("rescue"), f"cfg={cfg}")
+    check(engine, "K same-host save still pre-paints (control)",
+          "cache-prepaint-open" in w, f"paints={w}")
+
+    ctx = browser.new_context(service_workers="block")
+    ctx.route("**/*", lambda r: r.continue_() if r.request.url.startswith(base) else r.abort())
+    page = ctx.new_page()
+    page.goto(f"{base}/index.html?{HOME}", wait_until="load")
+    page.evaluate(UP)
+    page.evaluate("localStorage.removeItem('plex-jqh-omv-paints')")
+    page.on("dialog", lambda d: d.accept())
+    page.goto(f"{base}/index.html?{EVIL}", wait_until="load")
+    w = paints(page)
+    ctx.close()
+    check(engine, "K accepted link host change: no inherited green",
+          "cache-prepaint-open" not in w, f"paints={w}")
 
     browser.close()
 

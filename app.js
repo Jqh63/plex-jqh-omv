@@ -269,9 +269,10 @@ function probeBudgetMs(){
   return (Date.now()-lastRelayAnswerAt<RELAY_WARM_FOR_MS)
     ?PROBE_TIMEOUT_MS:COLD_PROBE_TIMEOUT_MS;
 }
-// Direct-home fallback budget. Only used when the relay /status fetch fails
-// (transport failure or answered-but-degraded). One shot, no retry — by the
-// time we reach it the radio is warm, so 5 s is ample.
+// Direct-home probe budget — RELAY-LESS mode only. Since v8.65 a failed relay
+// /status no longer falls back to the home (an opaque no-cors answer proves
+// nothing, see probe()), so this never runs when a relay is configured.
+// One shot, no retry.
 var HOME_FALLBACK_TIMEOUT_MS=5000;
 // Consecutive relay /status misses before the (advisory) "Relais injoignable"
 // cosmetic hardens — see relayMissStreak above. 3 misses ≈ 2 self-healing
@@ -287,8 +288,7 @@ var RELAY_DOWN_MISSES=3;
 // produced (the user's report: a red that was green a moment later, with no
 // orange in between). Two real sources of a transient {up:false}: the relay's
 // server-side SWR cache catching a momentary home blip, or a cold mobile radio
-// whose relay /status AND direct-home fallback both time out on the first cycle
-// then warm on the re-probe. A genuine down still reaches red, ~DOWN_RECHECK_MS
+// whose relay /status times out on the first cycle then warms on the re-probe. A genuine down still reaches red, ~DOWN_RECHECK_MS
 // later — the accepted cost (validated in tests/state-machine-sim.py).
 var DOWN_CONFIRM=2,DOWN_RECHECK_MS=2500,downStreak=0,downRecheckTimer=null;
 
@@ -680,6 +680,7 @@ function readUrlParams(){
     try{history.replaceState(null,'',location.pathname);}catch(e){}
     return false;
   }
+  if(prev.host&&!sameHost)forgetServerVerdict();
   config=next;
   storeConfig(config);
   // Strip the provisioning params from the address bar once adopted: the URL
@@ -786,6 +787,7 @@ function saveConfig(){
   var prevWindow=(config&&config.window)||'';
   var prevHost=(config&&config.host)||'';
   var prevEta=config&&config.eta;
+  var sameHost=host===prevHost;
   if(!host){showToast('⚠ Domaine requis',true);return}
   if(!validHost(host)){showToast('⚠ Domaine invalide',true);return}
   var cleaned='';
@@ -807,11 +809,14 @@ function saveConfig(){
   // Relay-owned window survives a save untouched (its field was disabled);
   // dropping the relay hands the window back to manual editing.
   if(prevWinSrc==='relay'&&cleanedRelay){config.window=prevWindow;config.winSrc='relay';}
-  if(prevStatus)config.status=prevStatus;
-  if(prevRescue)config.rescue=prevRescue;
-  // Relay-learned boot ETA: same rule as readUrlParams() — kept for the same
-  // home, dropped for another one (a different machine boots differently).
-  if(host===prevHost&&typeof prevEta==='number')config.eta=prevEta;
+  // status/rescue/ETA all describe THIS home: same rule as readUrlParams() —
+  // kept for the same host, dropped for another one. Carrying them across a
+  // host change left the direct probe aimed at the old home and the rescue
+  // link on the old relay page (simulated 2026-11-07, never seen IRL).
+  if(sameHost&&prevStatus)config.status=prevStatus;
+  if(sameHost&&prevRescue)config.rescue=prevRescue;
+  if(sameHost&&typeof prevEta==='number')config.eta=prevEta;
+  if(prevHost&&!sameHost)forgetServerVerdict();
   storeConfig(config);
   startApp();
 }
@@ -1080,6 +1085,13 @@ function readLocalStatus(maxAgeMs){
 // that to the confident green it had just withheld. Cached shape is versioned
 // only by its keys: an old entry simply has no `degraded` and reads falsy,
 // which is the pre-v8.72 behaviour for the one TTL it survives.
+// The <60 s cached verdict belongs to the server that produced it. On a server
+// change, startApp() pre-painted the OLD home's green on the new one, and kept
+// it while the new relay was silent (simulated 2026-11-07). Called on a host
+// change only.
+function forgetServerVerdict(){
+  try{localStorage.removeItem(STATUS_LOCAL_KEY);}catch(e){}
+}
 function writeLocalStatus(up,relayOk,degraded){
   try{localStorage.setItem(STATUS_LOCAL_KEY,JSON.stringify({up:!!up,relayOk:relayOk!==false,degraded:!!degraded,t:Date.now()}));}catch(e){}
 }
@@ -1188,7 +1200,7 @@ function relayEvidence(res){
 }
 
 // timeoutMs defaults to PROBE_TIMEOUT_MS (the relay /status budget). The
-// direct-home fallback passes HOME_FALLBACK_TIMEOUT_MS explicitly.
+// relay-less direct-home probe passes HOME_FALLBACK_TIMEOUT_MS explicitly.
 function fetchOnce(url,opts,timeoutMs){
   var ctrl=new AbortController(),timer=setTimeout(function(){ctrl.abort();},timeoutMs||PROBE_TIMEOUT_MS);
   var init=Object.assign({cache:'no-store',signal:ctrl.signal},opts||{});
@@ -1197,7 +1209,7 @@ function fetchOnce(url,opts,timeoutMs){
 
 function fetchStatusFromRelay(){
   // Single shape we trust: HTTP 200 with a JSON body that has an "up"
-  // boolean. Anything else triggers the fallback path — but we tag *how*
+  // boolean. Anything else is a non-verdict (see probe()) — but we tag *how*
   // it failed so checkStatus() can tell two very different cases apart:
   //   - rejection with .answered=true → the relay returned an HTTP response
   //     (503 "status target not configured", 404 legacy, 5xx, 200-bad-shape).
@@ -1209,7 +1221,7 @@ function fetchStatusFromRelay(){
   var answered=function(msg){var e=new Error(msg);e.answered=true;return Promise.reject(e);};
   // v8.17 — /status is token-protected on the relay (same shared token as
   // /wol). Send it when configured; without a token the relay answers 401,
-  // which lands on the answered-rejection path → direct-home fallback.
+  // which lands on the answered-rejection path (relay alive, verdict unknown).
   // v8.25 — always send X-Client-Id (device telemetry); add X-Token when set.
   var headers={'X-Client-Id':CLIENT_ID};
   if(config.token)headers['X-Token']=config.token;
@@ -1678,13 +1690,14 @@ function setButtonChecking(){
   pLbl.textContent='Vérification…';pLbl.className='power-label checking';
 }
 
-// Resolves EXACTLY ONCE to {up, relayReachable}; never rejects. One relay
-// /status fetch, and on its failure exactly one direct-home fallback:
+// Resolves EXACTLY ONCE; never rejects. One relay /status fetch, no fallback
+// to the home since v8.65 (see the rejection branch below):
 //   - relay answers 200 {up}            → trust it (relay reachable).
-//   - relay *answers* but degraded      → relay alive, oracle off: fall back to
-//     (503 STATUS_TARGET_URL unset, 404)  direct-home for up/down, keep WoL on.
-//   - relay *transport*-fails (timeout) → relay unreachable: fall back, mark it
-//                                         down (the fallback link is promoted).
+//   - relay *answers* but degraded      → relay alive, oracle off: no verdict
+//     (503 STATUS_TARGET_URL unset, 404)  (unknown), keep WoL on.
+//   - relay *transport*-fails (timeout) → no verdict, relay counted as missed
+//                                         (the fallback link is promoted).
+// Relay-less mode is the one exception: the direct-home probe is its only oracle.
 // No retry, no hold, no streak — the generous PROBE_TIMEOUT_MS absorbs the
 // cold-radio handshake that the old cascade was built to paper over.
 function probe(){

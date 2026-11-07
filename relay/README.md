@@ -21,7 +21,9 @@ knowledge base). The relay polls the home via HEAD on a configurable
 `STATUS_TARGET_URL`, with a 5 s fresh / 60 s stale in-memory cache.
 
 **Shared wake-state** (since 2026-06): after a `POST /wol`, `/status` also
-returns `waking: true` + `wake_age_s` for `WAKE_SIGNAL_TTL_S` (default 150 s)
+returns `waking: true` + `wake_age_s` for `WAKE_SIGNAL_TTL_S` (default 150 s),
+or for as long as a wake campaign still runs (a `/wol` in the grace re-arms one
+without moving `wake_age_s`'s anchor, which dates the boot for the ETA),
 while the home is still down. This lets *any* open PWA — not just the device
 that fired the wake — show the boot countdown, and deduplicates a wake across
 devices. The signal clears implicitly once the home answers (`up` wins).

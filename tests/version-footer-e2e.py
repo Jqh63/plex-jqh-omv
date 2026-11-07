@@ -20,13 +20,27 @@ Two layers, on purpose:
      the footer reads `v<gen> · <date>`. Layer A can pass while the footer stays
      "—" — that is exactly the class of bug the render pins exist for.
 
+  C. RULES (2026-11-07) — `versionState` (✦, 24 h) and `latestState` (✓/⟳)
+     evaluated on synthetic inputs.
+  D. MARKS — rendered footer with the `sw.js` re-read replaced in the page:
+     same name ⇒ ✓ alone, newer ⇒ ⟳, offline ⇒ no mark; ✦ after a label change,
+     and a tap shows the detail.
+  E. CONTRAST — ✓ and ✦ forced visible, >= 4.5:1 on index and fallback.
+  F. REAL SERVER — a temp copy served, sw.js rewritten after the SW took
+     control: the page must read the NEW name and sw.js must not sit in the SW
+     cache. D simulates the server inside the page and could not see the SW
+     serving sw.js from its cache (pock#68 — same trap, same pin).
+
 Run: python3 tests/version-footer-e2e.py
 """
 
 import http.server
 import os
 import re
+import shutil
 import socketserver
+import subprocess
+import tempfile
 import sys
 import threading
 
@@ -62,9 +76,71 @@ PARSER_CASES = [
 ]
 
 
+H = 3600 * 1000
+NOW = 1_000_000_000_000
+# (raw stored, label, now, expected {store, updated}, why)
+STATE_CASES = [
+    (None, "v8 · A", NOW, {"store": {"label": "v8 · A"}, "updated": None},
+     "first visit → remember, no ✦"),
+    ("{bad", "v8 · A", NOW, {"store": {"label": "v8 · A"}, "updated": None},
+     "corrupt storage → treated as a first visit"),
+    ('{"label":"v8 · A"}', "v8 · B", NOW,
+     {"store": {"label": "v8 · B", "prev": "v8 · A", "at": NOW},
+      "updated": {"prev": "v8 · A", "at": NOW}}, "label changed → ✦ with « avant »"),
+    ('{"label":"v8 · B","prev":"v8 · A","at":%d}' % (NOW - 23 * H), "v8 · B", NOW,
+     {"store": None, "updated": {"prev": "v8 · A", "at": NOW - 23 * H}},
+     "same label, 23 h later → ✦ still shown"),
+    ('{"label":"v8 · B","prev":"v8 · A","at":%d}' % (NOW - 25 * H), "v8 · B", NOW,
+     {"store": None, "updated": None}, "same label, 25 h later → ✦ gone"),
+]
+A, B = "plex-jqh-omv-v8-2026-11-07a", "plex-jqh-omv-v8-2026-11-07b"
+LATEST_CASES = [
+    (A, A, "latest", "server == running → ✓"),
+    (A, B, "newer", "server newer → ⟳"),
+    (B, A, None, "server older (CDN behind) → no verdict"),
+    (A, None, None, "server unreadable → no verdict"),
+    (None, A, None, "no cache yet → no verdict"),
+    (A, "other-app-v9-2026-11-07a", None, "foreign name → no verdict"),
+]
+
+# Replaces the answer of fetch('sw.js', {cache:'no-store'}) — the ✓/⟳ check —
+# without touching SW registration (which does not go through window.fetch).
+FAKE_SERVER = """
+const realFetch = window.fetch;
+window.fetch = function (u, o) {
+  if (String(u).indexOf('sw.js') >= 0 && o && o.cache === 'no-store' && window.__srv) {
+    if (window.__srv === 'OFFLINE') return Promise.reject(new TypeError('offline'));
+    return Promise.resolve(new Response("var CACHE = '" + window.__srv + "';"));
+  }
+  return realFetch.apply(this, arguments);
+};
+"""
+VISIBLE = "s => { const e = document.querySelector(s); return !!e && !e.hidden; }"
+RATIO = """id => { const P = s => s.match(/[\\d.]+/g).map(Number);
+  const lum = c => { const f = v => { v /= 255; return v <= 0.03928 ? v / 12.92
+                     : ((v + 0.055) / 1.055) ** 2.4; };
+                     return 0.2126 * f(c[0]) + 0.7152 * f(c[1]) + 0.0722 * f(c[2]); };
+  let bg = [0, 0, 0];
+  for (let x = document.getElementById(id); x; x = x.parentElement) {
+    const c = P(getComputedStyle(x).backgroundColor);
+    if (c.length < 4 || c[3] > 0) { bg = c; break; } }
+  const a = lum(P(getComputedStyle(document.getElementById(id)).color)), b = lum(bg);
+  return (Math.max(a, b) + .05) / (Math.min(a, b) + .05); }"""
+PAGES = ["index.html?host=example.invalid&mac=AA:BB:CC:DD:EE:FF", "fallback.html"]
+SEEN = "plex-jqh-omv-version-seen"
+
+
+def _check(issues, ok, msg):
+    print(f"  [{'PASS' if ok else 'FAIL'}] {msg}")
+    if not ok:
+        issues.append(msg)
+
+
 def _serve(directory):
-    handler = lambda *a, **kw: http.server.SimpleHTTPRequestHandler(
-        *a, directory=directory, **kw)
+    class Quiet(http.server.SimpleHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+    handler = lambda *a, **kw: Quiet(*a, directory=directory, **kw)
     httpd = socketserver.TCPServer(("127.0.0.1", 0), handler)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     return httpd, httpd.server_address[1]
@@ -134,8 +210,113 @@ def main():
                 if not ok2:
                     issues.append(f"footer {shown!r} != sw.js {want!r}")
             ctx.close()
+
+            # ---- C. rules -------------------------------------------------
+            ctx = browser.new_context()
+            page = ctx.new_page()
+            page.goto(f"http://127.0.0.1:{port}/fallback.html", wait_until="load")
+            for raw, label, now, want, why in STATE_CASES:
+                got = page.evaluate("a => versionState(a[0], a[1], a[2])", [raw, label, now])
+                _check(issues, got == want, f"rule ✦: {why} → {got}")
+            for cur, srv, want, why in LATEST_CASES:
+                got = page.evaluate("a => latestState(a[0], a[1])", [cur, srv])
+                _check(issues, got == want, f"rule ✓/⟳: {why} → {got!r}")
+            ctx.close()
+
+            # ---- D. marks against a simulated server ----------------------
+            for pg in PAGES:
+                for srv, ok_, new_ in (("SAME", True, False), ("plex-jqh-omv-v8-2099-01-01a", False, True),
+                                       ("OFFLINE", False, False)):
+                    ctx = browser.new_context()
+                    ctx.add_init_script(FAKE_SERVER + f"window.__srv = {srv!r};"
+                                        .replace("'SAME'", "'" + declared + "'"))
+                    page = ctx.new_page()
+                    # Only index.html registers the SW: reach fallback the way a
+                    # phone does, once the app has installed it.
+                    page.goto(f"http://127.0.0.1:{port}/{PAGES[0]}", wait_until="load")
+                    page.wait_for_function("() => navigator.serviceWorker.controller", timeout=20000)
+                    page.goto(f"http://127.0.0.1:{port}/{pg}", wait_until="load")
+                    page.wait_for_timeout(1500)
+                    got = (page.evaluate(VISIBLE, "#vLatest"), page.evaluate(VISIBLE, "#vNewer"),
+                           page.evaluate(VISIBLE, "#vUpdated"))
+                    _check(issues, got == (ok_, new_, False),
+                           f"marks {pg.split('?')[0]} server={srv[:12]} → ✓⟳✦ {got}")
+                    if new_:
+                        t = page.get_attribute("#vNewer", "title")
+                        _check(issues, t == "Version plus récente publiée : v8 · 2099-01-01a"
+                               " — chargement en cours", f"⟳ detail → {t!r}")
+                    if ok_:
+                        page.click("#vLatest")
+                        d = page.locator(".v-detail")
+                        _check(issues, d.is_visible() and d.inner_text().startswith(
+                            "Dernière version publiée (vérifié à "), "tap ✓ → detail shown")
+                        page.click("#vLatest")
+                        _check(issues, not d.is_visible(), "second tap → detail hidden")
+                    ctx.close()
+
+            # ---- D'/E. ✦ after a label change + contrast ------------------
+            for pg in PAGES:
+                ctx = browser.new_context()
+                ctx.add_init_script(FAKE_SERVER + f"window.__srv = '{declared}';")
+                page = ctx.new_page()
+                page.goto(f"http://127.0.0.1:{port}/{PAGES[0]}", wait_until="load")
+                page.wait_for_function("() => navigator.serviceWorker.controller", timeout=20000)
+                page.goto(f"http://127.0.0.1:{port}/{pg}", wait_until="load")
+                page.wait_for_function(f"() => localStorage.getItem('{SEEN}')", timeout=20000)
+                page.evaluate(f"localStorage.setItem('{SEEN}', JSON.stringify({{label: 'v7 · old'}}))")
+                page.reload(wait_until="load")
+                try:
+                    page.wait_for_selector("#vUpdated:not([hidden])", timeout=10000)
+                    page.wait_for_selector("#vLatest:not([hidden])", timeout=10000)
+                except Exception:  # noqa: BLE001
+                    pass
+                t = page.get_attribute("#vUpdated", "title") or ""
+                _check(issues, t.startswith("Mis à jour le ") and t.endswith("— avant : v7 · old"),
+                       f"✦ {pg.split('?')[0]} → {t!r}")
+                for mid in ("vUpdated", "vLatest"):
+                    r = page.evaluate(RATIO, mid)
+                    _check(issues, r >= 4.5, f"contrast {mid} {pg.split('?')[0]} → {r:.2f}")
+                ctx.close()
         finally:
             httpd.shutdown()
+
+        # ---- F. real server, sw.js rewritten mid-flight -------------------
+        with tempfile.TemporaryDirectory() as tmp:
+            files = subprocess.run(["git", "-C", REPO, "ls-files"], capture_output=True,
+                                   text=True, check=True).stdout.split()
+            for f in files:
+                if not f.startswith(("tests/", "relay/", ".")):
+                    os.makedirs(os.path.dirname(os.path.join(tmp, f)) or tmp, exist_ok=True)
+                    shutil.copy(os.path.join(REPO, f), os.path.join(tmp, f))
+            # The CSP says `connect-src https:` — right in production (same-origin
+            # https), but this server is http. Widen ONLY the temp copy; the
+            # production read is checked on the public URL after deploy.
+            for name in ("index.html", "fallback.html"):
+                f = os.path.join(tmp, name)
+                txt = open(f).read().replace("connect-src https:", "connect-src 'self' https:")
+                open(f, "w").write(txt)
+            httpd, port = _serve(tmp)
+            try:
+                ctx = browser.new_context()
+                page = ctx.new_page()
+                page.goto(f"http://127.0.0.1:{port}/{PAGES[0]}", wait_until="load")
+                page.wait_for_function("() => navigator.serviceWorker.controller", timeout=20000)
+                page.reload(wait_until="load")
+                page.wait_for_function("() => { const e = document.getElementById('vLatest');"
+                                       " return e && !e.hidden; }", timeout=20000)
+                sw = os.path.join(tmp, "sw.js")
+                txt = open(sw).read().replace(declared, "plex-jqh-omv-v8-2099-01-01a")
+                open(sw, "w").write(txt)
+                seen = page.evaluate("""() => fetch('sw.js', {cache: 'no-store'}).then(r => r.text())
+                                          .then(t => (/var CACHE = '([^']+)'/.exec(t) || [])[1])""")
+                _check(issues, seen == "plex-jqh-omv-v8-2099-01-01a", f"real server: page re-reads {seen!r}")
+                cached = page.evaluate("() => caches.keys().then(ks => Promise.all(ks.map(k =>"
+                                       " caches.open(k).then(c => c.match('sw.js', {ignoreSearch: true})))))"
+                                       ".then(rs => rs.some(Boolean))")
+                _check(issues, not cached, "real server: sw.js absent from every SW cache")
+                ctx.close()
+            finally:
+                httpd.shutdown()
         browser.close()
 
     print("=" * 60)

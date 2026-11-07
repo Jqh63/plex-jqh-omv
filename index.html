@@ -242,6 +242,12 @@
   .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
   .toast.warn{border-color:var(--orange);color:var(--orange)}
   .footer{font-size:10px;color:var(--text-dim);font-family:'JetBrains Mono',monospace}
+  /* 2026-11-07 — version marks ✓ ⟳ ✦ (version.js): discreet, detail on tap. */
+  .v-mark{background:none;border:0;padding:0 0 0 6px;font:inherit;cursor:pointer;-webkit-tap-highlight-color:transparent}
+  .v-ok{color:var(--text-dim)}
+  .v-new{color:var(--accent-text)}
+  .v-detail{display:block;margin-top:2px;color:var(--text-dim)}
+  .v-detail[hidden],.v-mark[hidden]{display:none}
   .header h1{cursor:help;user-select:none;-webkit-touch-callout:none}
   /* v8.72 — the banner is in the layout from the first paint or not at all.
      install-hint.js (loaded in <head>) sets both classes before the body is

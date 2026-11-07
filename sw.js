@@ -52,6 +52,11 @@ self.addEventListener('fetch', function(e) {
   // Only cache our own files on same origin, let everything else pass through
   var url = new URL(e.request.url);
   if (url.origin !== self.location.origin) return;
+  // 2026-11-07 — sw.js is never served from nor written to the cache: the ✓
+  // mark (version.js) re-reads it from the network to tell "latest published".
+  // Without this the miss-refill below cached it on the first check and every
+  // later check read the RUNNING name back — ✓ after a deploy (pock#68).
+  if (url.pathname.endsWith('/sw.js')) return;
   e.respondWith(
     caches.match(e.request, {ignoreSearch: true}).then(function(r) {
       // On cache miss (e.g. a file that failed to precache during install),

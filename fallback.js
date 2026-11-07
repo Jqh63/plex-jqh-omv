@@ -76,12 +76,8 @@ function flagCopyFail(el) {
 // Derive footer version from the active SW cache name. Single source
 // of truth (sw.js) — mirrors the pattern in app.js and debug.js.
 // Version derived from the SW cache name via the shared parser (version.js).
-if(window.withCacheLabel){
-  withCacheLabel(function(label){
-    var el=document.getElementById('footerVersion');
-    if(el)el.textContent=label;
-  });
-}
+// 2026-11-07 — plus the discreet ✓ ⟳ ✦ marks (version.js § paintVersion).
+if(window.paintVersion)paintVersion(document.getElementById('footerVersion'));
 
 document.querySelectorAll('.param code').forEach(function(el) {
   el.addEventListener('click', function() {

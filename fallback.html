@@ -100,6 +100,12 @@
   footer a:active{opacity:.7}
   
   .note{font-size:12px;color:var(--text-dim);padding:12px 14px;background:rgba(124,106,239,.06);border:1px solid rgba(124,106,239,.2);border-radius:10px}
+  /* 2026-11-07 — version marks ✓ ⟳ ✦ (version.js): discreet, detail on tap. */
+  .v-mark{background:none;border:0;padding:0 0 0 6px;font:inherit;cursor:pointer;-webkit-tap-highlight-color:transparent}
+  .v-ok{color:var(--text-dim)}
+  .v-new{color:var(--accent-text)}
+  .v-detail{display:block;margin-top:2px;color:var(--text-dim)}
+  .v-detail[hidden],.v-mark[hidden]{display:none}
 </style>
 </head>
 <body>

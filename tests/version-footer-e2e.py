@@ -244,7 +244,16 @@ def main():
                     if new_:
                         t = page.get_attribute("#vNewer", "title")
                         _check(issues, t == "Version plus récente publiée : v8 · 2099-01-01a"
-                               " — chargement en cours", f"⟳ detail → {t!r}")
+                               " — rechargement automatique, appuyer pour recharger maintenant",
+                               f"⟳ detail → {t!r}")
+                        page.evaluate("window.__beforeReload = 1")
+                        try:
+                            with page.expect_navigation(timeout=10000):
+                                page.click("#vNewer")
+                        except Exception:  # noqa: BLE001
+                            pass
+                        _check(issues, page.evaluate("window.__beforeReload") is None,
+                               "tap ⟳ → page reloaded")
                     if ok_:
                         page.click("#vLatest")
                         d = page.locator(".v-detail")

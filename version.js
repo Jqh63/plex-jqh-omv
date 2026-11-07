@@ -134,6 +134,9 @@
       var b=document.createElement('button');
       b.type='button';b.id=id;b.className='v-mark '+cls;b.textContent=glyph;b.hidden=true;
       b.addEventListener('click',function(){
+        // ⟳: the SW reloads on its own once it takes over; a tap reloads now
+        // (same rule as pock and dash-pat).
+        if(id==='vNewer'){location.reload();return;}
         var same=!detail.hidden&&detail.getAttribute('data-from')===id;
         detail.hidden=same;detail.setAttribute('data-from',id);detail.textContent=b.title;
       });
@@ -160,7 +163,7 @@
       Promise.all([currentName(),serverName()]).then(function(r){
         var v=latestState(r[0],r[1]);
         set(latest,v==='latest'&&('Dernière version publiée (vérifié à '+fmt(Date.now(),false)+')'));
-        set(newer,v==='newer'&&('Version plus récente publiée : '+pick([r[1]])+' — chargement en cours'));
+        set(newer,v==='newer'&&('Version plus récente publiée : '+pick([r[1]])+' — rechargement automatique, appuyer pour recharger maintenant'));
       });
     }
     check();

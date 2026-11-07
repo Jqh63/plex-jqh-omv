@@ -13,7 +13,7 @@ rendered text still reads fine in the DOM) for each string, across widths and
 Android font scales. Reports the overflow in px so copy can be cut by the right
 amount rather than by guesswork.
 """
-import os, sys
+import os, re, sys
 from playwright.sync_api import sync_playwright
 
 # Fail early and legibly if the engines' system libs are gone (a sandbox
@@ -50,18 +50,22 @@ TILE_STATES = [
     ('Statut inconnu', 'impossible de vérifier'),  # v8.68 — no oracle answered
 ]
 
-TOASTS = [
-    '⏳ Serveur démarré — patiente',
-    '⏳ Réveil en cours — patiente',
-    '⚠ Serveur éteint — allume-le',
-    '⚡ Demande de réveil envoyée',
-    '⚠ Pas démarré — réessaie',
-    '⚠ Pas transmis — réessaie',
-    '⚠ Relais : serveur introuvable',
-    '⚠ Trop d\'essais — patiente',
-    '⚠ Relais : accès refusé (config)',
-    '✓ Serveur démarré avec succès',
-]
+def app_toasts(app_js=os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'app.js')):
+    """Every toast text app.js can show, read FROM app.js (2026-11-07: the
+    hand-copied lists here and in mobile-text-shots.py had drifted from the
+    app). Literal `showToast('…'` calls, plus the relay-error `msg='…'` variants
+    shown as '⚠ '+msg; the bare '⚠ ' prefix itself and the numeric
+    'Erreur relais HTTP <n>' (sampled with a 3-digit code) are expanded here."""
+    src = open(app_js, encoding='utf-8').read()
+    lits = [t.replace("\\'", "'") for t in re.findall(r"showToast\('((?:[^'\\]|\\.)*)'", src)]
+    out = [t for t in lits if t.strip() != '⚠']
+    out += ['⚠ ' + m for m in re.findall(r"msg='((?:[^'\\]|\\.)*)';", src)]
+    if "msg='Erreur relais HTTP '+r.status" in src:
+        out.append('⚠ Erreur relais HTTP 503')
+    return sorted(set(out))
+
+
+TOASTS = app_toasts()
 
 MEASURE = """(args) => {
   const [label, sub] = args;

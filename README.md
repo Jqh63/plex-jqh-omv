@@ -14,7 +14,7 @@ This repo bundles **two components**:
 
 ## Features
 
-- **Server status** — checks every 15s by fetching the relay's `GET /status` oracle (steady-state offline detection within ~24s of the actual outage)
+- **Server status** — checks every 8 s (`STATUS_POLL_INTERVAL_MS`) by fetching the relay's `GET /status` oracle
 - **Wake-on-LAN** — sends magic packet via a self-hosted HTTP→UDP relay (browsers cannot send UDP directly — see [Relay](#relay-required-for-wol) below)
 - **Auto-retry** — the relay re-sends the magic packets at +15/30/60/90s server-side until the server answers (immune to mobile background freeze); the PWA polls every 5s post-WoL until green or 5 min timeout
 - **Dynamic app links** — configurable via URL parameter, built from a catalog of known apps
@@ -92,13 +92,13 @@ Open the app without parameters. A settings form will appear to enter title, dom
 
 ## Status check logic
 
-Since **v7.0 (relay-as-oracle)** the primary status check is a single `fetch GET {relay}/status` — done once on open and at every 15s tick. The relay polls the home server itself (HEAD on a configurable `STATUS_TARGET_URL`, 5s fresh / 60s stale cache) and returns `{up, stale, age_s}`, so one fetch answers both *is the home server up* and *is the relay reachable*. See [Relay](#relay-required-for-wol).
+Since **v7.0 (relay-as-oracle)** the primary status check is a single `fetch GET {relay}/status` — done once on open and at every 8 s tick (15 s before v8.5). The relay polls the home server itself (HEAD on a configurable `STATUS_TARGET_URL`, 5s fresh / 60s stale cache) and returns `{up, stale, age_s}`, so one fetch answers both *is the home server up* and *is the relay reachable*. See [Relay](#relay-required-for-wol).
 
 **v8.0 (single-probe model)** keeps that contract but rewrites the client state machine. `checkStatus()` runs one probe that resolves exactly once to `{up, relayReachable}`: one relay `/status` fetch with a generous 8s timeout (so a cold mobile radio warms *inside* the attempt) — no retry chain, no fail-streaks, no all-timeout hold. **v8.65**: when that fetch fails the probe resolves *unknown* rather than falling back to a verdict (see *Fallback* below). A `probeGen` counter drops a stale in-flight probe that resolves after a resume. This replaced a v4→v7 pile of cold-radio defences that could hold the orange "Vérification…" card for ~33s on reopen; v8's worst case is one PROBE+HOME (~13s, genuine outage only), commonly <3s.
 
 **v8.2** hardens two failure modes that slipped past v8.1:
 
-- **A `checking` watchdog.** `checkStatus()` early-returns while a check is in flight (`if (checking) return`) so concurrent probes don't pile up. But the Android suspend-mid-fetch race can tear down the socket and freeze the probe's abort timer with it, so the probe never resolves and never clears `checking` — and *every* subsequent re-probe then early-returns forever, freezing the app on a stale status until it's force-killed. v8.2 stamps each check's start time and, past a `PROBE+HOME+slack` budget (~14s, under the 15s tick), lets the next re-probe trigger reclaim the wedged flag and start fresh (the `probeGen` bump drops the zombie probe if it ever resolves late). The 15s self-healing tick is now genuinely guaranteed-eventually — it can no longer be blocked by a stuck flag.
+- **A `checking` watchdog.** `checkStatus()` early-returns while a check is in flight (`if (checking) return`) so concurrent probes don't pile up. But the Android suspend-mid-fetch race can tear down the socket and freeze the probe's abort timer with it, so the probe never resolves and never clears `checking` — and *every* subsequent re-probe then early-returns forever, freezing the app on a stale status until it's force-killed. v8.2 stamps each check's start time and, past a `PROBE+HOME+slack` budget (~14s, under the 15s tick), lets the next re-probe trigger reclaim the wedged flag and start fresh (the `probeGen` bump drops the zombie probe if it ever resolves late). The self-healing tick is now genuinely guaranteed-eventually — it can no longer be blocked by a stuck flag. (Figures as of v8.2. Today the tick is 8 s and the watchdog budget is `probeBudgetMs()` — 8 s warm, 15 s cold since v8.77 — + 6 s: it may exceed one tick, which only delays the reclaim by a tick.)
 - **An N-consecutive-miss relay-down debounce** (was 1-tick in v8.1). A cold e2-micro can miss `/status` across *more than one* 15s tick, and v8.1's 2-miss confirm painted a false "Relais injoignable" on cold open (~15s in, cleared ~30s in). v8.2 waits for `RELAY_DOWN_MISSES` (3) misses in a row before the advisory cosmetic hardens; any answered/up probe resets the streak. The relay-down indicator is purely advisory — a real relay failure the user hits via WoL still surfaces instantly (the `POST /wol` failure path flips the state directly) — so it can afford the patience.
 
 **Fallback** — only when **no relay is configured** does the app probe the home directly (`fetch https://{statusHost}`, `mode: 'no-cors'`: any fulfilled response = server up, network error = server down).
@@ -190,12 +190,23 @@ GET /status
         relay polls the home server itself and caches the verdict; one fetch tells
         the app both "home up?" and "relay reachable?")
         + "window":str   if the relay has UPTIME_WINDOW set (adopted by the PWA)
-        + "waking":true, "wake_age_s":int   while a recent POST /wol is booting the
+        + "waking":true, "wake_age_s":float   while a recent POST /wol is booting the
           home and it's not up yet — lets any open PWA show the wake countdown
+          (millisecond precision, for cross-device sync)
+        + "wake_failed":true   the last wake's campaign ran out without the home
+          answering (served for WAKE_FAIL_SIGNAL_TTL_S; never alongside "waking")
         + "eta_s":int   canonical boot ETA (median of relay-measured boot times) —
           every open PWA seeds its wake countdown from it, so the timer is synced
           across devices
-  → 503 if the relay has no STATUS_TARGET_URL configured
+        + "degraded":true   only with up=true: the host answers, the probed app
+          (e.g. Seerr) does not yet
+        + "source":"heartbeat"|"pull", "confirmed":true   where the verdict comes
+          from; a heartbeat down or a confirmed pull down skips the PWA's own
+          re-confirmation
+        + "served_at":int   epoch seconds when the body was built — the PWA refuses
+          a body it cannot prove is live
+  → 401 bad token (429 past STATUS_AUTH_MAX_FAILS), 503 if the relay has no
+    STATUS_TARGET_URL configured — the PWA shows "Statut inconnu" for all of them
 
 GET /health
   → 200 {"status":"ok"}        (relay liveness; hit only by the settings
@@ -234,7 +245,12 @@ Any small VM with UDP egress and a public HTTPS endpoint works. Some always-free
 
 ## Fallback — manual Wake-on-LAN if the relay fails
 
-The app probes `GET <relay>/status` on load and at every status tick (every 15 s); relay reachability is derived from that same fetch. When the fetch fails at transport level (timeout / network / DNS), the relay is treated as unreachable, the power button is visually disabled and labelled "Réveil indisponible — utilise le réveil manuel ↓" so users get explicit feedback instead of a silent click. Since v8.2 this hard "unreachable" state is debounced by three consecutive misses — a slow-but-alive relay (a cold e2-micro can miss across more than one tick) stays optimistic and the disabled state only paints once `RELAY_DOWN_MISSES` probes in a row miss (see [Status check](#status-check) above), so it no longer false-alarms on cold open. (An *answered* but degraded `/status` keeps the button enabled, since `POST /wol` still works.) A small permanent "Réveil manuel" link sits under the power button — it covers cases the probe can miss (relay up but `/wol` broken, network blip mid-dispatch) and the residual SPOF inherent to any single relay.
+The app probes `GET <relay>/status` on load and at every status tick (every 8 s); relay reachability is derived from that same fetch. A fetch that fails leaves the card on **"Statut inconnu"** (v8.65) — the app says it does not know rather than guessing. The power button stays **armed** in every case except a phone with no network at all (v8.53): misses are as often the phone's own last mile as the relay, and a tap that really cannot reach the relay fails in one round-trip. After `RELAY_DOWN_MISSES` (3) consecutive misses, or one failed tap, the manual-wake link below the button is promoted to a full-size call to action.
+
+A wake that fails is reported by what actually happened:
+
+- **never transmitted** (transport failure, `429`) — nothing reached the home, so nothing is claimed about it: the card returns to what was known before the tap, with a toast ("⚠ Pas transmis — réessaie", "⚠ Trop d'essais — patiente"). If the relay did receive the request and only the response was lost, the next poll adopts the wake through `waking`;
+- **refused** (`401`/`403`/`502`) or **not started** (the relay's `wake_failed`, or the 5-min client timeout) — the red "Hors ligne — contacte l'administrateur", the only state that instructs. A failure the relay reported follows the relay: when it stops serving `wake_failed`, the red goes back to the calm down card on every device. A small permanent "Réveil manuel" link sits under the power button — it covers cases the probe can miss (relay up but `/wol` broken, network blip mid-dispatch) and the residual SPOF inherent to any single relay.
 
 That link points to a dedicated **French user-friendly fallback page** served from this same repo (`fallback.html`), with the user's MAC, host and port pre-filled (read from URL query parameters). The page gives a per-OS method (Android: WolOn, iOS: Mocha WOL, Windows: PowerShell), with click-to-copy on the parameter values. The section below remains the canonical developer reference.
 
@@ -278,7 +294,7 @@ $mac=[byte[]]-split('AABBCCDDEEFF' -replace '..','0x$0 ');$u=New-Object Net.Sock
 - `skipWaiting` + `clients.claim` + `controllerchange` listener for seamless updates
 - WoL sent via `fetch POST` to your self-hosted relay (browsers cannot send UDP directly — see [Relay](#relay-required-for-wol))
 - Primary status check is `fetch GET <relay>/status` — true JSON verdict `{up,stale,age_s}` read (no `no-cors` blind spot); relay reachability derived from the same fetch (answered vs transport failure). `GET /health` / `/health/deep` are hit only by the settings "Tester le relais" button
-- Fallback status check on the media server itself uses `fetch` with `mode: 'no-cors'` — opaque response = server up, network error = server down (used only when `/status` is unavailable; no CORS needed since we only care about reachability)
+- Direct status check on the media server (`fetch` with `mode: 'no-cors'`: opaque response = up, network error = down) is used **only in relay-less mode**. With a relay configured, a failed `/status` yields "Statut inconnu", never a verdict (v8.65)
 
 ## License
 

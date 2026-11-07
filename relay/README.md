@@ -684,8 +684,8 @@ in <1 s in nominal conditions.
 Since v8.17 the endpoint requires the same shared `X-Token` header as
 `/wol` — an unauthenticated caller gets a `401` and learns nothing (not
 even whether a status target is configured). A PWA without a configured
-token treats the 401 as a degraded oracle and falls back to its direct
-home probe.
+token gets an answered-but-refused oracle and shows "Statut inconnu"
+(v8.65: no direct home probe once a relay is configured).
 
 ### Response shape
 

@@ -1035,8 +1035,8 @@ async def status(request: Request, x_token: str | None = Header(None)):
         logger.warning("status ip=%s status=401 reason=bad_token", ip)
         raise HTTPException(status_code=401, detail="bad token")
     if not STATUS_TARGET_URL:
-        # Config-missing → degraded mode, surface as 503 so the PWA falls
-        # back to its direct-home check path.
+        # Config-missing → degraded mode, surface as 503. Since v8.65 the PWA
+        # shows "Statut inconnu" on it (no direct-home fallback any more).
         raise HTTPException(status_code=503, detail="status target not configured")
 
     now = time.monotonic()
@@ -1327,10 +1327,11 @@ def wol(req: WolReq, request: Request, x_token: str = Header(...)):
         _loop.call_soon_threadsafe(_arm_campaign)
     global _last_wol_at, _wake_pending
     # Anchor the boot-time measurement to the FIRST POST of a wake cycle. The
-    # PWA fires ~4 retry POSTs over ~60 s to cover UDP loss; if each reset the
-    # anchor, boot_ms (_poll_home_and_update) would measure only the
-    # last-retry->up gap (~14 s) instead of the true ~75 s boot, dragging the
-    # shared eta_s far below reality. Reset only for a genuinely new cycle:
+    # PWA no longer retries (v8.47: the campaign re-sends server-side), but
+    # several POSTs still land in one cycle — other family devices, the AM5
+    # logon task. If each reset the anchor, boot_ms (_poll_home_and_update)
+    # would measure only the last-POST->up gap instead of the true ~75 s boot,
+    # dragging the shared eta_s far below reality. Reset only for a genuinely new cycle:
     # none pending, or the pending one is older than the wake-signal TTL (a
     # stale/failed wake). Also keeps wake_age_s anchored for cross-device adopt.
     now = time.monotonic()

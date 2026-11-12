@@ -12,7 +12,10 @@ from browser_guard import ensure as _ensure_browser
 
 _ensure_browser()
 
-BASE = os.environ.get('PWA_BASE', 'file:///config/workspace/plex-jqh-omv/index.html')
+# Default = the working tree of THIS checkout. It used to be an absolute path
+# on one workstation, so the file failed anywhere else (first CI run, 2026-11-12).
+BASE = os.environ.get('PWA_BASE') or (
+    'file://' + str(pathlib.Path(__file__).resolve().parent.parent / 'index.html'))
 # chromium (default) | webkit — webkit renders on the Safari engine but needs
 # its system libs (see tests/README.md § Engines); falls back with a clear error.
 ENGINE = os.environ.get('PWA_ENGINE', 'chromium')

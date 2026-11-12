@@ -22,7 +22,13 @@ from browser_guard import ensure as _ensure_browser
 
 _ensure_browser()
 
-BASE = os.environ.get('PWA_BASE', 'https://jqh63.github.io/plex-jqh-omv/')
+# Default = the WORKING TREE, like every other suite (tests/README.md). This
+# file kept the deployed default after the 2026-07-19 flip, so a run on a
+# branch silently judged what was already live. Deployed is opt-in.
+BASE = os.environ.get('PWA_BASE') or ('file://' + os.path.abspath(
+    os.path.join(os.path.dirname(__file__), '..', 'index.html')))
+if BASE == 'deployed':
+    BASE = 'https://jqh63.github.io/plex-jqh-omv/'
 
 # Widths: the phone's own CSS width is DIVIDED by Android's *display size*
 # setting (~/1.3 on "très grand"), so a 360 px phone renders at ~277 px. Yann is

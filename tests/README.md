@@ -99,6 +99,18 @@ settles in <3 s.
 > "pre-existing flaky"). To gate the live deploy *after* a merge, opt in
 > explicitly: `PWA_BASE=deployed python3 tests/…` (or any explicit URL).
 
+## CI
+
+`.github/workflows/browser-tests.yml` runs every file of this directory on each
+pull request and on `main` (since 2026-11-12; before that nothing but a person
+ran them). It reports, it does not block. The four long suites get one runner
+each, the short ones share one; `fallback-e2e.py` is served over
+`http://127.0.0.1` there so its clipboard rows run, and a `SKIP` line fails the
+job — on a runner every precondition is provided, so a skip is a hole. Measured
+on the trial run: 15 suites green, `wake-e2e.py` green 3 passes out of 3 at
+~157 s (about twice the workstation). A suite added here is picked up by its
+file name; nothing to declare.
+
 ## When to use which
 
 - **State-machine sim** — change app.js timing logic, run in <1 s, get a
@@ -145,9 +157,9 @@ Real-browser E2E — needs Playwright + a browser:
 ```bash
 python3 -m pip install --user playwright
 python3 -m playwright install chromium
-# Validate the WORKING TREE before merge (flat HTML/JS → file:// works):
-PWA_BASE="file:///config/workspace/plex-jqh-omv/index.html" python3 tests/cold-radio-e2e.py
-# Or the live deploy (post-merge gate): leave PWA_BASE unset.
+# Validate the WORKING TREE before merge (the default; flat HTML/JS → file:// works):
+python3 tests/cold-radio-e2e.py
+# Or the live deploy (post-merge gate): PWA_BASE=deployed python3 tests/cold-radio-e2e.py
 # expect: [chromium] ALL PASS (29 scenarios)  /  ALL ENGINES PASS
 ```
 

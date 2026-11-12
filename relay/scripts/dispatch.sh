@@ -14,6 +14,8 @@
 #   ssh wol-relay-deploy apply-window      # install /opt/wol-relay/window (hot, no restart)
 #   ssh wol-relay-deploy status            # systemctl is-active wol-relay caddy
 #   ssh wol-relay-deploy scripts-manifest  # sha256 of the root-installed scripts (bootstrap done? see scripts-drift.sh)
+#   ssh wol-relay-deploy bootstrap-log     # newest remote bootstrap run + installed commit (read-only;
+#                                          #   the run itself is NOT a route here: see bootstrap-pull.sh)
 #   ssh wol-relay-deploy health            # curl http://127.0.0.1:8000/health
 #   ssh wol-relay-deploy logs-wol-relay [500|3000]  # journalctl tail, read-only
 #                                          #   (defaut 100 lignes ~= 5 jours)
@@ -246,6 +248,15 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
     # VM; relay/scripts/scripts-drift.sh compares this list to origin/main.
     # sudoers.deploy is not listed: /etc/sudoers.d is root-only by design.
     cd "$SCRIPTS_DIR" && sha256sum -- *.sh
+    ;;
+  bootstrap-log)
+    # Read-only: outcome of the newest bootstrap-pull.sh run. That script is
+    # reached through the `relayboot` account only — never from this file.
+    echo "[bootstrap-log] installed: $(head -c 64 /var/lib/relay-bootstrap/installed-sha 2>/dev/null | tr -cd '0-9a-f' || true)"
+    latest="$(ls -1t /var/log/relay-bootstrap/*.log 2>/dev/null | head -1 || true)"
+    if [ -z "$latest" ]; then echo "[bootstrap-log] no remote bootstrap run recorded yet"; exit 0; fi
+    echo "[bootstrap-log] $latest"
+    tail -n 60 "$latest"
     ;;
   health)
     /usr/bin/curl -fsS http://127.0.0.1:8000/health
@@ -588,7 +599,7 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
     ;;
   *)
     echo "dispatch.sh: unknown command '${SSH_ORIGINAL_COMMAND:-}'" >&2
-    echo "Expected: push-app, push-caddyfile, apply, push-window, apply-window, status, scripts-manifest, health, logs-wol-relay [500|3000], logs-caddy [500|3000], log-footprint, upgrade-watch, upgrade, upgrade-log, port-audit <host>.duckdns.org," >&2
+    echo "Expected: push-app, push-caddyfile, apply, push-window, apply-window, status, scripts-manifest, bootstrap-log, health, logs-wol-relay [500|3000], logs-caddy [500|3000], log-footprint, upgrade-watch, upgrade, upgrade-log, port-audit <host>.duckdns.org," >&2
     echo "          push-home-watch, apply-home-watch, home-watch-status, logs-home-watch," >&2
     echo "          push-pock-sync-app, apply-pock-sync, pock-sync-status, logs-pock-sync, pock-dump," >&2
     echo "          pat-receive {daily,weekly}, pat-list, pat-dump-latest," >&2

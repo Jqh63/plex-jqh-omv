@@ -31,6 +31,14 @@
 # the off-site backups. Omitted on a re-run, an already installed jobs key is
 # KEPT (re-read from authorized_keys), never silently dropped.
 #
+# Remote rerun (`--keep-keys` instead of the key paths): used by
+# bootstrap-pull.sh, which reruns this script from an approved commit of main.
+# The deploy key is re-read from the installed authorized_keys (like the jobs
+# key), the omvtunnel endpoint is left as it is. When a jobs key is known, the
+# same key is also authorised on a dedicated `relayboot` account whose ONLY
+# command is that script — root-owned authorized_keys, own sudoers file, so the
+# `deploy` user gains nothing (see bootstrap-pull.sh header).
+#
 # Prerequisites: this script and the following files must live in the
 # SAME directory when invoked (the helper resolves them relative to
 # itself):
@@ -112,6 +120,22 @@ existing_jobs_key() { # <authorized_keys>
     | grep -oE '(ssh-ed25519|ecdsa-sha2-nistp256|ssh-rsa) [A-Za-z0-9+/=]+' || true
 }
 
+# Prints the deploy key already installed in <authorized_keys>, if any: the
+# line whose forced command is dispatch.sh WITHOUT a role.
+existing_deploy_key() { # <authorized_keys>
+  [[ -f "$1" ]] || return 0
+  awk -v c="command=\"$DEPLOY_CMD\"," 'index($0, c) == 1' "$1" \
+    | grep -oE '(ssh-ed25519|ecdsa-sha2-nistp256|ssh-rsa) [A-Za-z0-9+/=]+' || true
+}
+
+# Prints the desired ~relayboot/.ssh/authorized_keys. `restrict` = no pty, no
+# forwarding of any kind, no user rc; the client's command is ignored.
+RELAYBOOT_CMD='sudo -n /opt/wol-relay/scripts/bootstrap-pull.sh'
+render_relayboot_auth() { # <jobs key>
+  [[ -n "$1" ]] || { echo "ERR: empty jobs key" >&2; return 1; }
+  printf 'command="%s",restrict %s\n' "$RELAYBOOT_CMD" "$1"
+}
+
 # Prints the desired ~deploy/.ssh/authorized_keys: the deploy line (full
 # dispatch), then the jobs line when a jobs key is known.
 render_deploy_auth() { # <deploy key> <jobs key or empty>
@@ -130,10 +154,17 @@ fi
 
 if [[ $# -lt 1 ]]; then
   echo "Usage: sudo bash $0 <path-to-deploy-public-key> [<path-to-omvtunnel-public-key> [<path-to-jobs-public-key>]]" >&2
+  echo "       sudo bash $0 --keep-keys   (rerun on a provisioned VM: installed keys are kept)" >&2
   echo "       (pass '' as the 2nd argument to set a jobs key without an omvtunnel endpoint)" >&2
   exit 64
 fi
 
+KEEP_KEYS=0
+if [[ "$1" == "--keep-keys" ]]; then
+  [[ $# -eq 1 ]] || { echo "ERR: --keep-keys takes no other argument" >&2; exit 64; }
+  KEEP_KEYS=1
+  set -- ""
+fi
 PUBKEY_PATH="$1"
 # Optional 2nd arg: enables the reverse-SSH fallback endpoint (omvtunnel user).
 OMVTUNNEL_PUBKEY_PATH="${2:-}"
@@ -156,7 +187,8 @@ UNIT_SRCS=("$RELAY_DIR/wol-relay.service" "$RELAY_DIR/systemd/home-watch.service
 CADDY_ENV_SRC="$RELAY_DIR/caddy.env.example"
 WOL_ENV_SRC="$RELAY_DIR/wol-relay.env.example"
 
-for f in "$PUBKEY_PATH" "$DISPATCH_SRC" "$SUDOERS_SRC" "$CADDY_DROPIN_SRC" "$CADDY_ENV_SRC" "$WOL_ENV_SRC" "${UNIT_SRCS[@]}"; do
+[[ "$KEEP_KEYS" -eq 1 || -f "$PUBKEY_PATH" ]] || { echo "ERR: required file missing: $PUBKEY_PATH" >&2; exit 1; }
+for f in "$DISPATCH_SRC" "$SUDOERS_SRC" "$CADDY_DROPIN_SRC" "$CADDY_ENV_SRC" "$WOL_ENV_SRC" "${UNIT_SRCS[@]}"; do
   [[ -f "$f" ]] || { echo "ERR: required file missing: $f" >&2; exit 1; }
 done
 
@@ -173,7 +205,13 @@ fi
 
 # Validate every key BEFORE touching the system: a bad key file must abort
 # the run, not leave half a bootstrap behind.
-PUBKEY="$(read_one_pubkey "$PUBKEY_PATH")"
+if [[ "$KEEP_KEYS" -eq 1 ]]; then
+  PUBKEY="$(existing_deploy_key /home/deploy/.ssh/authorized_keys)"
+  [[ "$(printf '%s' "$PUBKEY" | awk 'NF' | wc -l)" -eq 1 ]] \
+    || { echo "ERR: --keep-keys needs exactly one installed deploy key — first provisioning takes the key paths" >&2; exit 1; }
+else
+  PUBKEY="$(read_one_pubkey "$PUBKEY_PATH")"
+fi
 JOBS_PUBKEY=""
 [[ -z "$JOBS_PUBKEY_PATH" ]] || JOBS_PUBKEY="$(read_one_pubkey "$JOBS_PUBKEY_PATH")"
 
@@ -269,6 +307,45 @@ else
   mv "$AUTH_FILE.tmp" "$AUTH_FILE"
   echo "[bootstrap] authorized_keys installed ($(wc -l < "$AUTH_FILE") key(s), forced-command)"
 fi
+
+# --- 4bis. relayboot: remote rerun of this bootstrap ------------------------
+# Script and sudoers first, account last: the account is useless without them.
+install -m 0755 -o root -g root "$SCRIPT_DIR/bootstrap-pull.sh" /opt/wol-relay/scripts/bootstrap-pull.sh
+install -d -m 0755 -o root -g root /var/lib/relay-bootstrap
+install -d -m 0755 -o root -g root /var/log/relay-bootstrap
+install -m 0440 -o root -g root "$SCRIPT_DIR/sudoers.relayboot" /etc/sudoers.d/relayboot.tmp
+if visudo -c -f /etc/sudoers.d/relayboot.tmp >/dev/null; then
+  mv /etc/sudoers.d/relayboot.tmp /etc/sudoers.d/relayboot
+else
+  rm -f /etc/sudoers.d/relayboot.tmp
+  echo "ERR: visudo rejected sudoers.relayboot, aborting." >&2
+  exit 1
+fi
+if ! command -v git >/dev/null 2>&1; then
+  DEBIAN_FRONTEND=noninteractive apt-get install -y git \
+    || echo "[bootstrap] WARN git not installed — bootstrap-pull will refuse until it is" >&2
+fi
+if [[ -n "$JOBS_PUBKEY" ]]; then
+  # Shell must be a real one (the forced command runs through it); the
+  # account has no password and its authorized_keys is ROOT-owned, so it can
+  # neither log in another way nor rewrite its own access.
+  id -u relayboot >/dev/null 2>&1 || useradd -m -s /bin/sh relayboot
+  install -d -m 0755 -o root -g root /home/relayboot /home/relayboot/.ssh
+  RB_AUTH=/home/relayboot/.ssh/authorized_keys
+  RB_WANT="$(render_relayboot_auth "$JOBS_PUBKEY")"
+  if auth_file_is "$RB_AUTH" "$RB_WANT"; then
+    echo "[bootstrap] relayboot authorized_keys already up to date (skip)"
+  else
+    printf '%s\n' "$RB_WANT" > "$RB_AUTH.tmp"
+    chmod 0644 "$RB_AUTH.tmp"
+    chown root:root "$RB_AUTH.tmp"
+    mv "$RB_AUTH.tmp" "$RB_AUTH"
+    echo "[bootstrap] relayboot authorized_keys installed (forced command, restrict, root-owned)"
+  fi
+else
+  echo "[bootstrap] no jobs key known — relayboot account skipped (remote rerun unavailable)"
+fi
+echo "[bootstrap] bootstrap-pull.sh + sudoers.relayboot installed"
 
 # --- 5. Caddy systemd drop-in + relay units --------------------------------
 install -d -m 0755 -o root -g root /etc/systemd/system/caddy.service.d
@@ -382,6 +459,8 @@ if [[ -n "$OMVTUNNEL_PUBKEY_PATH" ]]; then
   # genuinely gone.
   SSHD_DROPIN=/etc/ssh/sshd_config.d/10-tunnel-keepalive.conf
   if [[ -d /etc/ssh/sshd_config.d ]]; then
+    SSHD_DROPIN_OLD=""
+    [[ -f "$SSHD_DROPIN" ]] && SSHD_DROPIN_OLD="$(cat "$SSHD_DROPIN")"
     cat > "$SSHD_DROPIN" <<'EOF'
 # Managed by relay/scripts/bootstrap-wol-relay.sh — do not edit by hand.
 # Reap sessions whose peer vanished (see section 8b of that script).
@@ -393,7 +472,10 @@ EOF
     # loses the only way back into a remote VM. `reload` (not restart) also
     # leaves the admin's current session alive.
     if ! /usr/sbin/sshd -t; then
-      rm -f "$SSHD_DROPIN"
+      # Back to what was there: a drop-in that was healthy before this run
+      # must not be lost because sshd -t fails for another reason.
+      if [[ -n "$SSHD_DROPIN_OLD" ]]; then printf '%s\n' "$SSHD_DROPIN_OLD" > "$SSHD_DROPIN"
+      else rm -f "$SSHD_DROPIN"; fi
       echo "[bootstrap] ERR sshd -t rejected the keepalive drop-in — reverted, sshd untouched" >&2
       # Deliberately NOT a hard exit: this hardening sits in the middle of an
       # idempotent bootstrap, and aborting here would silently skip every

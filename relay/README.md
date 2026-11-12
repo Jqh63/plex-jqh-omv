@@ -232,6 +232,10 @@ From the host that holds your SSH key:
 bash relay/scripts/deploy.sh
 ```
 
+It deploys only what is merged: it fetches, then refuses (exit 4, nothing
+sent) unless `HEAD` is exactly `origin/main` with no tracked edit under
+`relay/`. Emergency override: `DEPLOY_ALLOW_UNMERGED=1`.
+
 The script pipes `app.py` and `Caddyfile` over stdin to the VM-side
 `dispatch.sh`, then triggers `apply` (install + `restart wol-relay` +
 `reload caddy`) and a final `health`. Typical duration: ~5 s.

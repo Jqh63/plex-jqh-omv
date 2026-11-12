@@ -24,16 +24,37 @@
 # Override the SSH alias if needed:
 #   WOL_RELAY_ALIAS=other-alias bash relay/scripts/deploy.sh
 #
+# Guard: deploys only what is merged. Refuses (exit 4) unless HEAD is exactly
+# origin/main (fetched now) with no tracked edit under relay/ — an unmerged
+# branch, a stale clone or a local edit would otherwise ship silently.
+# Emergency only: DEPLOY_ALLOW_UNMERGED=1 skips the guard, loudly.
+#
 # Exit codes:
 #   0 — venvs in sync, apply + health OK
 #   1 — a push or apply failed
 #   2 — health KO post-restart (investigate manually)
 #   3 — venv sync FAILED / rolled back / unmeasured: app NOT deployed
+#   4 — guard: clone is not a clean origin/main (or unmeasured): nothing sent
 
 set -euo pipefail
 
 ALIAS="${WOL_RELAY_ALIAS:-wol-relay-deploy}"
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+refuse() { echo "[deploy] REFUSED — $1" >&2; echo "[deploy]   nothing sent to the VM. Emergency override: DEPLOY_ALLOW_UNMERGED=1" >&2; exit 4; }
+if [ "${DEPLOY_ALLOW_UNMERGED:-}" = "1" ]; then
+  echo "[deploy] WARN — DEPLOY_ALLOW_UNMERGED=1: origin/main guard skipped, deploying the working tree as is" >&2
+else
+  git -C "$REPO_DIR" fetch --quiet origin main 2>/dev/null \
+    || refuse "git fetch origin main failed: cannot tell whether this clone is up to date"
+  head_sha="$(git -C "$REPO_DIR" rev-parse HEAD)" && main_sha="$(git -C "$REPO_DIR" rev-parse origin/main)" \
+    || refuse "cannot read HEAD / origin/main"
+  [ "$head_sha" = "$main_sha" ] \
+    || refuse "HEAD (${head_sha:0:7}) is not origin/main (${main_sha:0:7}): merge first, then pull"
+  dirty="$(git -C "$REPO_DIR" status --porcelain --untracked-files=no -- "$REPO_DIR")" \
+    || refuse "git status failed"
+  [ -z "$dirty" ] || refuse "tracked files edited under relay/: $(tr '\n' ' ' <<<"$dirty")"
+fi
 
 echo "[deploy] push venv locks ..."
 ssh "$ALIAS" push-lock-wol-relay < "$REPO_DIR/scripts/requirements-wol-relay.lock"

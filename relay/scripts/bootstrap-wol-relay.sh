@@ -68,7 +68,8 @@
 #     each push, but pre-created here for clarity)
 #   - (IF a 2nd arg is given) Creates user `omvtunnel` (nologin shell, no
 #     sudo) and ~omvtunnel/.ssh/authorized_keys restricted to the single
-#     reverse-listener 127.0.0.1:2222 (restrict,permitlisten,nologin)
+#     reverse-listener 127.0.0.1:2222 (explicit no-* flags, permitlisten,
+#     nologin — NOT `restrict`, see section 8)
 #
 # Reload note: this script does `systemctl daemon-reload` so the Caddy
 # drop-in takes effect. It does NOT restart caddy itself — the operator
@@ -354,10 +355,13 @@ if [[ -n "$OMVTUNNEL_PUBKEY_PATH" ]]; then
   if auth_file_is "$OMVTUNNEL_AUTH" "$OMVTUNNEL_LINE"; then
     echo "[bootstrap] omvtunnel authorized_keys already up to date (skip)"
   else
-    echo "$OMVTUNNEL_LINE" > "$OMVTUNNEL_AUTH"
-    chmod 0600 "$OMVTUNNEL_AUTH"
-    chown omvtunnel:omvtunnel "$OMVTUNNEL_AUTH"
-    echo "[bootstrap] omvtunnel authorized_keys installed (restrict + permitlisten=$TUNNEL_LISTEN)"
+    # Temp file then mv, like the deploy keys: never a half-written or
+    # wrongly-moded authorized_keys in place.
+    echo "$OMVTUNNEL_LINE" > "$OMVTUNNEL_AUTH.tmp"
+    chmod 0600 "$OMVTUNNEL_AUTH.tmp"
+    chown omvtunnel:omvtunnel "$OMVTUNNEL_AUTH.tmp"
+    mv "$OMVTUNNEL_AUTH.tmp" "$OMVTUNNEL_AUTH"
+    echo "[bootstrap] omvtunnel authorized_keys installed (no-* flags + permitlisten=$TUNNEL_LISTEN)"
   fi
 
   # --- 8b. sshd keepalive: reap a tunnel whose far end vanished -----------
@@ -528,7 +532,7 @@ EOF
 
 if [[ "$FRESH_TUNNEL" -eq 1 ]]; then
   cat <<EOF
-  5. Reverse-SSH fallback endpoint provisioned (omvtunnel). Remaining,
+  6. Reverse-SSH fallback endpoint provisioned (omvtunnel). Remaining,
      ONE-SHOT, host-side (NOT done by this script):
        - VM SSH must be key-only (PasswordAuthentication no) + reachable
          via IAP only (no 0.0.0.0/0 on tcp:22) — cf. relay/README.md

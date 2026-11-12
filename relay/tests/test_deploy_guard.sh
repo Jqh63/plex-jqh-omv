@@ -17,14 +17,18 @@ none() { if [ -s "$1" ]; then echo "  FAIL $2 (ssh calls: $(tr '\n' ' ' < "$1"))
 
 G() { git -c user.name=bench -c user.email=bench@example.invalid -c init.defaultBranch=main "$@"; }
 
-# Stub ssh: records the route, always succeeds (venvs in sync). Drains stdin
-# on push-* only: the other routes get none and would block on an open stdin.
+# Stub ssh: records the route, always succeeds (venvs in sync), answers the
+# byte count deploy.sh checks. Reads stdin on push-* only: the other routes
+# get none and would block on an open stdin.
 mkdir -p "$TMP/bin"
 cat > "$TMP/bin/ssh" <<'EOF'
 #!/usr/bin/env bash
 shift  # drop the alias
 echo "$*" >> "$SSH_CALLS"
-case "$1" in push-*) cat > /dev/null ;; esac
+case "$1" in
+  push-app|push-caddyfile) echo "[$1] OK ($(wc -c | tr -d ' ') bytes)" ;;
+  push-*) cat > /dev/null ;;
+esac
 exit 0
 EOF
 chmod +x "$TMP/bin/ssh"

@@ -47,6 +47,11 @@ jobs:
           tar xzf "$RUNNER_TEMP/$f" -C "$RUNNER_TEMP" caddy
           echo "CADDY=$RUNNER_TEMP/caddy" >> "$GITHUB_ENV"
 
+      # test_env_escrow.sh round-trips a real dump; without age it would SKIP,
+      # which the shell-bench step below counts as a failure.
+      - name: age (for the env-escrow bench)
+        run: sudo apt-get install -y --no-install-recommends age
+
       - name: pytest relay/tests
         run: python -m pytest -q relay/tests
 

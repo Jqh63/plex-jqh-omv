@@ -50,6 +50,8 @@
 #   - Creates user `deploy` (login shell /bin/bash, home /home/deploy)
 #   - Installs /etc/sudoers.d/deploy (mode 0440, validated by visudo)
 #   - Installs /opt/wol-relay/scripts/dispatch.sh (mode 0755, owner root)
+#   - Installs env-escrow.sh + age (routes env-manifest / env-dump); the
+#     recipients file /etc/env-escrow.recipients stays an admin gesture
 #   - Installs venv-run.sh + the initial venv locks (root-owned; routes venv-*,
 #     later locks arrive through push-lock-* / apply-locks)
 #   - Installs ~deploy/.ssh/authorized_keys with forced-command pointing
@@ -225,6 +227,23 @@ rm -f /opt/wol-relay/scripts/requirements-wol-relay.txt /opt/wol-relay/scripts/r
 install -d -m 0755 -o root -g root /var/log/venv-run
 install -d -m 0700 -o root -g root /var/lib/venv-run
 echo "[bootstrap] /opt/wol-relay/scripts/venv-run.sh + locks installed"
+
+# env-escrow.sh backs env-manifest/env-dump (pinned ENV_ESCROW alias). It needs
+# `age` and a recipients file this script does NOT write: which key may read
+# the VM's secrets is an admin decision, posed by hand.
+install -m 0755 -o root -g root "$SCRIPT_DIR/env-escrow.sh" /opt/wol-relay/scripts/env-escrow.sh
+if command -v age &>/dev/null; then
+  echo "[bootstrap] env-escrow.sh installed, age already present"
+else
+  DEBIAN_FRONTEND=noninteractive apt-get install -y age \
+    && echo "[bootstrap] env-escrow.sh installed, age installed" \
+    || echo "[bootstrap] WARN: age install failed — env-dump will refuse until it is installed"
+fi
+if [[ -s /etc/env-escrow.recipients ]]; then
+  echo "[bootstrap] /etc/env-escrow.recipients present (skip)"
+else
+  echo "[bootstrap] TODO: write the age PUBLIC key(s) to /etc/env-escrow.recipients (root, 0644) — env-dump refuses without it"
+fi
 
 # --- 4. ~deploy/.ssh/authorized_keys --------------------------------------
 install -d -m 0700 -o deploy -g deploy /home/deploy/.ssh

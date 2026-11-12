@@ -130,6 +130,7 @@ without flooding. The client-id is charset/length-constrained before logging
 | `systemd/caddy.service.d/wol-relay.conf` | `/etc/systemd/system/caddy.service.d/wol-relay.conf` | Drop-in that wires `EnvironmentFile=/etc/caddy/wol-relay.env` into the Caddy unit |
 | `scripts/dispatch.sh` | `/opt/wol-relay/scripts/dispatch.sh` (owner `root`, mode 0755) | Forced-command in `~deploy/.ssh/authorized_keys`, routes the SSH GitOps subcommands |
 | `scripts/sudoers.deploy` | `/etc/sudoers.d/deploy` (mode 0440) | Minimal sudoers for the `deploy` user: exact paths, no systemd unit, nothing from stdin runs as root |
+| `scripts/env-escrow.sh` | `/opt/wol-relay/scripts/env-escrow.sh` | Lists the secret files placed by hand on the VM (`env-manifest`: names, sizes, mtimes — never a value) and hands them over age-encrypted (`env-dump`, jobs key only). Needs `age` and `/etc/env-escrow.recipients` (age public keys, root-owned, written by the admin) |
 | `scripts/bootstrap-wol-relay.sh` | (run one-shot) | Installs the `deploy` user, sudoers, dispatch.sh, drop-in, systemd units, env templates, authorized_keys with forced-command |
 | `scripts/deploy.sh` | (run on the deploying host) | Pipes app.py + Caddyfile to the VM and triggers apply + health |
 

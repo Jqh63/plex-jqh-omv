@@ -8,7 +8,8 @@
 # is `dispatch.sh jobs`, admitting only the three verbs the jobs use.
 #
 # A. dispatch.sh role gate, run for real against a stub sudo:
-#    jobs role admits pock-dump / pat-receive / secrets-receive, refuses
+#    jobs role admits pock-dump / pat-receive / secrets-receive / env-dump /
+#    env-manifest, refuses
 #    everything else BEFORE any side effect; deploy role unchanged; an unknown
 #    role is refused; the deploy key no longer has the 3 backup verbs (step 3)
 #    but keeps the restore verbs.
@@ -55,6 +56,12 @@ if run jobs pock-dump </dev/null && grep -qxF -- '/usr/bin/tar -C /var/lib/pock-
   ok "jobs: pock-dump runs the pinned tar"
 else ko "jobs: pock-dump refused: $(cat "$tmp/out")"; fi
 
+for c in env-dump env-manifest; do
+  if run jobs "$c" </dev/null && grep -qxF -- "/opt/wol-relay/scripts/env-escrow.sh ${c#env-}" "$tmp/sudo.log"; then
+    ok "jobs: $c runs the pinned env-escrow verb"
+  else ko "jobs: $c refused: $(cat "$tmp/out")"; fi
+done
+
 for c in apply push-app health status secrets-dump-latest pat-dump-latest secrets-list \
          "pat-receive monthly" "pat-receive daily;id" "pock-dump " upgrade tunnel-reap ""; do
   blob | run jobs "$c"; rc=$?
@@ -70,7 +77,10 @@ echo 'print(1)' > "$tmp/app.py"
 if run "" push-app < "$tmp/app.py" && grep -q 'push-app\] OK' "$tmp/out"; then
   ok "deploy: push-app still accepted"
 else ko "deploy: push-app refused: $(cat "$tmp/out")"; fi
-for c in pock-dump "pat-receive daily" "pat-receive weekly" "secrets-receive daily" "secrets-receive weekly"; do
+if run "" env-manifest </dev/null && grep -qxF -- '/opt/wol-relay/scripts/env-escrow.sh manifest' "$tmp/sudo.log"; then
+  ok "deploy: env-manifest accepted (names only)"
+else ko "deploy: env-manifest refused: $(cat "$tmp/out")"; fi
+for c in pock-dump "pat-receive daily" "pat-receive weekly" "secrets-receive daily" "secrets-receive weekly" env-dump; do
   blob | run "" "$c"; rc=$?
   if [ "$rc" -eq 64 ] && [ -z "$(side_effects)" ]; then
     ok "deploy: '$c' reserved to the jobs key (64), no side effect"

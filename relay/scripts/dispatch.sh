@@ -63,6 +63,11 @@
 #   ssh wol-relay-deploy secrets-list            # list stored blobs (read-only)
 #   ssh wol-relay-deploy secrets-dump-latest     # newest blob → stdout (restore path, read-only)
 #
+# env-escrow (the secret files placed BY HAND on this VM — the escrow in the
+# other direction, VM → home; script and rationale in env-escrow.sh):
+#   ssh wol-relay-deploy env-manifest            # names + sizes + mtimes, never a value (read-only)
+#   ssh wol-relay-deploy env-dump                # jobs key only: tar | age → stdout (read-only)
+#
 # reverse-SSH out-of-band fallback (knowledge-base ADR 2026-06-05 — the
 # endpoint the admin uses when the home server's WireGuard container is down):
 #   ssh wol-relay-deploy tunnel-status           # listener + omvtunnel sessions (read-only)
@@ -80,10 +85,10 @@
 #
 # Key roles (knowledge-base BACKLOG finding F7, 2026-10-02). The forced
 # command in authorized_keys passes the role as $1, never the client:
-#   (none)  the deploy key — every route below EXCEPT pock-dump, pat-receive
-#           and secrets-receive (refused since step 3, 2026-10-02).
-#   jobs    the home server's ROOT backup jobs — only pock-dump, pat-receive
-#           and secrets-receive. Same unix user, distinct key: the deploy key
+#   (none)  the deploy key — every route below EXCEPT pock-dump, pat-receive,
+#           secrets-receive (refused since step 3, 2026-10-02) and env-dump.
+#   jobs    the home server's ROOT backup jobs — only pock-dump, pat-receive,
+#           secrets-receive, env-dump and env-manifest. Same unix user, distinct key: the deploy key
 #           also sits in the home server's code-server sandbox, which must not
 #           be able to push fake blobs and rotate the real backups away.
 #
@@ -103,7 +108,7 @@ case "${1:-}" in
     # Step 3 of F7: the backup verbs belong to the jobs key alone. The restore
     # verbs (*-dump-latest, *-list) stay here: they only read.
     case "${SSH_ORIGINAL_COMMAND:-}" in
-      pock-dump|"pat-receive "*|"secrets-receive "*)
+      pock-dump|"pat-receive "*|"secrets-receive "*|env-dump)
         echo "dispatch.sh: '${SSH_ORIGINAL_COMMAND}' is reserved to the jobs key" >&2
         exit 64
         ;;
@@ -111,10 +116,10 @@ case "${1:-}" in
     ;;
   jobs)
     case "${SSH_ORIGINAL_COMMAND:-}" in
-      pock-dump|"pat-receive daily"|"pat-receive weekly"|"secrets-receive daily"|"secrets-receive weekly") ;;
+      pock-dump|"pat-receive daily"|"pat-receive weekly"|"secrets-receive daily"|"secrets-receive weekly"|env-dump|env-manifest) ;;
       *)
         echo "dispatch.sh[jobs]: command not allowed for this key: '${SSH_ORIGINAL_COMMAND:-}'" >&2
-        echo "Expected: pock-dump, pat-receive {daily,weekly}, secrets-receive {daily,weekly}." >&2
+        echo "Expected: pock-dump, pat-receive {daily,weekly}, secrets-receive {daily,weekly}, env-dump, env-manifest." >&2
         exit 64
         ;;
     esac
@@ -405,6 +410,18 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
     # and feeds it to its regular backup. Never prints the token.
     sudo /usr/bin/tar -C /var/lib/pock-sync -cf - .
     ;;
+  env-manifest)
+    # Read-only: which hand-placed secret files exist on this VM (names, sizes,
+    # mtimes — never a value), plus every other non-world-readable file, so an
+    # unlisted secret shows up. Root script pinned in sudoers.
+    sudo /opt/wol-relay/scripts/env-escrow.sh manifest
+    ;;
+  env-dump)
+    # Read-only, jobs key only: the hand-placed secret files, tarred and
+    # age-encrypted ON THIS VM for a key that lives off it. The home server
+    # pulls it into its regular backup; the channel never carries plaintext.
+    sudo /opt/wol-relay/scripts/env-escrow.sh dump
+    ;;
   "pat-receive daily"|"pat-receive weekly")
     # Off-site patrimoine backup: the home server PUSHES an age-encrypted
     # blob on stdin. Public-key encryption — the private key never leaves
@@ -540,6 +557,7 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
     echo "          pat-receive {daily,weekly}, pat-list, pat-dump-latest," >&2
     echo "          secrets-receive {daily,weekly}, secrets-list, secrets-dump-latest," >&2
     echo "          push-lock-wol-relay, push-lock-pock-sync, apply-locks, venv-versions, venv-upgrade, venv-upgrade-log," >&2
+    echo "          env-manifest, env-dump (jobs key)," >&2
     echo "          tunnel-status, tunnel-reap." >&2
     exit 64
     ;;

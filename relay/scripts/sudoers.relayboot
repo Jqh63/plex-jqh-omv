@@ -1,0 +1,14 @@
+# /etc/sudoers.d/relayboot — relay VM.
+#
+# Source: relay/scripts/sudoers.relayboot in this repo.
+#
+# ONE verb for the `relayboot` account: rerun the bootstrap from an approved
+# commit (see bootstrap-pull.sh header). Kept OUT of sudoers.deploy on purpose:
+# the `deploy` user — whose key also lives in a less trusted sandbox — must
+# have no right on a script that reinstalls root-owned files.
+#
+# The trailing "" pins the argument-less form: the internal `--run` phase is
+# not reachable from here. env_reset + !setenv: no variable set by the caller
+# reaches the script (its test seams are environment variables).
+Defaults:relayboot env_reset, !setenv
+relayboot ALL=(root) NOPASSWD: /opt/wol-relay/scripts/bootstrap-pull.sh ""

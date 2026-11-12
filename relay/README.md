@@ -134,6 +134,7 @@ without flooding. The client-id is charset/length-constrained before logging
 | `scripts/bootstrap-wol-relay.sh` | (run one-shot) | Installs the `deploy` user, sudoers, dispatch.sh, drop-in, systemd units, env templates, authorized_keys with forced-command |
 | `scripts/deploy.sh` | (run on the deploying host) | Pipes app.py + Caddyfile to the VM and triggers apply + health |
 | `scripts/scripts-drift.sh` | (run on the deploying host) | Read-only: compares `ssh wol-relay-deploy scripts-manifest` (sha256 of the root-installed scripts) to `origin/main` — `0` in sync, `2` bootstrap to rerun, `3` unmeasured |
+| `scripts/bootstrap-pull.sh` + `scripts/sudoers.relayboot` | `/opt/wol-relay/scripts/`, `/etc/sudoers.d/relayboot` | Remote rerun of the bootstrap. The home server's root sends ONE commit id to the dedicated `relayboot` account (forced command, own sudoers, never the `deploy` user); the script fetches that commit of `main` itself, refuses anything not in main's history, older than its floor or older than the installed commit (never backwards), preflights the tree, then reruns `bootstrap-wol-relay.sh --keep-keys` detached. Outcome: `ssh wol-relay-deploy bootstrap-log`. First provisioning and a rebuilt VM still take the manual bootstrap. |
 
 ## Configuration model
 

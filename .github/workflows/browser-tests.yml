@@ -1,0 +1,94 @@
+name: Browser tests
+
+# The Playwright suites in tests/ guard what the family actually sees on the
+# PWA. Until 2026-11-12 nothing ran them but a person who remembered to.
+#
+# Reports, does not block: branch protection is not available on this plan.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  # Same Playwright as the workstation the suites are written on.
+  PLAYWRIGHT_VERSION: 1.60.0
+
+jobs:
+  # One runner per long suite: sequentially they add up to ~12 min.
+  long:
+    name: ${{ matrix.suite }}
+    # Pinned: Playwright 1.60.0 cannot install browsers on ubuntu 26.04.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [cold-radio-e2e, wake-e2e, flaky-net-sim, paint-journal-e2e]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.11'
+      - name: Playwright + engines
+        run: |
+          python -m pip install --quiet "playwright==${PLAYWRIGHT_VERSION}"
+          python -m playwright install --with-deps chromium webkit
+      - name: ${{ matrix.suite }}
+        run: |
+          set +e
+          out="$(python "tests/${{ matrix.suite }}.py" 2>&1)"; rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" -ne 0 ] || grep -qE '^[[:space:]]*\[?SKIP' <<<"$out"; then
+            echo "::error::${{ matrix.suite }} failed or skipped (rc=$rc)"; exit 1
+          fi
+
+  short:
+    name: short suites
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.11'
+      - name: Playwright + engines
+        run: |
+          python -m pip install --quiet "playwright==${PLAYWRIGHT_VERSION}"
+          python -m playwright install --with-deps chromium webkit
+      - name: Every other file in tests/
+        run: |
+          set +e
+          # fallback-e2e needs a secure context for its clipboard rows.
+          python -m http.server 8123 --bind 127.0.0.1 >/dev/null 2>&1 &
+          srv=$!
+          long='cold-radio-e2e wake-e2e flaky-net-sim paint-journal-e2e'
+          fails=0; ran=0
+          for t in tests/*.py; do
+            n="$(basename "$t" .py)"
+            case "$n" in browser_guard) continue ;; esac   # a module, not a suite
+            case " $long " in *" $n "*) continue ;; esac
+            echo "::group::$n"
+            s=$(date +%s)
+            if [ "$n" = fallback-e2e ]; then
+              out="$(PWA_BASE=http://127.0.0.1:8123/ timeout 600 python "$t" 2>&1)"; rc=$?
+            else
+              out="$(timeout 600 python "$t" 2>&1)"; rc=$?
+            fi
+            printf '%s\n' "$out"
+            echo "::endgroup::"
+            echo "RESULT $n rc=$rc duration_s=$(( $(date +%s) - s ))"
+            ran=$((ran + 1))
+            # A SKIP proves nothing: every precondition is provided here.
+            if [ "$rc" -ne 0 ] || grep -qE '^[[:space:]]*\[?SKIP' <<<"$out"; then
+              echo "::error::$n failed or skipped (rc=$rc)"; fails=$((fails + 1))
+            fi
+          done
+          kill "$srv" 2>/dev/null
+          echo "ran=$ran failed=$fails"
+          # An empty loop must not read as green.
+          [ "$ran" -ge 10 ] || { echo "::error::only $ran suites ran"; exit 1; }
+          [ "$fails" -eq 0 ]

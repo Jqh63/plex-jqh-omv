@@ -56,6 +56,17 @@ else
   [ -z "$dirty" ] || refuse "tracked files edited under relay/: $(tr '\n' ' ' <<<"$dirty")"
 fi
 
+# push <route> <file>: send, then check the VM counted the bytes we sent. A
+# push cut short still ends in a clean end-of-file on the VM side; the byte
+# count is the one thing that tells a whole file from a truncated one.
+push() {
+  local out want got
+  want="$(wc -c < "$2" | tr -d ' ')"
+  out="$(ssh "$ALIAS" "$1" < "$2")"; printf '%s\n' "$out"
+  got="$(sed -n 's/.*OK (\([0-9][0-9]*\) bytes).*/\1/p' <<<"$out")"
+  [ "$got" = "$want" ] || { echo "[deploy] FAIL — $1: VM staged '${got:-?}' bytes, sent $want. Nothing applied." >&2; exit 1; }
+}
+
 echo "[deploy] push venv locks ..."
 ssh "$ALIAS" push-lock-wol-relay < "$REPO_DIR/scripts/requirements-wol-relay.lock"
 ssh "$ALIAS" push-lock-pock-sync < "$REPO_DIR/scripts/requirements-pock-sync.lock"
@@ -83,10 +94,10 @@ case "$vrc" in
 esac
 
 echo "[deploy] push app.py ..."
-ssh "$ALIAS" push-app < "$REPO_DIR/app.py"
+push push-app "$REPO_DIR/app.py"
 
 echo "[deploy] push Caddyfile ..."
-ssh "$ALIAS" push-caddyfile < "$REPO_DIR/Caddyfile"
+push push-caddyfile "$REPO_DIR/Caddyfile"
 
 echo "[deploy] apply ..."
 ssh "$ALIAS" apply

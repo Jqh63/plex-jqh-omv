@@ -13,6 +13,7 @@
 #   ssh wol-relay-deploy push-window       # stdin (1 line HH:MM-HH:MM) → staging
 #   ssh wol-relay-deploy apply-window      # install /opt/wol-relay/window (hot, no restart)
 #   ssh wol-relay-deploy status            # systemctl is-active wol-relay caddy
+#   ssh wol-relay-deploy scripts-manifest  # sha256 of the root-installed scripts (bootstrap done? see scripts-drift.sh)
 #   ssh wol-relay-deploy health            # curl http://127.0.0.1:8000/health
 #   ssh wol-relay-deploy logs-wol-relay [500|3000]  # journalctl tail, read-only
 #                                          #   (defaut 100 lignes ~= 5 jours)
@@ -131,6 +132,8 @@ case "${1:-}" in
 esac
 
 STAGING_DIR="/tmp/wol-relay-staging"
+CADDYFILE_LIVE="/etc/caddy/Caddyfile"
+SCRIPTS_DIR="/opt/wol-relay/scripts"
 mkdir -p "$STAGING_DIR"
 # /tmp is shared: root installs whatever sits here (sudoers pins the paths), so
 # a directory squatted by another local user would let them swap the files
@@ -150,6 +153,16 @@ fi
 journal_banner() { # <unit> [line count, default 100]
   printf '=== journalctl -u %s (last %s) — VM clock %s | Europe/Paris %s ===\n' \
     "$1" "${2:-100}" "$(date '+%H:%M %Z')" "$(TZ=Europe/Paris date '+%H:%M %Z')"
+}
+
+# An apply-* route empties what it consumed, WHATEVER its outcome: a staged
+# file left behind would be installed by a later bare `apply` — stale, or
+# truncated by a push whose connection dropped (the remote `cat` sees a plain
+# end of file either way). No fresh push ⇒ "missing", never a silent leftover.
+purge_staged_on_exit() { # <file>...
+  local f; PURGE=()
+  for f in "$@"; do PURGE+=("$STAGING_DIR/$f"); done
+  trap 'rm -f -- "${PURGE[@]}"' EXIT
 }
 
 case "${SSH_ORIGINAL_COMMAND:-}" in
@@ -203,14 +216,36 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
         exit 1
       fi
     done
+    purge_staged_on_exit app.py Caddyfile Caddyfile.prev
+    # Keep the live Caddyfile: a reload that refuses the new one leaves Caddy
+    # running on the old config, but the bad file would sit in /etc/caddy and
+    # take the site down at the next restart. Put the previous one back through
+    # the same pinned install (no new sudoers entry).
+    cp "$CADDYFILE_LIVE" "$STAGING_DIR/Caddyfile.prev" 2>/dev/null || rm -f "$STAGING_DIR/Caddyfile.prev"
     sudo /usr/bin/install -o wol -g wol -m 0644 "$STAGING_DIR/app.py" /opt/wol-relay/app.py
     sudo /usr/bin/install -m 0644 "$STAGING_DIR/Caddyfile" /etc/caddy/Caddyfile
     sudo /bin/systemctl restart wol-relay
-    sudo /bin/systemctl reload caddy
+    if ! sudo /bin/systemctl reload caddy; then
+      if [[ -s "$STAGING_DIR/Caddyfile.prev" ]]; then
+        mv "$STAGING_DIR/Caddyfile.prev" "$STAGING_DIR/Caddyfile"
+        sudo /usr/bin/install -m 0644 "$STAGING_DIR/Caddyfile" /etc/caddy/Caddyfile
+        echo "[apply] FAIL — caddy refused the new Caddyfile: previous one rolled back, caddy still on the old config (wol-relay WAS restarted on the new app.py). See: logs-caddy" >&2
+      else
+        echo "[apply] FAIL — caddy refused the new Caddyfile and no previous one could be read: /etc/caddy/Caddyfile is the refused file. See: logs-caddy" >&2
+      fi
+      exit 1
+    fi
     echo "[apply] OK — wol-relay restarted, caddy reloaded"
     ;;
   status)
     /bin/systemctl is-active wol-relay caddy
+    ;;
+  scripts-manifest)
+    # READ: sha256 of the root-installed scripts. Merging a change to one of
+    # them changes nothing here until bootstrap-wol-relay.sh is rerun on the
+    # VM; relay/scripts/scripts-drift.sh compares this list to origin/main.
+    # sudoers.deploy is not listed: /etc/sudoers.d is root-only by design.
+    cd "$SCRIPTS_DIR" && sha256sum -- *.sh
     ;;
   health)
     /usr/bin/curl -fsS http://127.0.0.1:8000/health
@@ -368,6 +403,7 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
       echo "[apply-home-watch] FAIL — $STAGING_DIR/home-watch.sh missing or empty. Run push-home-watch first." >&2
       exit 1
     fi
+    purge_staged_on_exit home-watch.sh
     sudo /usr/bin/install -o homewatch -g homewatch -m 0755 "$STAGING_DIR/home-watch.sh" /opt/home-watch/home-watch.sh
     sudo /bin/systemctl enable --now home-watch.timer
     echo "[apply-home-watch] OK — home-watch.timer enabled"
@@ -392,6 +428,7 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
       echo "[apply-pock-sync] FAIL — $STAGING_DIR/pock-sync-app.py missing or empty. Run push-pock-sync-app first." >&2
       exit 1
     fi
+    purge_staged_on_exit pock-sync-app.py
     sudo /usr/bin/install -o pock -g pock -m 0644 "$STAGING_DIR/pock-sync-app.py" /opt/pock-sync/app.py
     sudo /bin/systemctl restart pock-sync
     echo "[apply-pock-sync] OK — pock-sync restarted"
@@ -551,7 +588,7 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
     ;;
   *)
     echo "dispatch.sh: unknown command '${SSH_ORIGINAL_COMMAND:-}'" >&2
-    echo "Expected: push-app, push-caddyfile, apply, push-window, apply-window, status, health, logs-wol-relay [500|3000], logs-caddy [500|3000], log-footprint, upgrade-watch, upgrade, upgrade-log, port-audit <host>.duckdns.org," >&2
+    echo "Expected: push-app, push-caddyfile, apply, push-window, apply-window, status, scripts-manifest, health, logs-wol-relay [500|3000], logs-caddy [500|3000], log-footprint, upgrade-watch, upgrade, upgrade-log, port-audit <host>.duckdns.org," >&2
     echo "          push-home-watch, apply-home-watch, home-watch-status, logs-home-watch," >&2
     echo "          push-pock-sync-app, apply-pock-sync, pock-sync-status, logs-pock-sync, pock-dump," >&2
     echo "          pat-receive {daily,weekly}, pat-list, pat-dump-latest," >&2

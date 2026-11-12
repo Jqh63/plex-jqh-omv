@@ -133,6 +133,7 @@ without flooding. The client-id is charset/length-constrained before logging
 | `scripts/env-escrow.sh` | `/opt/wol-relay/scripts/env-escrow.sh` | Lists the secret files placed by hand on the VM (`env-manifest`: names, sizes, mtimes — never a value) and hands them over age-encrypted (`env-dump`, jobs key only). Needs `age` and `/etc/env-escrow.recipients` (age public keys, root-owned, written by the admin) |
 | `scripts/bootstrap-wol-relay.sh` | (run one-shot) | Installs the `deploy` user, sudoers, dispatch.sh, drop-in, systemd units, env templates, authorized_keys with forced-command |
 | `scripts/deploy.sh` | (run on the deploying host) | Pipes app.py + Caddyfile to the VM and triggers apply + health |
+| `scripts/scripts-drift.sh` | (run on the deploying host) | Read-only: compares `ssh wol-relay-deploy scripts-manifest` (sha256 of the root-installed scripts) to `origin/main` — `0` in sync, `2` bootstrap to rerun, `3` unmeasured |
 
 ## Configuration model
 
@@ -235,6 +236,11 @@ bash relay/scripts/deploy.sh
 It deploys only what is merged: it fetches, then refuses (exit 4, nothing
 sent) unless `HEAD` is exactly `origin/main` with no tracked edit under
 `relay/`. Emergency override: `DEPLOY_ALLOW_UNMERGED=1`.
+
+Staging integrity: `deploy.sh` checks the byte count the VM reports for each
+push against what it sent; every `apply-*` route empties the staged files it
+consumed, whatever the outcome (a bare `apply` never installs a leftover); and
+a Caddyfile that Caddy refuses to reload is replaced by the previous one.
 
 The script pipes `app.py` and `Caddyfile` over stdin to the VM-side
 `dispatch.sh`, then triggers `apply` (install + `restart wol-relay` +
